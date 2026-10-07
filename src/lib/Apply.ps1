@@ -1,4 +1,4 @@
-# Apply.ps1 - slot sequencing, enforcement phase and exit code of -Apply, account model v10
+# Apply.ps1 - slot sequencing, enforcement phase and exit code of -Apply, account model v10.3
 # (docs/PLAN.md sections 6 steps 6-11, 7.5, 8, D7-D9, D11, D13, D16-D18, D20-D25; docs/dev/CONTRACTS.md
 # "Apply.ps1 and the entry point" and "v10: account model").
 # Secrets are SecureStrings. They are handed to the building blocks as -Secret/-OldSecret/-NewSecret and are
@@ -71,11 +71,17 @@ function Find-CrApplyUser {
     return $null
 }
 
+# Local user by name, case-insensitive. A 'X\' prefix (computer, '.', stale computer name, e.g. in DefaultUserName)
+# is ignored, like Find-CrAutoLogonLocalUser: these are standalone workgroup machines.
 function Find-CrApplyUserByName {
     param($State, [string]$Name)
     if (-not $Name) { return $null }
+    $n = $Name.Trim()
+    $i = $n.LastIndexOf('\')
+    if ($i -ge 0) { $n = $n.Substring($i + 1) }
+    if (-not $n) { return $null }
     foreach ($u in (ConvertTo-CrArray $State['Users'])) {
-        if ($u -is [hashtable] -and [string]$u['Name'] -ieq $Name) { return $u }
+        if ($u -is [hashtable] -and [string]$u['Name'] -ieq $n) { return $u }
     }
     return $null
 }
@@ -119,36 +125,22 @@ function Get-CrApplyEntryAccountSid {
     return $null
 }
 
-# The managed entry that runs the application's dependents (Services/ScheduledTasks/ComPlus = 'Auto'): the target
-# for dependents of retired accounts without a replacement when the operator chooses "move" (D24).
+# The application account (ApplicationUser): the managed entry that replaces accounts (Test-CrAppUserEntry, Plan.ps1).
+# Dependents of retired accounts without a replacement move there when the operator chooses "move" (D24, O5).
 function Get-CrApplyAppUserEntry {
     param($Resolved)
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
-        if (-not (Test-CrApplyManagedEntry $e)) { continue }
-        foreach ($k in @('Services', 'ScheduledTasks', 'ComPlus')) {
-            if (Test-CrApplyManaged $e['Config'] $k) { return $e }
-        }
+        if ((Test-CrApplyManagedEntry $e) -and (Test-CrAppUserEntry $e)) { return $e }
     }
     return $null
 }
 
-# The operator account (D25): the managed entry that replaces the running account, else the managed entry whose
-# role puts it into Administrators and Remote Desktop Users (SOP-Admin).
+# The operator's account (D25): the managed entry marked Operator (BiCA Remote).
 function Get-CrApplyOperatorEntry {
-    param($Resolved, [string]$RunningSid)
-    if ($RunningSid) {
-        foreach ($e in (ConvertTo-CrArray $Resolved)) {
-            if (-not (Test-CrApplyManagedEntry $e)) { continue }
-            foreach ($r in (ConvertTo-CrArray $e['Replaced'])) {
-                if ($r -is [hashtable] -and [string]$r['Sid'] -eq $RunningSid) { return $e }
-            }
-        }
-    }
+    param($Resolved)
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
         if (-not (Test-CrApplyManagedEntry $e)) { continue }
-        $groups = @()
-        if ($e['Role'] -is [hashtable]) { $groups = ConvertTo-CrArray $e['Role']['Groups'] }
-        if (($groups -contains 'S-1-5-32-544') -and ($groups -contains 'S-1-5-32-555')) { return $e }
+        if ($e['Operator'] -eq $true -or (($e['Config'] -is [hashtable]) -and $e['Config']['Operator'] -eq $true)) { return $e }
     }
     return $null
 }
@@ -327,6 +319,15 @@ function Add-CrApplyCreatedUser {
 function Invoke-CrApplyLogonTest {
     param($Context, $Item, [System.Security.SecureString]$Secret)
     $r = @{ Ok = $false; Skipped = $false; Failed = $false; Message = $null }
+    # A disabled account (D21: it stays disabled) refuses every logon with 1331, which proves nothing about the password
+    # until spike item 2 says otherwise (PLAN 8 "Verification"); no attempt is made.
+    $u = $Item['User']
+    if (($u -is [hashtable]) -and $u['Disabled']) {
+        $r['Skipped'] = $true
+        $r['Disabled'] = $true
+        $r['Message'] = 'Password set; the account is disabled, so it cannot be verified with a logon (D21)'
+        return $r
+    }
     $sel = Select-CrProbeLogonType -UserSid $Item['Sid'] -State $Context['State']
     $type = $null
     if ($sel -is [hashtable] -and -not $sel['Fallback'] -and $sel['LogonType'] -and [string]$sel['LogonType'] -ne 'Unverifiable') { $type = [string]$sel['LogonType'] }
@@ -481,7 +482,7 @@ function Copy-CrApplyDecision {
     return $c
 }
 
-# The slot of the entry that carries the AutoLogon block (PUB-User, PLAN 5).
+# The slot of the entry that carries the AutoLogon block (PUB-User / WinAutoUser, PLAN 5).
 function Get-CrApplyAutoLogonSlot {
     param($Resolved)
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
@@ -573,6 +574,7 @@ function Get-CrApplyPathText {
     elseif ($p -eq 'Skip') { $text = 'Skip: ' + $Account['Reason'] }
     if ($Account['Unlock']) { $text = 'Unlock, then ' + $text }
     if ($Account['Enable']) { $text = $text + '; enable the account' }
+    if ($Account['StaysDisabled']) { $text = $text + '; the account stays disabled (D21)' }
     return $text
 }
 
@@ -654,13 +656,15 @@ function Get-CrApplyPreview {
                 } elseif ($mode -eq 'Change') {
                     $path = Get-CrApplyAccountPath -Probe $probe -SecretAccount $sa
                 }
-                $enable = [bool](-not $toCreate -and ($user -is [hashtable]) -and $user['Disabled'] -and $path['Path'] -ne 'Skip')
+                # D21: only an entry with EnableIfDisabled (ApplicationUser) is enabled; other accounts stay disabled.
+                $isDisabled = [bool](-not $toCreate -and ($user -is [hashtable]) -and $user['Disabled'] -and $path['Path'] -ne 'Skip')
+                $enable = [bool]($isDisabled -and $e['EnableIfDisabled'])
                 $outcome = $null
                 if ($probe -is [hashtable]) { $outcome = [string]$probe['Outcome'] }
                 [void]$accounts.Add(@{
                     Name = [string]$acct['Name']; Sid = $sid; UserName = $userName; User = $user; Entry = $e; PasswordMode = $mode
                     Probe = $probe; Outcome = $outcome; SecretAccount = $sa; Path = $path['Path']; Unlock = $path['Unlock']
-                    Enable = $enable; Reason = $path['Reason']
+                    Enable = $enable; StaysDisabled = [bool]($isDisabled -and -not $enable); Reason = $path['Reason']
                 })
             }
         }
@@ -691,6 +695,10 @@ function Get-CrApplyDisablePlan {
     $seen = New-Object System.Collections.ArrayList
     $appEntry = Get-CrApplyAppUserEntry -Resolved $Resolved
     $onlyGiven = Test-CrApplyOnlyGiven $Only
+    # PLAN 6 step 2, D24: without the services, tasks or COM+ discovery the dependents are unknown; nothing is disabled.
+    $depErrors = Get-CrDependentDiscoveryErrors -State $State
+    $depUnknown = $null
+    if ($depErrors.Count -gt 0) { $depUnknown = 'stays enabled: its dependents are unknown (discovery failed: ' + ($depErrors -join '; ') + ')' }
 
     $candidates = New-Object System.Collections.ArrayList
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
@@ -769,6 +777,11 @@ function Get-CrApplyDisablePlan {
                     if (-not $item['Decision']) { $item['Reason'] = 'operator decision needed: move its dependents to the application account or keep the account enabled (D24)' }
                 }
             }
+        }
+        if ($depUnknown -and ($item['Planned'] -or $item['NeedsDecision'])) {
+            $item['Planned'] = $false
+            $item['NeedsDecision'] = $false
+            $item['Reason'] = $depUnknown
         }
         [void]$items.Add($item)
     }
@@ -891,6 +904,18 @@ function Invoke-CrApplyCreateStep {
         return
     }
     $user = Add-CrApplyCreatedUser -State $Context['State'] -Name $name -Sid $sid
+    # NetUserAdd puts the new account into groups of its own (e.g. Users); re-read the memberships so the grants step
+    # and the exclusive-group removals see them.
+    try {
+        $groups = Get-CrLocalGroups
+        if ((ConvertTo-CrArray $groups).Count -gt 0) { $Context['State']['Groups'] = $groups }
+    } catch {
+        Add-CrApplyFinding $Context 'Info' 'Groups' 'The group memberships could not be re-read after creating the account; a re-run removes extra groups' $Slot $name $_.Exception.Message
+    }
+    $sql = $Context['State']['Sql']
+    if (($sql -is [hashtable]) -and $sql['DefaultInstancePresent']) {
+        Add-CrApplyFinding $Context 'Info' 'SQL' 'The created account has a new SID, so it has no Windows login in SQL Server (reported, PLAN 1.1)' $Slot $name
+    }
     $Item['Sid'] = $sid
     $Item['User'] = $user
     $Item['UserName'] = $name
@@ -903,6 +928,29 @@ function Invoke-CrApplyCreateStep {
     Add-CrApplyJournalStep $Context $sid 'Secret'
     [void]$Item['DoneSteps'].Add('Create')
     Add-CrApplyFinding $Context 'Info' 'Accounts' 'Account created with the slot password (D21)' $Slot $name
+}
+
+# PLAN 8 step 2 ("test each new secret"): when a slot stops after its password step, the accounts already on the new
+# password are still verified, so the auto-logon step and the dependent moves can use them (e.g. the first of two
+# auto-logon accounts when the second one failed).
+function Invoke-CrApplyVerifyOnNew {
+    param($Context, $Items, [System.Security.SecureString]$NewSecret, [string]$Slot)
+    foreach ($it in $Items) {
+        $sid = [string]$it['Sid']
+        if (-not $sid -or ($Context['Verified'] -contains $sid) -or ($Context['OnNew'] -notcontains $sid)) { continue }
+        try {
+            $t = Invoke-CrApplyLogonTest -Context $Context -Item $it -Secret $NewSecret
+            if ($t['Ok']) {
+                Add-CrApplySid $Context['Verified'] $sid
+                Add-CrApplyFinding $Context 'Info' 'Verify' $t['Message'] $Slot $it['Name']
+                Add-CrApplyJournalStep $Context $sid 'Verified'
+            } else {
+                Add-CrApplyFinding $Context 'Info' 'Verify' ([string]$t['Message']) $Slot $it['Name']
+            }
+        } catch {
+            Add-CrApplyFinding $Context 'Info' 'Verify' ('The logon test failed: ' + $_.Exception.Message) $Slot $it['Name']
+        }
+    }
 }
 
 # Steps for the accounts of one slot. Modifies $Result; returns nothing.
@@ -1017,9 +1065,12 @@ function Invoke-CrApplySlotSteps {
             break
         }
     }
-    if ($errors.Count -gt 0) { Stop-CrApplySlot $Context $Result $Items 'Secret' $errors; return }
+    if ($errors.Count -gt 0) {
+        Invoke-CrApplyVerifyOnNew -Context $Context -Items $Items -NewSecret $NewSecret -Slot $slot
+        Stop-CrApplySlot $Context $Result $Items 'Secret' $errors; return
+    }
 
-    # 3 enable a managed account that exists but is disabled (CONTRACTS v10 "Accounts.ps1").
+    # 3 enable an existing disabled account of an entry with EnableIfDisabled (ApplicationUser; PLAN 1.1, D21).
     foreach ($it in $Items) {
         if (-not $it['Enable']) { continue }
         try {
@@ -1036,7 +1087,10 @@ function Invoke-CrApplySlotSteps {
             [void]$errors.Add(('{0}: enabling the account failed: {1}' -f $it['Name'], $_.Exception.Message))
         }
     }
-    if ($errors.Count -gt 0) { Stop-CrApplySlot $Context $Result $Items 'Enable' $errors; return }
+    if ($errors.Count -gt 0) {
+        Invoke-CrApplyVerifyOnNew -Context $Context -Items $Items -NewSecret $NewSecret -Slot $slot
+        Stop-CrApplySlot $Context $Result $Items 'Enable' $errors; return
+    }
 
     # 4 grants: flags (PNE/CCP/PR), target groups added, rights its own dependents need. Removals come later (PLAN 8).
     foreach ($it in $Items) {
@@ -1078,7 +1132,10 @@ function Invoke-CrApplySlotSteps {
             Add-CrApplyJournalStep $Context $sid 'Grants'
         }
     }
-    if ($errors.Count -gt 0) { Stop-CrApplySlot $Context $Result $Items 'Grants' $errors; return }
+    if ($errors.Count -gt 0) {
+        Invoke-CrApplyVerifyOnNew -Context $Context -Items $Items -NewSecret $NewSecret -Slot $slot
+        Stop-CrApplySlot $Context $Result $Items 'Grants' $errors; return
+    }
 
     # 5 own dependents: SCM -> tasks -> COM+, never restarted (D17). Every account's dependents are attempted.
     foreach ($it in $Items) {
@@ -1125,7 +1182,10 @@ function Invoke-CrApplySlotSteps {
             Add-CrApplyJournalStep $Context $sid 'Dependents'
         }
     }
-    if ($errors.Count -gt 0) { Stop-CrApplySlot $Context $Result $Items 'Dependents' $errors; return }
+    if ($errors.Count -gt 0) {
+        Invoke-CrApplyVerifyOnNew -Context $Context -Items $Items -NewSecret $NewSecret -Slot $slot
+        Stop-CrApplySlot $Context $Result $Items 'Dependents' $errors; return
+    }
 
     # 6 verify: one logon test per account with the D16 type; an unverifiable account is reported (Info), not failed.
     foreach ($it in $Items) {
@@ -1141,8 +1201,10 @@ function Invoke-CrApplySlotSteps {
                 Add-CrApplyJournalStep $Context $it['Sid'] 'Verified'
             } elseif ($Context['Verified'] -contains $it['Sid']) {
                 Add-CrApplyFinding $Context 'Info' 'Verify' ($t['Message'] + '; the credential probe already logged on with it') $slot $it['Name']
+            } elseif ($t['Disabled']) {
+                Add-CrApplyFinding $Context 'Info' 'Verify' $t['Message'] $slot $it['Name']
             } else {
-                Add-CrApplyFinding $Context 'Info' 'Verify' ($t['Message'] + '. Accounts it replaces stay enabled (D22).') $slot $it['Name']
+                Add-CrApplyFinding $Context 'Info' 'Verify' ($t['Message'] + '. Accounts it replaces stay enabled and the auto-logon is not written for it (D22, PLAN 7.5).') $slot $it['Name']
             }
             [void]$it['DoneSteps'].Add('Verify')
         } catch {
@@ -1424,15 +1486,8 @@ function Invoke-CrApplyAutoLogonStep {
         Add-CrApplyFinding $Context 'Info' 'AutoLogon' 'Auto-logon settings could not be read; the auto-logon step was not run' 'AutoLogon'
         return $out
     }
-    # Accounts created in this run are in $State.Users by now; their names are passed too when they are verified.
-    $createdNames = New-Object System.Collections.ArrayList
-    foreach ($sid in $Context['Created']) {
-        if ($Context['Verified'] -notcontains $sid) { continue }
-        $u = Find-CrApplyUser -State $State -Sid $sid
-        if ($u) { [void]$createdNames.Add([string]$u['Name']) }
-    }
     $d = Get-CrAutoLogonDecision -State $State -Resolved $Context['Resolved'] -Config $Context['Config'] -VerifiedSids ($Context['Verified'].ToArray()) `
-        -RemovedAdminSids ($Context['RemovedAdmins'].ToArray()) -CreatedTargetNames ([string[]]$createdNames.ToArray([string]))
+        -RemovedAdminSids ($Context['RemovedAdmins'].ToArray())
     $out['Ran'] = $true
     $out['Decision'] = $d
     $detail = (ConvertTo-CrArray $d['Reasons']) -join '; '
@@ -1448,7 +1503,7 @@ function Invoke-CrApplyAutoLogonStep {
         }
         if (-not $pick -or ($opts -notcontains $pick)) { $pick = 'LeaveUnchanged' }
         Add-CrApplyFinding $Context 'Info' 'AutoLogon' ('Auto-logon: operator decision ' + $pick + ' (D13)') 'AutoLogon' $d['CurrentName'] $detail
-        if ($pick -eq 'TurnOff' -or $pick -eq 'StandardizeCurrent') {
+        if ($pick -eq 'TurnOff') {
             $exec = Copy-CrApplyDecision $d $pick
         } else {
             $out['Action'] = 'LeaveUnchanged'
@@ -1462,6 +1517,12 @@ function Invoke-CrApplyAutoLogonStep {
     } else {
         $out['Action'] = $action
         Add-CrApplyFinding $Context 'Info' 'AutoLogon' ('Auto-logon: ' + $action) 'AutoLogon' $d['CurrentName'] $detail
+        # PLAN 7.5: the kept account got a new password in this run but could not be verified, so the stored secret is
+        # not rewritten and no longer matches.
+        if ($action -eq 'NoChange' -and $d['CurrentSid'] -and ($Context['Changed'] -contains $d['CurrentSid']) -and
+            ($Context['Verified'] -notcontains $d['CurrentSid'])) {
+            Add-CrApplyFinding $Context 'HighImpact' 'AutoLogon' ('Auto-logon broken until re-run: ' + $d['CurrentName'] + ' has a new password that could not be verified with a logon, so the auto-logon secret was not rewritten; each boot costs one failed logon') 'AutoLogon' $d['CurrentName']
+        }
         return $out
     }
 
@@ -1469,13 +1530,12 @@ function Invoke-CrApplyAutoLogonStep {
     $alSecret = $null
     $targetSid = [string]$exec['TargetSid']
     $targetName = [string]$exec['TargetName']
-    if ($exec['Action'] -eq 'StandardizeCurrent') { $targetSid = [string]$d['CurrentSid']; $targetName = [string]$d['CurrentName'] }
     if (-not $targetSid -and $targetName) {
         $tu = Find-CrApplyUserByName -State $State -Name $targetName
         if ($tu) { $targetSid = [string]$tu['Sid'] }
     }
     if ($exec['Action'] -ne 'TurnOff') {
-        # PLAN 7.5 "Password source": only for a target verified on the new secret in this run (PUB-User's slot secret).
+        # PLAN 7.5 "Password source": only for a target verified on the new secret in this run (the auto-logon slot secret).
         if ($targetSid -and $Context['Verified'] -contains $targetSid) {
             $slot = $Context['SlotOfSid'][$targetSid]
             if ($slot -and $Context['SlotSecrets'][$slot] -is [hashtable]) { $alSecret = $Context['SlotSecrets'][$slot]['NewSecret'] }
@@ -1534,6 +1594,10 @@ function Get-CrApplyAutoLogonKeptSid {
     if ($aal -ne '1' -or -not $al['DefaultUserName']) { return $null }
     if ($AutoLogonResult -is [hashtable] -and $AutoLogonResult['Ran'] -and $AutoLogonResult['Success'] -and
         (@('Switch', 'TurnOff') -contains [string]$AutoLogonResult['Action'])) { return $null }
+    # The decision resolved the current account already (by SID); otherwise resolve DefaultUserName here.
+    if (($AutoLogonResult -is [hashtable]) -and ($AutoLogonResult['Decision'] -is [hashtable]) -and $AutoLogonResult['Decision']['CurrentSid']) {
+        return [string]$AutoLogonResult['Decision']['CurrentSid']
+    }
     $u = Find-CrApplyUserByName -State $State -Name ([string]$al['DefaultUserName'])
     if ($u) { return [string]$u['Sid'] }
     return $null
@@ -1607,8 +1671,9 @@ function Invoke-CrApplyDisables {
     }
 }
 
-# 6 the running account last (D25): only if the operator account (SOP-Admin) is enabled, in Administrators and Remote
-# Desktop Users, and verified in this run. The RDP session continues; the next logon is as the operator account.
+# 6 the running account last (D25), when it is itself to be disabled (e.g. a retired SOP-Admin): only if the operator's
+# account (the Operator entry, BiCA Remote) is enabled, in Administrators, verified in this run and holds an effective
+# remote-interactive logon right (granted, not denied). The RDP session continues; the next logon is as that account.
 function Invoke-CrApplyRunningAccountStep {
     param($Context, $DisablePlan)
     $out = @{ Disabled = $false; Reason = $null }
@@ -1622,8 +1687,8 @@ function Invoke-CrApplyRunningAccountStep {
         return $out
     }
     $why = $null
-    $opEntry = Get-CrApplyOperatorEntry -Resolved $Context['Resolved'] -RunningSid $Context['RunningSid']
-    $opName = 'SOP-Admin'
+    $opEntry = Get-CrApplyOperatorEntry -Resolved $Context['Resolved']
+    $opName = 'the operator account'
     if ($opEntry) { $opName = Get-CrApplyEntryAccountName $opEntry }
     if (-not $opEntry) {
         $why = 'no operator account is configured'
@@ -1632,10 +1697,16 @@ function Invoke-CrApplyRunningAccountStep {
         if (-not $opSid) { $opSid = Get-CrApplyEntryAccountSid $opEntry }
         $opUser = Find-CrApplyUser -State $Context['State'] -Sid $opSid
         if (-not $opSid -or -not $opUser) { $why = $opName + ' does not exist' }
+        elseif ($opSid -eq $Context['RunningSid']) { $why = $opName + ' is the running account itself' }
         elseif ($opUser['Disabled']) { $why = $opName + ' is not enabled' }
         elseif ((Get-CrApplyGroupMembers -State $Context['State'] -GroupSid 'S-1-5-32-544') -notcontains $opSid) { $why = $opName + ' is not in Administrators' }
-        elseif ((Get-CrApplyGroupMembers -State $Context['State'] -GroupSid 'S-1-5-32-555') -notcontains $opSid) { $why = $opName + ' is not in Remote Desktop Users' }
         elseif ($Context['Verified'] -notcontains $opSid) { $why = $opName + ' is not verified on its new password in this run' }
+        else {
+            $rights = Get-CrEffectiveLogonRights -UserSid $opSid -State $Context['State']
+            if (-not (($rights -is [hashtable]) -and $rights['RemoteInteractive'])) {
+                $why = $opName + ' is not allowed to log on over RDP (remote-interactive logon right not granted or denied)'
+            }
+        }
     }
     if (-not $why) { $why = Get-CrApplyDisableBlocker -Context $Context -Item $item -RunningCounts $false }
     if ($why) {
@@ -1970,22 +2041,21 @@ function Read-CrDependentDecisions {
 }
 
 # The auto-logon decision the run is expected to reach (for the summary before YES and the operator's choice).
-# Accounts the run creates are passed by name (-CreatedTargetNames); they count as verified, like the accounts the
-# plan sets or changes. $null when the step does not run.
+# The accounts the plan sets or changes count as verified. $null when the step does not run.
 function Get-CrApplyAutoLogonPreview {
     param($State, $Config, $Resolved, $Preview, [string]$RunningSid, [string[]]$Only)
     if (-not (Test-CrApplyAutoLogonSelected -State $State -Resolved $Resolved -Only $Only)) { return $null }
     $al = $State['AutoLogon']
     if (-not ($al -is [hashtable]) -or $al['Error']) { return $null }
     $verified = New-Object System.Collections.ArrayList
-    $created = New-Object System.Collections.ArrayList
     $removed = New-Object System.Collections.ArrayList
     foreach ($p in (ConvertTo-CrArray $Preview)) {
         if ($p['Status'] -ne 'Apply') { continue }
         $complete = $true
         foreach ($a in (ConvertTo-CrArray $p['Accounts'])) {
             if ($a['Path'] -eq 'Skip') { $complete = $false; continue }
-            if ($a['Path'] -eq 'Create') { [void]$created.Add([string]$a['Name']) } elseif ($a['Sid']) { [void]$verified.Add([string]$a['Sid']) }
+            # Created accounts are admins (never auto-logon targets); disabled ones stay disabled and can't be verified.
+            if ($a['Path'] -ne 'Create' -and $a['Sid'] -and -not $a['StaysDisabled']) { [void]$verified.Add([string]$a['Sid']) }
         }
         if (-not $complete) { continue }
         foreach ($a in (ConvertTo-CrArray $p['Accounts'])) {
@@ -1996,10 +2066,10 @@ function Get-CrApplyAutoLogonPreview {
             if (-not $gp['Skip'] -and ((ConvertTo-CrArray $gp['Remove']) -contains 'S-1-5-32-544')) { [void]$removed.Add([string]$a['Sid']) }
         }
     }
-    return (Get-CrAutoLogonDecision -State $State -Resolved $Resolved -Config $Config -VerifiedSids ($verified.ToArray()) -RemovedAdminSids ($removed.ToArray()) -CreatedTargetNames ([string[]]$created.ToArray([string])))
+    return (Get-CrAutoLogonDecision -State $State -Resolved $Resolved -Config $Config -VerifiedSids ($verified.ToArray()) -RemovedAdminSids ($removed.ToArray()))
 }
 
-# Asks the operator for an ambiguous auto-logon decision (D13). Returns 'TurnOff'|'LeaveUnchanged'|'StandardizeCurrent'.
+# Asks the operator for an ambiguous auto-logon decision (D13). Returns 'TurnOff'|'LeaveUnchanged'.
 function Read-CrAutoLogonChoice {
     param($Decision)
     $opts = ConvertTo-CrArray $Decision['OperatorOptions']
@@ -2007,12 +2077,11 @@ function Read-CrAutoLogonChoice {
     Write-Host ''
     Write-Host ('Auto-logon needs your decision (current account: {0}):' -f $Decision['CurrentName'])
     foreach ($r in (ConvertTo-CrArray $Decision['Reasons'])) { Write-Host ('  - ' + $r) }
-    $map = @{ T = 'TurnOff'; L = 'LeaveUnchanged'; C = 'StandardizeCurrent' }
+    $map = @{ T = 'TurnOff'; L = 'LeaveUnchanged' }
     $letters = New-Object System.Collections.ArrayList
     $texts = New-Object System.Collections.ArrayList
     if ($opts -contains 'TurnOff') { [void]$letters.Add('T'); [void]$texts.Add('[T] turn auto-logon off') }
     if ($opts -contains 'LeaveUnchanged') { [void]$letters.Add('L'); [void]$texts.Add('[L] leave it unchanged') }
-    if ($opts -contains 'StandardizeCurrent') { [void]$letters.Add('C'); [void]$texts.Add(('[C] standardize the current account {0}' -f $Decision['CurrentName'])) }
     $default = 'L'
     if ($letters -notcontains 'L') { $default = [string]$letters[0] }
     $c = Read-CrOperatorChoice -Prompt (($texts.ToArray()) -join ', ') -Choices ($letters.ToArray()) -Default $default
@@ -2117,10 +2186,11 @@ function Write-CrApplySummary {
         }
     }
     Write-Host ''
-    Write-Host 'YES confirms, in this order: per slot the account creation, the password set or change, enabling, flags,'
-    Write-Host 'group additions, logon rights and its own services/tasks/COM+ (no restarts, D17) and a logon test; then the'
-    Write-Host 'group removals, the moves of dependents to the replacements, the auto-logon step, the disabling of the'
-    Write-Host 'replaced and chosen accounts, the check-mode fixes and, last, the disabling of your own account (D25).'
+    Write-Host 'YES confirms, in this order: per slot (BiCA Remote last) the account creation, the password set or change,'
+    Write-Host 'enabling (ApplicationUser only), flags, group additions, logon rights and its own services/tasks/COM+ (no'
+    Write-Host 'restarts, D17) and a logon test; then the group removals, the moves of dependents to the replacements, the'
+    Write-Host 'auto-logon step, the disabling of the replaced, retired and chosen accounts, the check-mode fixes and, last,'
+    Write-Host 'the disabling of your own account if it is one of them (D25).'
     Write-Host '=================================================='
 }
 

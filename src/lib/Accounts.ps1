@@ -110,7 +110,8 @@ function Get-CrLocalUsers {
 #
 # v10 account model (D9, D21, D22; CONTRACTS "v10: account model"):
 #   New-CrManagedAccount    creates a missing managed account with the slot password (journal 'Created')
-#   Invoke-CrPasswordSet    sets the password (NetUserSetInfo 1003) of SOP-Admin / PUB-User (journal 'Secret')
+#   Invoke-CrPasswordSet    sets the password (NetUserSetInfo 1003) of BiCA Admin / BiCA Remote / the auto-logon
+#                           accounts (journal 'Secret')
 #   Invoke-CrPasswordRotation  the change path (PasswordMode = 'Change', ApplicationUser) with CCP handling
 #   Disable-CrAccount / Enable-CrAccount  UF_ACCOUNTDISABLE set / cleared (journal 'Disabled')
 
@@ -408,7 +409,7 @@ function New-CrManagedAccount {
     return Complete-CrRotationResult $result $steps $warnings 0 $null
 }
 
-# Sets the password of a managed set account (D9: SOP-Admin, PUB-User; PLAN section 8 steps 1-2):
+# Sets the password of a managed set account (D9: BiCA Admin, BiCA Remote, PUB-User, WinAutoUser; PLAN section 8 steps 1-2):
 #   1. unlock if locked (journal 'Unlocked'); the lock state is re-checked and a relock stops here
 #   2. Invoke-CrNetPasswordReset (NetUserSetInfo 1003). No CCP handling: an administrative set ignores CCP.
 #   3. journal 'Secret' only on success
@@ -493,8 +494,9 @@ function Disable-CrAccount {
     return $r
 }
 
-# Enables an account (UF_ACCOUNTDISABLE cleared): a managed target account that exists but is disabled is enabled in
-# its grants step (CONTRACTS v10). An enabled account = success, Changed $false. Not journaled.
+# Enables an account (UF_ACCOUNTDISABLE cleared): an existing disabled account of an entry with EnableIfDisabled
+# (ApplicationUser) is enabled after its password step (CONTRACTS v10). An enabled account = success, Changed $false.
+# Not journaled.
 # Returns @{ Success; Changed; Win32Error; Message }.
 function Enable-CrAccount {
     param($User)

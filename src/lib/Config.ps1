@@ -15,10 +15,10 @@ function Get-CrConfigSchema {
         AccountKeys          = @('Id', 'Kind', 'Name', 'Names', 'NamePattern', 'Candidates', 'Role', 'Credential', 'Mode',
                                  'LoginsEntry', 'Services', 'ScheduledTasks', 'ComPlus', 'IisReport',
                                  'AutoLogonUser', 'AutoLogon', 'ServerRoles',
-                                 'Create', 'Replaces', 'PasswordMode', 'SqlSysadminLogin')
+                                 'Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled')
         WindowsOnlyKeys      = @('Names', 'NamePattern', 'Candidates', 'Role', 'Mode', 'Services', 'ScheduledTasks',
                                  'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon',
-                                 'Create', 'Replaces', 'PasswordMode', 'SqlSysadminLogin')
+                                 'Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled')
         SqlOnlyKeys          = @('ServerRoles')
         SelectionKeys        = @('Name', 'Names', 'NamePattern', 'Candidates')
         DependentKeys        = @('Services', 'ScheduledTasks', 'ComPlus', 'IisReport')
@@ -26,15 +26,15 @@ function Get-CrConfigSchema {
         Kinds                = @('Windows', 'SqlLogin')
         ModeValues           = @('Check', 'Disable')
         PasswordModeValues   = @('Set', 'Change')
-        # v10 keys of managed (rotated) entries; not valid on Check or Disable entries
-        ManagedOnlyKeys      = @('Create', 'Replaces', 'PasswordMode', 'SqlSysadminLogin')
+        # Keys of managed (rotated) entries; not valid on Check or Disable entries
+        ManagedOnlyKeys      = @('Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled')
         # A Disable entry only selects accounts by Name/Names (D22)
         DisableForbiddenKeys = @('NamePattern', 'Candidates', 'Role', 'Credential', 'LoginsEntry', 'Services', 'ScheduledTasks',
                                  'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon')
         CandidateKeys        = @('Name', 'Sid', 'Role', 'Credential')
         AutoLogonKeys        = @('Mode', 'RestrictedComputerPattern')
         AutoLogonModes       = @('IfAlreadyOn')
-        AutoLogonUserKeys    = @('Name', 'RequireEnabled')
+        AutoLogonUserKeys    = @('Name')
     }
 }
 
@@ -51,6 +51,33 @@ function Import-CrConfig {
     Import-LocalizedData -BindingVariable data -BaseDirectory $directory -FileName $fileName -UICulture en-US -ErrorAction Stop
     if (-not ($data -is [hashtable])) { throw ('Config file {0} does not contain a hashtable.' -f $full) }
     return $data
+}
+
+# The slot names of the config's Credentials, in file order (comma-returned).
+function Get-CrConfigSlotNames {
+    param($Config)
+    $names = New-Object System.Collections.ArrayList
+    if ($Config -is [hashtable]) {
+        foreach ($c in (ConvertTo-CrArray $Config['Credentials'])) {
+            if (($c -is [hashtable]) -and $c['Slot']) { [void]$names.Add([string]$c['Slot']) }
+        }
+    }
+    return , $names.ToArray()
+}
+
+# The names given to -Only that are no slot of the config (case-insensitive), comma-returned; PLAN 8: unknown slot names
+# are an error (exit 2), not an empty selection.
+function Get-CrUnknownOnlySlots {
+    param($Config, [string[]]$Only)
+    $unknown = New-Object System.Collections.ArrayList
+    $slots = Get-CrConfigSlotNames -Config $Config
+    foreach ($o in (ConvertTo-CrArray $Only)) {
+        if (-not $o) { continue }
+        $found = $false
+        foreach ($s in $slots) { if ($s -ieq [string]$o) { $found = $true } }
+        if (-not $found) { [void]$unknown.Add([string]$o) }
+    }
+    return , $unknown.ToArray()
 }
 
 function Get-CrRole {
@@ -242,7 +269,7 @@ function Test-CrConfigCredentials {
     return , $slots.ToArray()
 }
 
-# v10 keys of managed entries (CONTRACTS "v10: account model"): Create, Replaces, PasswordMode, SqlSysadminLogin.
+# Keys of managed entries (CONTRACTS "v10: account model"): Create, Replaces, PasswordMode, Operator, EnableIfDisabled.
 # $ReplacedBy maps upper-cased replaced names to the entry that replaces them (a name may be replaced once).
 function Test-CrConfigManagedKeys {
     param($Schema, $Account, [string]$Where, [bool]$IsRotate, $ReplacedBy, $Errors)
@@ -254,12 +281,18 @@ function Test-CrConfigManagedKeys {
         }
         return
     }
-    Test-CrConfigBool -Table $Account -Key 'Create' -Where $Where -Errors $Errors
-    Test-CrConfigBool -Table $Account -Key 'SqlSysadminLogin' -Where $Where -Errors $Errors
+    foreach ($key in @('Create', 'Operator', 'EnableIfDisabled')) { Test-CrConfigBool -Table $Account -Key $key -Where $Where -Errors $Errors }
     $singleName = ($Account.ContainsKey('Name') -and -not $Account.ContainsKey('Names') -and
                    -not $Account.ContainsKey('NamePattern') -and -not $Account.ContainsKey('Candidates'))
     if (($Account['Create'] -eq $true) -and -not $singleName) {
         [void]$Errors.Add(('{0}: Create requires a single Name.' -f $Where))
+    }
+    if (($Account['Operator'] -eq $true) -and -not $singleName) {
+        [void]$Errors.Add(('{0}: Operator requires a single Name (the operator''s account, D25).' -f $Where))
+    }
+    # D21: the auto-logon accounts are never created.
+    if (($Account['Create'] -eq $true) -and $Account.ContainsKey('AutoLogon')) {
+        [void]$Errors.Add(('{0}: the auto-logon accounts are never created; Create is not valid with AutoLogon.' -f $Where))
     }
     if ($Account.ContainsKey('PasswordMode')) {
         if ($Schema.PasswordModeValues -notcontains [string]$Account['PasswordMode']) {
@@ -455,12 +488,18 @@ function Test-CrConfigAccount {
                 continue
             }
             Test-CrConfigKeys -Table $item -Allowed $Schema.AutoLogonUserKeys -Where ('{0} AutoLogonUser' -f $Where) -Errors $Errors
-            Test-CrConfigBool -Table $item -Key 'RequireEnabled' -Where ('{0} AutoLogonUser' -f $Where) -Errors $Errors
             if (-not (Test-CrConfigString $item['Name'])) {
                 [void]$Errors.Add(('{0}: every AutoLogonUser entry needs a Name.' -f $Where))
             } elseif ($selected -notcontains [string]$item['Name']) {
                 [void]$Errors.Add(('{0}: AutoLogonUser ''{1}'' is not selected by this entry''s Name/Names.' -f $Where, $item['Name']))
             }
+        }
+        # D18: every account of the entry is a managed auto-logon account (kept when active); one missing from the list
+        # would count as "any other account" and be switched away or turned off.
+        $listed = @()
+        foreach ($item in $list) { if (($item -is [hashtable]) -and $item['Name']) { $listed += [string]$item['Name'] } }
+        foreach ($n in $selected) {
+            if ($listed -notcontains $n) { [void]$Errors.Add(('{0}: ''{1}'' is missing from AutoLogonUser (every account of the entry must be listed).' -f $Where, $n)) }
         }
     }
 }
@@ -508,6 +547,9 @@ function Test-CrConfig {
         $ids = @{}
         $replacedBy = @{}
         $autoLogonEntries = 0
+        $operatorEntries = 0
+        $autoLogonNames = New-Object System.Collections.ArrayList
+        $disableNames = New-Object System.Collections.ArrayList
         $index = 0
         foreach ($account in (ConvertTo-CrArray $Config['Accounts'])) {
             $index++
@@ -526,10 +568,30 @@ function Test-CrConfig {
                     $ids[[string]$account['Id']] = $true
                 }
             }
-            if ($account.ContainsKey('AutoLogon')) { $autoLogonEntries++ }
+            if ($account.ContainsKey('AutoLogon')) {
+                $autoLogonEntries++
+                foreach ($a in (ConvertTo-CrArray $account['AutoLogonUser'])) {
+                    if (($a -is [hashtable]) -and $a['Name']) { [void]$autoLogonNames.Add([string]$a['Name']) }
+                }
+            }
+            if ($account['Operator'] -eq $true) { $operatorEntries++ }
+            if ([string]$account['Mode'] -eq 'Disable') {
+                if ($account['Name']) { [void]$disableNames.Add([string]$account['Name']) }
+                foreach ($n in (ConvertTo-CrArray $account['Names'])) { if ($n) { [void]$disableNames.Add([string]$n) } }
+            }
             Test-CrConfigAccount -Config $Config -Schema $schema -Account $account -Where $where -Slots $slots -Errors $errors -ReplacedBy $replacedBy
         }
         if ($autoLogonEntries -gt 1) { [void]$errors.Add('Accounts: only one entry may have an AutoLogon block.') }
+        if ($operatorEntries -gt 1) { [void]$errors.Add('Accounts: only one entry may be the Operator account (D25).') }
+        # D18, D22: the auto-logon accounts are never disabled, so they can't be replaced or retired.
+        foreach ($n in $autoLogonNames) {
+            if ($replacedBy.ContainsKey($n.ToUpperInvariant())) {
+                [void]$errors.Add(('Accounts: the auto-logon account ''{0}'' must not be replaced ({1}).' -f $n, $replacedBy[$n.ToUpperInvariant()]))
+            }
+            foreach ($d in $disableNames) {
+                if ($d -ieq $n) { [void]$errors.Add(('Accounts: the auto-logon account ''{0}'' must not be in a Disable entry.' -f $n)) }
+            }
+        }
     }
     return $errors.ToArray()
 }

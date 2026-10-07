@@ -114,6 +114,47 @@ Describe 'Test-CrSiteRules' {
     }
 }
 
+Describe 'Get-CrNewSecretProblems (-ExtraNames)' {
+    # The slot's configured names that don't exist here (e.g. PUB-User on an SM machine) count for the D15 tokens only.
+    $secret = New-CrTestSecure 'Dummy-8a'
+    $accounts = @(@{ Name = 'WinAutoUser'; Sid = 'S-1-5-21-1000-2000-3000-1008'; User = @{ FullName = 'Auto Logon Kiosk' } })
+    $slotDefinition = @{ Slot = 'AutoLogon'; Order = 30 }
+
+    Context 'extra names reach the site rules' {
+        Mock Test-CrSiteRules { @{ Ok = $true; Reasons = @() } }
+        Mock Test-CrLocalPasswordPolicy { @{ Ok = $true; Status = 0 } }
+        It 'adds them to the account and full names, without a local policy check for them' {
+            $p = Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition -ExtraNames @('PUB-User')
+            @($p).Count | Should Be 0
+            Assert-MockCalled Test-CrSiteRules -Times 1 -Exactly -ParameterFilter {
+                (@($Names).Count -eq 3) -and ($Names -contains 'WinAutoUser') -and ($Names -contains 'Auto Logon Kiosk') -and ($Names -contains 'PUB-User')
+            }
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'WinAutoUser' }
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 0 -Exactly -ParameterFilter { $UserName -eq 'PUB-User' }
+        }
+    }
+
+    Context 'no extra names' {
+        Mock Test-CrSiteRules { @{ Ok = $true; Reasons = @() } }
+        Mock Test-CrLocalPasswordPolicy { @{ Ok = $true; Status = 0 } }
+        It 'passes only the account and full names' {
+            [void](Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition)
+            Assert-MockCalled Test-CrSiteRules -Times 1 -Exactly -ParameterFilter {
+                (@($Names).Count -eq 2) -and ($Names -contains 'WinAutoUser') -and ($Names -contains 'Auto Logon Kiosk')
+            }
+        }
+    }
+
+    Context 'empty extra names' {
+        Mock Test-CrSiteRules { @{ Ok = $true; Reasons = @() } }
+        Mock Test-CrLocalPasswordPolicy { @{ Ok = $true; Status = 0 } }
+        It 'ignores them' {
+            [void](Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition -ExtraNames @('', 'PUB-User'))
+            Assert-MockCalled Test-CrSiteRules -Times 1 -Exactly -ParameterFilter { (@($Names).Count -eq 3) -and ($Names -contains 'PUB-User') -and -not ($Names -contains '') }
+        }
+    }
+}
+
 Describe 'Confirm-CrYes' {
     Context 'exact YES' {
         Mock Read-CrHostLine { 'YES' }
@@ -129,23 +170,27 @@ Describe 'Confirm-CrYes' {
     }
 }
 
-# --- v10 account model (CONTRACTS "v10: account model"): synthetic config and resolved entries ---------------------
+# --- v10.3 account model (CONTRACTS "v10: account model"): synthetic config and resolved entries -------------------
 # Built here instead of from config\CredentialRotation.psd1 + Resolve-CrAccounts, so these tests only depend on the
-# resolved-entry contract (Create, PasswordMode, ToCreate placeholders).
+# resolved-entry contract (Create, PasswordMode, EnableIfDisabled, Missing, ToCreate placeholders).
 
-$TcSidApp  = 'S-1-5-21-1000-2000-3000-1003'
-$TcSidApp2 = 'S-1-5-21-1000-2000-3000-1006'
-$TcSidPub  = 'S-1-5-21-1000-2000-3000-1005'
-$TcSidSp   = 'S-1-5-21-1000-2000-3000-1007'
-$TcSidWu1  = 'S-1-5-21-1000-2000-3000-1010'
+$TcSidRemote  = 'S-1-5-21-1000-2000-3000-1002'
+$TcSidApp     = 'S-1-5-21-1000-2000-3000-1003'
+$TcSidPub     = 'S-1-5-21-1000-2000-3000-1005'
+$TcSidApp2    = 'S-1-5-21-1000-2000-3000-1006'
+$TcSidSp      = 'S-1-5-21-1000-2000-3000-1007'
+$TcSidWinAuto = 'S-1-5-21-1000-2000-3000-1008'
+$TcSidSop     = 'S-1-5-21-1000-2000-3000-1009'
+$TcSidWu1     = 'S-1-5-21-1000-2000-3000-1010'
 
 function New-CrTestV10Config {
-    # Listed out of Order on purpose: the prompts follow Order, not the list.
+    # Listed out of Order on purpose: the prompts follow Order, not the list (BiCARemote last, D25).
     return @{
         SitePasswordRules = @{ MinLength = 8; RequireComplexity = $true }
         Credentials = @(
-            @{ Slot = 'PubUser';        Order = 30; Label = 'PUB-User (auto-logon)' },
-            @{ Slot = 'SOPAdmin';       Order = 10; Label = 'SOP-Admin (operator account)' },
+            @{ Slot = 'AutoLogon';      Order = 30; Label = 'Auto-logon users (PUB-User / WinAutoUser)' },
+            @{ Slot = 'BiCARemote';     Order = 90; Label = 'BiCA Remote (your own logon account)' },
+            @{ Slot = 'BiCAAdmin';      Order = 10; Label = 'BiCA Admin' },
             @{ Slot = 'AppUser';        Order = 20; Label = 'ApplicationUser' },
             @{ Slot = 'SQLApplication'; Order = 40; Label = 'SQL login SQLApplication'; MaxLength = 128 }
         )
@@ -158,15 +203,22 @@ function New-CrTestPlaceholder {
 }
 
 function New-CrTestAccount {
-    param([string]$Name, [string]$Sid, [string]$FullName = '')
-    return @{ Name = $Name; Sid = $Sid; User = @{ Name = $Name; Sid = $Sid; FullName = $FullName; Disabled = $false } }
+    param([string]$Name, [string]$Sid, [string]$FullName = '', [switch]$Disabled)
+    return @{ Name = $Name; Sid = $Sid; User = @{ Name = $Name; Sid = $Sid; FullName = $FullName; Disabled = $Disabled.IsPresent } }
 }
 
-# SOP-Admin is created (Set), ApplicationUser exists (Change), PUB-User exists (Set by default: no PasswordMode key).
+# BiCA Admin is missing (created, Set); ApplicationUser exists (Change, EnableIfDisabled); PUB-User and WinAutoUser exist
+# (AutoLogon slot, Set, never created or enabled); BiCA Remote exists (the Operator entry; Set by default: no
+# PasswordMode key); SP Admin and SOP-Admin are retired (Disable); WinUser1 is checked.
+# -NoPubUser: like an SM machine, only WinAutoUser exists and PUB-User is in the entry's Missing names.
 function New-CrTestV10Resolved {
-    param([switch]$AppCreate, [switch]$SecondChangeAccount)
+    param([switch]$AppCreate, [switch]$SecondChangeAccount, [switch]$AppDisabled, [switch]$WinAutoDisabled, [switch]$NoPubUser)
     $app = @{ Id = 'AppUser'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'AppUser'; PasswordMode = 'Change'; Create = $false
-              NotApplicable = $false; Accounts = @(New-CrTestAccount 'ApplicationUser' $TcSidApp 'Application Service') }
+              EnableIfDisabled = $true; Operator = $false; Missing = @(); NotApplicable = $false
+              Accounts = @(New-CrTestAccount 'ApplicationUser' $TcSidApp 'Application Service') }
+    if ($AppDisabled) {
+        $app.Accounts = @(New-CrTestAccount 'ApplicationUser' $TcSidApp 'Application Service' -Disabled)
+    }
     if ($AppCreate) {
         $app.Create = $true
         $app.Accounts = @(New-CrTestPlaceholder 'ApplicationUser')
@@ -174,14 +226,31 @@ function New-CrTestV10Resolved {
     if ($SecondChangeAccount) {
         $app.Accounts = @((New-CrTestAccount 'ApplicationUser' $TcSidApp), (New-CrTestAccount 'AppHelper' $TcSidApp2))
     }
+    $autoAccounts = New-Object System.Collections.ArrayList
+    $autoMissing = @()
+    if ($NoPubUser) {
+        $autoMissing = @('PUB-User')
+    } else {
+        [void]$autoAccounts.Add((New-CrTestAccount 'PUB-User' $TcSidPub 'Kiosk Account'))
+    }
+    if ($WinAutoDisabled) {
+        [void]$autoAccounts.Add((New-CrTestAccount 'WinAutoUser' $TcSidWinAuto -Disabled))
+    } else {
+        [void]$autoAccounts.Add((New-CrTestAccount 'WinAutoUser' $TcSidWinAuto))
+    }
     return @(
-        @{ Id = 'SOPAdmin'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'SOPAdmin'; PasswordMode = 'Set'; Create = $true
-           NotApplicable = $false; Accounts = @(New-CrTestPlaceholder 'SOP-Admin') },
+        @{ Id = 'BiCAAdmin'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'BiCAAdmin'; PasswordMode = 'Set'; Create = $true
+           EnableIfDisabled = $false; Operator = $false; Missing = @(); NotApplicable = $false
+           Accounts = @(New-CrTestPlaceholder 'BiCA Admin') },
         $app,
-        @{ Id = 'PubUser'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'PubUser'; Create = $false
-           NotApplicable = $false; Accounts = @(New-CrTestAccount 'PUB-User' $TcSidPub 'Kiosk Account') },
+        @{ Id = 'AutoLogon'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'AutoLogon'; PasswordMode = 'Set'; Create = $false
+           EnableIfDisabled = $false; Operator = $false; Missing = $autoMissing; NotApplicable = $false
+           Accounts = $autoAccounts.ToArray() },
+        @{ Id = 'BiCARemote'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'BiCARemote'; Create = $false
+           EnableIfDisabled = $false; Operator = $true; Missing = @(); NotApplicable = $false
+           Accounts = @(New-CrTestAccount 'BiCA Remote' $TcSidRemote 'Remote Support') },
         @{ Id = 'Retired'; Kind = 'Windows'; Mode = 'Disable'; Slot = $null; NotApplicable = $false
-           Accounts = @(New-CrTestAccount 'SP Admin' $TcSidSp) },
+           Accounts = @((New-CrTestAccount 'SP Admin' $TcSidSp), (New-CrTestAccount 'SOP-Admin' $TcSidSop)) },
         @{ Id = 'WinUsers'; Kind = 'Windows'; Mode = 'Check'; Slot = $null; NotApplicable = $false
            Accounts = @(New-CrTestAccount 'WinUser1' $TcSidWu1) },
         @{ Id = 'SqlApp'; Kind = 'SqlLogin'; Mode = 'Rotate'; Slot = 'SQLApplication'; NotApplicable = $false
@@ -189,7 +258,69 @@ function New-CrTestV10Resolved {
     )
 }
 
-Describe 'Read-CrSlotSecrets (v10)' {
+Describe 'New-CrSlotAccount (v10.3)' {
+    $setEntry = @{ Id = 'AutoLogon'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'AutoLogon'; PasswordMode = 'Set'; Create = $false; EnableIfDisabled = $false }
+    $appEntry = @{ Id = 'AppUser'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'AppUser'; PasswordMode = 'Change'; Create = $true; EnableIfDisabled = $true }
+
+    It 'marks an existing enabled account neither Disabled nor Enable' {
+        $a = New-CrSlotAccount -Entry $setEntry -Account (New-CrTestAccount 'PUB-User' $TcSidPub)
+        $a.Sid | Should Be $TcSidPub
+        $a.Create | Should Be $false
+        $a.Disabled | Should Be $false
+        $a.Enable | Should Be $false
+    }
+
+    It 'keeps an existing disabled account disabled without EnableIfDisabled' {
+        $a = New-CrSlotAccount -Entry $setEntry -Account (New-CrTestAccount 'WinAutoUser' $TcSidWinAuto -Disabled)
+        $a.Disabled | Should Be $true
+        $a.Enable | Should Be $false
+        $a.PasswordMode | Should Be 'Set'
+        $a.NeedsOld | Should Be $false
+    }
+
+    It 'enables an existing disabled account of an entry with EnableIfDisabled' {
+        $a = New-CrSlotAccount -Entry $appEntry -Account (New-CrTestAccount 'ApplicationUser' $TcSidApp -Disabled)
+        $a.Create | Should Be $false
+        $a.Disabled | Should Be $true
+        $a.Enable | Should Be $true
+        $a.NeedsOld | Should Be $true
+    }
+
+    It 'takes EnableIfDisabled from the entry''s Config as well' {
+        $entry = @{ Id = 'AppUser'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'AppUser'
+                    Config = @{ Id = 'AppUser'; PasswordMode = 'Change'; EnableIfDisabled = $true } }
+        $a = New-CrSlotAccount -Entry $entry -Account (New-CrTestAccount 'ApplicationUser' $TcSidApp -Disabled)
+        $a.Disabled | Should Be $true
+        $a.Enable | Should Be $true
+        $a.PasswordMode | Should Be 'Change'
+    }
+
+    It 'does not enable an account that is enabled' {
+        $a = New-CrSlotAccount -Entry $appEntry -Account (New-CrTestAccount 'ApplicationUser' $TcSidApp)
+        $a.Disabled | Should Be $false
+        $a.Enable | Should Be $false
+    }
+
+    It 'never marks an account to be created as Disabled' {
+        $a = New-CrSlotAccount -Entry $appEntry -Account (New-CrTestPlaceholder 'ApplicationUser')
+        $a.Create | Should Be $true
+        ($null -eq $a.Sid) | Should Be $true
+        $a.Disabled | Should Be $false
+        $a.Enable | Should Be $false
+        $a.NeedsOld | Should Be $false
+    }
+}
+
+Describe 'Get-CrSlotAccountDisplay (v10.3)' {
+    It 'names the account and marks creation and the disabled state' {
+        (Get-CrSlotAccountDisplay -Account @{ Name = 'PUB-User'; Create = $false; Disabled = $false; Enable = $false }) | Should Be 'PUB-User'
+        (Get-CrSlotAccountDisplay -Account @{ Name = 'BiCA Admin'; Create = $true; Disabled = $false; Enable = $false }) | Should Be 'BiCA Admin (will be created)'
+        (Get-CrSlotAccountDisplay -Account @{ Name = 'ApplicationUser'; Create = $false; Disabled = $true; Enable = $true }) | Should Be 'ApplicationUser (disabled, will be enabled)'
+        (Get-CrSlotAccountDisplay -Account @{ Name = 'WinAutoUser'; Create = $false; Disabled = $true; Enable = $false }) | Should Be 'WinAutoUser (disabled, stays disabled)'
+    }
+}
+
+Describe 'Read-CrSlotSecrets (v10.3)' {
     $state = @{ Policy = @{ PasswordHistoryLength = 5; LockoutThreshold = 4 } }
     $config = New-CrTestV10Config
     $resolved = New-CrTestV10Resolved
@@ -201,18 +332,18 @@ Describe 'Read-CrSlotSecrets (v10)' {
     Mock Test-CrLocalPasswordPolicy { @{ Ok = $true; Status = 0 } }
     Mock Get-CrSecretLength { $Secret.Length }
 
-    Context 'created account (SOP-Admin)' {
+    Context 'created account (BiCA Admin)' {
         $io = New-CrTestInput -Secure @('Dummy-1a', 'Dummy-1a')
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         It 'asks for the new password twice, no old password, and says the account will be created' {
-            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('SOPAdmin')
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('BiCAAdmin')
             @($r.Keys).Count | Should Be 1
-            $s = $r['SOPAdmin']
+            $s = $r['BiCAAdmin']
             $s.Skipped | Should Be $false
             (Test-CrTestSecureEqual -A $s.NewSecret -B (New-CrTestSecure 'Dummy-1a')) | Should Be $true
             @($s.Accounts).Count | Should Be 1
-            $s.Accounts[0].Name | Should Be 'SOP-Admin'
+            $s.Accounts[0].Name | Should Be 'BiCA Admin'
             ($null -eq $s.Accounts[0].Sid) | Should Be $true
             $s.Accounts[0].Create | Should Be $true
             $s.Accounts[0].PasswordMode | Should Be 'Set'
@@ -220,8 +351,8 @@ Describe 'Read-CrSlotSecrets (v10)' {
             $s.Accounts[0].Reapply | Should Be $false
             $io.SecurePrompts.Count | Should Be 2
             $io.LinePrompts.Count | Should Be 0
-            ($io.SecurePrompts[0] -like '*SOP-Admin (will be created)*') | Should Be $true
-            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*SOP-Admin*does not exist*created*' } -Times 1 -Exactly
+            ($io.SecurePrompts[0] -like '*BiCA Admin (will be created)*') | Should Be $true
+            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*BiCA Admin*does not exist*created*' } -Times 1 -Exactly
         }
     }
 
@@ -230,33 +361,141 @@ Describe 'Read-CrSlotSecrets (v10)' {
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         It 'includes the name of the account to be created' {
-            [void](Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('SOPAdmin'))
-            Assert-MockCalled Test-CrSecretComplexity -Times 1 -Exactly -ParameterFilter { ($Tokens -contains 'SOP') -and ($Tokens -contains 'Admin') }
-            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'SOP-Admin' }
+            [void](Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('BiCAAdmin'))
+            Assert-MockCalled Test-CrSecretComplexity -Times 1 -Exactly -ParameterFilter { ($Tokens -contains 'BiCA') -and ($Tokens -contains 'Admin') }
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'BiCA Admin' }
         }
     }
 
-    Context 'set account (PUB-User) with a mismatch retry' {
+    Context 'set account (BiCA Remote, the operator''s account) with a mismatch retry' {
         $io = New-CrTestInput -Secure @('Dummy-1a', 'Dummy-1b', 'Dummy-1a', 'Dummy-1a')
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         It 'asks again after two different entries and never asks for the old password' {
-            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('PubUser')
-            $s = $r['PubUser']
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('BiCARemote')
+            $s = $r['BiCARemote']
             $s.Skipped | Should Be $false
-            $s.Accounts[0].Name | Should Be 'PUB-User'
-            $s.Accounts[0].Sid | Should Be $TcSidPub
+            @($s.Accounts).Count | Should Be 1
+            $s.Accounts[0].Name | Should Be 'BiCA Remote'
+            $s.Accounts[0].Sid | Should Be $TcSidRemote
             $s.Accounts[0].Create | Should Be $false
             $s.Accounts[0].PasswordMode | Should Be 'Set'
             ($null -eq $s.Accounts[0].OldSecret) | Should Be $true
             $s.Accounts[0].Reapply | Should Be $false
             $io.SecurePrompts.Count | Should Be 4
             (($io.SecurePrompts -join '|') -like '*old*') | Should Be $false
-            ($io.SecurePrompts[0] -like '*PUB-User*') | Should Be $true
+            ($io.SecurePrompts[0] -like '*(BiCA Remote)*') | Should Be $true
             ($io.SecurePrompts[0] -like '*will be created*') | Should Be $false
             $io.LinePrompts.Count | Should Be 0
             Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*do not match*' } -Times 1 -Exactly
-            Assert-MockCalled Test-CrSecretComplexity -ParameterFilter { $Tokens -contains 'Kiosk' } -Times 1 -Exactly
+            Assert-MockCalled Test-CrSecretComplexity -ParameterFilter { $Tokens -contains 'Support' } -Times 1 -Exactly
+        }
+    }
+
+    Context 'auto-logon slot (PUB-User and WinAutoUser)' {
+        $io = New-CrTestInput -Secure @('Dummy-1c', 'Dummy-1c')
+        Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
+        Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
+        It 'asks once (new password and repeat) for both accounts and sets both' {
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('AutoLogon')
+            @($r.Keys).Count | Should Be 1
+            $s = $r['AutoLogon']
+            $s.Skipped | Should Be $false
+            (Test-CrTestSecureEqual -A $s.NewSecret -B (New-CrTestSecure 'Dummy-1c')) | Should Be $true
+            @($s.Accounts).Count | Should Be 2
+            $s.Accounts[0].Name | Should Be 'PUB-User'
+            $s.Accounts[0].Sid | Should Be $TcSidPub
+            $s.Accounts[1].Name | Should Be 'WinAutoUser'
+            $s.Accounts[1].Sid | Should Be $TcSidWinAuto
+            foreach ($a in $s.Accounts) {
+                $a.PasswordMode | Should Be 'Set'
+                $a.Create | Should Be $false
+                ($null -eq $a.OldSecret) | Should Be $true
+                $a.Reapply | Should Be $false
+            }
+            $io.SecurePrompts.Count | Should Be 2
+            ($io.SecurePrompts[0] -like 'New password*(PUB-User, WinAutoUser)*') | Should Be $true
+            ($io.SecurePrompts[1] -like 'Repeat*') | Should Be $true
+            $io.LinePrompts.Count | Should Be 0
+            Assert-MockCalled Test-CrSecretComplexity -Times 1 -Exactly -ParameterFilter {
+                ($Tokens -contains 'PUB') -and ($Tokens -contains 'User') -and ($Tokens -contains 'WinAutoUser') -and ($Tokens -contains 'Kiosk')
+            }
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'PUB-User' }
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'WinAutoUser' }
+            Assert-MockCalled Test-CrSecretEqual -Times 1 -Exactly
+        }
+    }
+
+    Context 'auto-logon slot with a disabled WinAutoUser' {
+        $io = New-CrTestInput -Secure @('Dummy-1d', 'Dummy-1d')
+        Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
+        Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
+        It 'lists it as staying disabled and still gives it the slot password' {
+            $r = Read-CrSlotSecrets -Config $config -Resolved (New-CrTestV10Resolved -WinAutoDisabled) -State $state -Only @('AutoLogon')
+            $s = $r['AutoLogon']
+            $s.Skipped | Should Be $false
+            @($s.Accounts).Count | Should Be 2
+            $s.Accounts[1].Name | Should Be 'WinAutoUser'
+            $s.Accounts[1].Sid | Should Be $TcSidWinAuto
+            ($null -eq $s.Accounts[1].OldSecret) | Should Be $true
+            $io.SecurePrompts.Count | Should Be 2
+            ($io.SecurePrompts[0] -like '*(PUB-User, WinAutoUser (disabled, stays disabled))*') | Should Be $true
+            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*WinAutoUser*disabled*stays disabled*' } -Times 1 -Exactly
+            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*enabled in this run*' } -Times 0 -Exactly
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'WinAutoUser' }
+        }
+    }
+
+    Context 'auto-logon slot where only WinAutoUser exists (SM)' {
+        $io = New-CrTestInput -Secure @('Dummy-1e', 'Dummy-1e')
+        Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
+        Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
+        It 'prompts for WinAutoUser only, and the missing PUB-User still counts for the D15 tokens' {
+            $r = Read-CrSlotSecrets -Config $config -Resolved (New-CrTestV10Resolved -NoPubUser) -State $state -Only @('AutoLogon')
+            $s = $r['AutoLogon']
+            $s.Skipped | Should Be $false
+            @($s.Accounts).Count | Should Be 1
+            $s.Accounts[0].Name | Should Be 'WinAutoUser'
+            ($io.SecurePrompts[0] -like '*(WinAutoUser)*') | Should Be $true
+            Assert-MockCalled Test-CrSecretComplexity -Times 1 -Exactly -ParameterFilter {
+                ($Tokens -contains 'PUB') -and ($Tokens -contains 'User') -and ($Tokens -contains 'WinAutoUser')
+            }
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'WinAutoUser' }
+            Assert-MockCalled Test-CrLocalPasswordPolicy -Times 0 -Exactly -ParameterFilter { $UserName -eq 'PUB-User' }
+        }
+    }
+
+    Context 'Missing names of the slot entries' {
+        Mock Read-CrOneSlotSecret { @{ Slot = 'AutoLogon'; Skipped = $false; Reason = $null; NewSecret = $null; Accounts = @(); Findings = @() } }
+        It 'passes them to the slot prompt as -ExtraTokenNames' {
+            [void](Read-CrSlotSecrets -Config $config -Resolved (New-CrTestV10Resolved -NoPubUser) -State $state -Only @('AutoLogon'))
+            Assert-MockCalled Read-CrOneSlotSecret -Times 1 -Exactly -Scope It -ParameterFilter {
+                (@($ExtraTokenNames).Count -eq 1) -and ($ExtraTokenNames -contains 'PUB-User') -and (@($Accounts).Count -eq 1) -and ($Accounts[0]['Name'] -eq 'WinAutoUser')
+            }
+        }
+        It 'passes no extra names when every configured account exists' {
+            [void](Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('AutoLogon'))
+            Assert-MockCalled Read-CrOneSlotSecret -Times 1 -Exactly -Scope It -ParameterFilter {
+                (($null -eq $ExtraTokenNames) -or (@($ExtraTokenNames).Count -eq 0)) -and (@($Accounts).Count -eq 2)
+            }
+        }
+    }
+
+    Context 'disabled ApplicationUser (EnableIfDisabled)' {
+        $io = New-CrTestInput -Secure @('Dummy-2c', 'Dummy-2c', 'Old-Dummy-6')
+        Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
+        Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
+        It 'says the account will be enabled and still asks for its old password' {
+            $r = Read-CrSlotSecrets -Config $config -Resolved (New-CrTestV10Resolved -AppDisabled) -State $state -Only @('AppUser')
+            $a = $r['AppUser'].Accounts[0]
+            $a.Name | Should Be 'ApplicationUser'
+            $a.Create | Should Be $false
+            $a.PasswordMode | Should Be 'Change'
+            (Test-CrTestSecureEqual -A $a.OldSecret -B (New-CrTestSecure 'Old-Dummy-6')) | Should Be $true
+            $io.SecurePrompts.Count | Should Be 3
+            ($io.SecurePrompts[0] -like '*ApplicationUser (disabled, will be enabled)*') | Should Be $true
+            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*ApplicationUser*disabled*enabled in this run*' } -Times 1 -Exactly
+            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*stays disabled*' } -Times 0 -Exactly
         }
     }
 

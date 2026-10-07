@@ -514,6 +514,19 @@ function Get-CrWriteFilterDecision {
 
 #region Preflight checks
 
+# The discovery sections the dependents come from (services, scheduled tasks, COM+) that failed as a whole.
+# A failed section means the dependents of every account are unknown (PLAN 6 step 2, D24).
+# Returns 'Section: message' strings (comma-returned).
+function Get-CrDependentDiscoveryErrors {
+    param($State)
+    $list = New-Object System.Collections.ArrayList
+    foreach ($section in @('Services', 'Tasks', 'ComPlus')) {
+        $part = $State[$section]
+        if (($part -is [hashtable]) -and $part['Error']) { [void]$list.Add(('{0}: {1}' -f $section, $part['Error'])) }
+    }
+    return , $list.ToArray()
+}
+
 # Slot names of the config's Windows or SqlLogin entries (incl. candidates).
 function Get-CrPreflightSlots {
     param($Config, [string]$Kind)
@@ -620,6 +633,16 @@ function Invoke-CrPreflight {
         if ($pol['ForceGuest'] -eq $true) {
             [void]$findings.Add((New-CrFinding -Severity 'Info' -Area 'Policy' -Message 'ForceGuest = 1: network logons are mapped to Guest.'))
         }
+    }
+
+    # Dependents (PLAN 6 step 2, D24): without services, scheduled tasks or COM+ the dependents of every account are
+    # unknown. A password set or change would break them, and an account to be disabled might still run some: the
+    # Windows slots are blocked and no account is disabled (Apply.ps1 Get-CrApplyDisablePlan).
+    $depErrors = Get-CrDependentDiscoveryErrors -State $State
+    if ($depErrors.Count -gt 0) {
+        $depText = $depErrors -join '; '
+        & $blockSlots $windowsSlots 'Discovery' ('Dependents unknown (discovery failed): ' + $depText)
+        [void]$findings.Add((New-CrFinding -Severity 'Blocked' -Area 'Discovery' -Message 'No account is disabled in this run: the dependents of the accounts are unknown (discovery failed).' -Detail $depText))
     }
 
     # Write filter (D19)

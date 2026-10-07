@@ -1,12 +1,11 @@
-# Pester 3.4 tests for src\lib\AutoLogon.ps1 (PLAN section 7.5, D18). Synthetic SIDs and machine names only.
+# Pester 3.4 tests for src\lib\AutoLogon.ps1 (PLAN section 7.5, D18 v10.1). Synthetic SIDs and machine names only.
+# Pester 3.4 keeps a Mock for the whole Describe/Context it is defined in: a Mock inside an It gets its own Context.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-. (Join-Path $here '..\src\lib\Compat.ps1')
-
-# Stubs for Rights.ps1 (another module); mocked below. Parameters must match the contract for Mock.
-function Get-CrEffectiveLogonRights { param($UserSid, $State) }
-function Test-CrIsAdmin { param($UserSid, $State) }
-
-. (Join-Path $here '..\src\lib\AutoLogon.ps1')
+$lib = Join-Path $here '..\src\lib'
+# Rights.ps1 (Get-CrEffectiveLogonRights, Test-CrIsAdmin) is mocked for the hand-built states below and used as it is
+# with the machine fixtures (Fixtures.ps1), whose shipped config Principals.ps1 resolves.
+foreach ($m in @('Compat', 'Rights', 'Principals', 'AutoLogon')) { . (Join-Path $lib ($m + '.ps1')) }
+. (Join-Path $here 'Fixtures.ps1')
 
 # Write side: the real registry writers are kept aside (only their argument checks are tested, which run before any
 # registry access) and replaced by throwing stubs, so a missing mock can never write HKLM. The LSA wrappers are
@@ -33,12 +32,12 @@ function New-TestUser {
 }
 
 function New-TestUsers {
-    param([switch]$NoPub, [switch]$PubDisabled, [switch]$PubLocked, [switch]$NoWinAuto)
+    param([switch]$NoPub, [switch]$PubDisabled, [switch]$PubLocked, [switch]$NoWinAuto, [switch]$WinAutoDisabled)
     $list = New-Object System.Collections.ArrayList
     [void]$list.Add((New-TestUser 'BiCA Admin' $SidBica))
     [void]$list.Add((New-TestUser 'BiCA Remote' $SidRemote))
     if (-not $NoPub) { [void]$list.Add((New-TestUser 'PUB-User' $SidPub -Disabled:$PubDisabled -Locked:$PubLocked)) }
-    if (-not $NoWinAuto) { [void]$list.Add((New-TestUser 'WinAutoUser' $SidWinAuto)) }
+    if (-not $NoWinAuto) { [void]$list.Add((New-TestUser 'WinAutoUser' $SidWinAuto -Disabled:$WinAutoDisabled)) }
     [void]$list.Add((New-TestUser 'WinUser1' $SidWinUser1))
     return , $list.ToArray()
 }
@@ -50,7 +49,7 @@ function New-TestAutoLogon {
         $Kind = 'String',
         [string]$UserName,
         [string]$Domain = '#computer',
-        [switch]$PlainPassword,
+        [switch]$PlainPassword, # lint-ignore: D4-PlainVariable
         [switch]$Count,
         [string[]]$Mechanisms = @(),
         [switch]$LegalText
@@ -58,7 +57,7 @@ function New-TestAutoLogon {
     if ($null -eq $AutoAdminLogon) { $Kind = $null }
     return @{
         AutoAdminLogon = $AutoAdminLogon; AutoAdminLogonKind = $Kind; DefaultUserName = $UserName; DefaultDomainName = $Domain
-        DefaultPasswordPresent = [bool]$PlainPassword; AutoLogonCountPresent = [bool]$Count; ForceAutoLogon = $null
+        DefaultPasswordPresent = [bool]$PlainPassword; AutoLogonCountPresent = [bool]$Count; ForceAutoLogon = $null # lint-ignore: D4-PlainVariable
         AutoLogonSidValue = $null; OtherMechanisms = $Mechanisms; LegalNoticeCaptionSet = $false
         LegalNoticeTextSet = [bool]$LegalText; DevicePasswordLessBuildVersion = $null; Error = $null
     }

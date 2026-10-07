@@ -6,12 +6,13 @@
 .DESCRIPTION
     Discovers the local accounts, groups, rights, dependents, auto-logon, write filter and SQL Server state,
     compares them with the configuration and reports what -Apply would change (audit, changes nothing).
-    With -Apply (account model v10, PLAN D21-D25) it lists the enabled local accounts and what happens to each,
+    With -Apply (account model v10.3, PLAN D18, D21-D25) it lists the enabled local accounts and what happens to each,
     asks about the other enabled accounts, prompts for the passwords per credential slot, probes ApplicationUser's old
-    password, shows the plan and, after YES, creates the missing managed accounts (SOP-Admin, ApplicationUser,
-    PUB-User), sets their passwords (ApplicationUser: changed), enforces groups and flags, updates and moves the
-    dependents, runs the auto-logon step, disables the replaced and chosen accounts, runs the check-mode fixes and
-    disables the running account last (PLAN sections 6 and 8). SQL rotation is not part of this version.
+    password, shows the plan and, after YES, creates the missing admin accounts (BiCA Admin, BiCA Remote,
+    ApplicationUser), sets the passwords of the managed accounts incl. every existing PUB-User/WinAutoUser
+    (ApplicationUser: changed), enforces groups and flags, updates and moves the dependents, runs the auto-logon step,
+    disables the replaced, retired and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8).
+    BiCA Remote, the operator's account, is the last slot. SQL rotation is not part of this version.
     Start it through Start-CredentialRotation.cmd ("Run as administrator").
 
 .PARAMETER Apply
@@ -19,8 +20,8 @@
     the prompts, never on the command line (D4).
 
 .PARAMETER Only
-    Slot names to audit or apply, e.g. SOPAdmin, AppUser, PubUser. Check-mode accounts, retired accounts and other
-    enabled accounts are only processed without -Only.
+    Slot names to audit or apply, e.g. BiCAAdmin, AppUser, AutoLogon, BiCARemote. Check-mode accounts, retired accounts
+    and other enabled accounts are only processed without -Only. An unknown slot name stops the tool (exit 2).
 
 .PARAMETER ConfigPath
     The .psd1 configuration. Default: CredentialRotation.psd1 next to this script, or ..\config\ when unbundled.
@@ -42,7 +43,7 @@ param(
 
 if ($UnexpectedArguments) {
     Write-Host ('Unexpected arguments: {0}' -f ($UnexpectedArguments -join ' '))
-    Write-Host 'Parameters must be named, e.g. -Only SOPAdmin. Run "echo %ERRORLEVEL%" as a separate command.'
+    Write-Host 'Parameters must be named, e.g. -Only AppUser. Run "echo %ERRORLEVEL%" as a separate command.'
     exit 2
 }
 
@@ -181,6 +182,13 @@ function Invoke-CrMain {
         if ($configErrors.Count -gt 0) {
             Write-Host 'The configuration is invalid:'
             foreach ($e in $configErrors) { Write-Host ('  - ' + $e); Write-CrLog ('Config error: ' + $e) 'Error' }
+            $script:CrResult = $script:CrExitCodes['PreflightFailed']; return
+        }
+        # PLAN 8: an unknown slot name in -Only is an error, not an empty selection.
+        $unknownSlots = Get-CrUnknownOnlySlots -Config $config -Only $Only
+        if ($unknownSlots.Count -gt 0) {
+            Write-Host ('Unknown slot name(s) in -Only: {0}. Valid slots: {1}.' -f ($unknownSlots -join ', '), ((Get-CrConfigSlotNames -Config $config) -join ', '))
+            Write-CrLog ('Unknown slot name(s) in -Only: ' + ($unknownSlots -join ', ')) 'Error'
             $script:CrResult = $script:CrExitCodes['PreflightFailed']; return
         }
 
@@ -332,8 +340,11 @@ function Invoke-CrApplyFlow {
         }
         Complete-CrJournalRun -Journal $journal -RunId $RunId
         if ($result['RunningAccount'] -is [hashtable] -and $result['RunningAccount']['Disabled']) {
+            $opName = 'the operator account'
+            $opEntry = Get-CrApplyOperatorEntry -Resolved $Resolved
+            if ($opEntry) { $opName = Get-CrApplyEntryAccountName $opEntry }
             Write-Host ''
-            Write-Host 'Your own account is disabled now. This RDP session continues; log on as SOP-Admin next time and update saved RDP credentials.'
+            Write-Host ('Your own account is disabled now. This RDP session continues; log on as {0} next time and update saved RDP credentials.' -f $opName)
         }
 
         # Re-audit: how much drift is left

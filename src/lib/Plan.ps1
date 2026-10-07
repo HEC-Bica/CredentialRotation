@@ -171,7 +171,11 @@ function Add-CrDependentFindings {
     param($Plan, $State, $Entry, $User, [string]$Slot)
     $name = $User['Name']
     $sid = $User['Sid']
-    $managed = ($Entry['Config'] -and $Entry['Config']['Services'] -eq 'Auto')
+    # Each kind is managed by its own config key (Services / ScheduledTasks / ComPlus = 'Auto').
+    $cfg = $Entry['Config']
+    $managedServices = (($cfg -is [hashtable]) -and [string]$cfg['Services'] -eq 'Auto')
+    $managedTasks = (($cfg -is [hashtable]) -and [string]$cfg['ScheduledTasks'] -eq 'Auto')
+    $managedComPlus = (($cfg -is [hashtable]) -and [string]$cfg['ComPlus'] -eq 'Auto')
     $allServices = ConvertTo-CrArray $State['Services']
     $allTasks = ConvertTo-CrArray $State['Tasks']
     $allComPlus = ConvertTo-CrArray $State['ComPlus']
@@ -181,7 +185,7 @@ function Add-CrDependentFindings {
     $rights = Get-CrEffectiveLogonRights -UserSid $sid -State $State
 
     foreach ($s in $services) {
-        if ($managed) {
+        if ($managedServices) {
             Add-CrPlanFinding $Plan 'Info' 'Services' ('SCM credential update, restart pending (D17): ' + $s['Name']) $Slot $name
             if ($s['Name'] -eq 'MSSQLSERVER' -or $s['Name'] -like 'MSSQL$*') {
                 Add-CrPlanFinding $Plan 'HighImpact' 'Services' ('SQL Server runs as this account; it starts with the new password at its next start: ' + $s['Name']) $Slot $name
@@ -194,14 +198,14 @@ function Add-CrDependentFindings {
 
     foreach ($t in $tasks) {
         $sev = 'Info'; $msg = 'Scheduled task re-registered with the new password: '
-        if (-not $managed) { $sev = 'HighImpact'; $msg = 'Scheduled task stores this account''s password but the configuration does not manage it: ' }
+        if (-not $managedTasks) { $sev = 'HighImpact'; $msg = 'Scheduled task stores this account''s password but the configuration does not manage it: ' }
         Add-CrPlanFinding $Plan $sev 'Tasks' ($msg + $t['Path'] + ' (LogonType ' + $t['LogonType'] + ')') $Slot $name
     }
     if ($tasks.Count -gt 0) { Add-CrRightFinding $Plan $State $sid $name $Slot 'SeBatchLogonRight' 'SeDenyBatchLogonRight' $rights['Batch'] }
 
     foreach ($c in $complus) {
         $sev = 'Info'; $msg = 'COM+ identity updated, restart pending (D17): '
-        if (-not $managed) { $sev = 'HighImpact'; $msg = 'COM+ application runs as this account but the configuration does not manage it: ' }
+        if (-not $managedComPlus) { $sev = 'HighImpact'; $msg = 'COM+ application runs as this account but the configuration does not manage it: ' }
         Add-CrPlanFinding $Plan $sev 'ComPlus' ($msg + $c['Name']) $Slot $name
     }
     $allDcom = ConvertTo-CrArray $State['Dcom']
@@ -359,7 +363,7 @@ function Add-CrDisableDependentFindings {
 
 # D22, D24, D25: accounts replaced by a managed entry.
 function Add-CrReplacedFindings {
-    param($Plan, $State, $Entry, [string]$Slot, [string]$RunningSid, [string]$AppUserName)
+    param($Plan, $State, $Entry, [string]$Slot, [string]$RunningSid, [string]$AppUserName, [string]$OperatorName)
     $newName = $null
     foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) { if ($a['Name']) { $newName = [string]$a['Name']; break } }
     if (-not $newName) { $newName = [string]$Entry['Id'] }
@@ -374,7 +378,7 @@ function Add-CrReplacedFindings {
         if ($isRunning) { $detail = $detail + '; the running account is disabled as the last step (D25)' }
         Add-CrPlanFinding $Plan 'Drift' 'Accounts' ('Disable ' + $name + ' (replaced by ' + $newName + ')') $Slot $name $detail
         if ($isRunning) {
-            Add-CrPlanFinding $Plan 'HighImpact' 'Accounts' ('The running account ' + $name + ' is disabled at the end; log on as ' + $newName + ' next time (D25)') $Slot $name
+            Add-CrPlanFinding $Plan 'HighImpact' 'Accounts' ('The running account ' + $name + ' is disabled at the end; log on as ' + $OperatorName + ' next time (D25)') $Slot $name
         }
         Add-CrDisableDependentFindings -Plan $Plan -State $State -Sid ([string]$r['Sid']) -Name $name -Slot $Slot -NewName $newName -AppUserName $AppUserName
     }
@@ -437,14 +441,14 @@ function Add-CrSqlFindings {
 }
 
 function Add-CrAutoLogonFindings {
-    param($Plan, $State, $Config, $Resolved, $VerifiedSids, $RemovedAdminSids, $CreatedTargetNames)
+    param($Plan, $State, $Config, $Resolved, $VerifiedSids, $RemovedAdminSids)
     $al = $State['AutoLogon']
     if (-not $al) { return }
     if ($al['Error']) {
         Add-CrPlanFinding $Plan 'Ambiguous' 'AutoLogon' 'Auto-logon settings could not be read; check them manually before rotating its account' 'AutoLogon' $null $al['Error']
         return
     }
-    $d = Get-CrAutoLogonDecision -State $State -Resolved $Resolved -Config $Config -VerifiedSids $VerifiedSids -RemovedAdminSids $RemovedAdminSids -CreatedTargetNames $CreatedTargetNames
+    $d = Get-CrAutoLogonDecision -State $State -Resolved $Resolved -Config $Config -VerifiedSids $VerifiedSids -RemovedAdminSids $RemovedAdminSids
     $who = $d['CurrentName']
     $detail = (ConvertTo-CrArray $d['Reasons']) -join '; '
     switch ($d['Action']) {
@@ -456,9 +460,7 @@ function Add-CrAutoLogonFindings {
             }
         }
         'Switch' {
-            $targetText = [string]$d['TargetName']
-            if ($d['TargetCreated']) { $targetText = $targetText + ' (created in this run)' }
-            Add-CrPlanFinding $Plan 'Drift' 'AutoLogon' ('Switch auto-logon from ' + $who + ' to ' + $targetText + ' (D18)') 'AutoLogon' $who $detail
+            Add-CrPlanFinding $Plan 'Drift' 'AutoLogon' ('Switch auto-logon from ' + $who + ' to ' + $d['TargetName'] + ' (D18)') 'AutoLogon' $who $detail
         }
         'TurnOff' { Add-CrPlanFinding $Plan 'Drift' 'AutoLogon' ('Turn auto-logon off (D18; was ' + $who + ')') 'AutoLogon' $who $detail }
         'Ambiguous' {
@@ -473,12 +475,27 @@ function Add-CrAutoLogonFindings {
     }
 }
 
+# The slot of the entry with the AutoLogon block, or $null.
 function Get-CrAutoLogonSlot {
     param($Resolved)
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
         if ($e['AutoLogon']) { return $e['Slot'] }
     }
-    return 'AutoLogon'
+    return $null
+}
+
+# The operator's account (D25): the managed entry marked Operator. Returns its account name, or $Fallback.
+function Get-CrOperatorAccountName {
+    param($Resolved, [string]$Fallback)
+    return (Get-CrManagedAccountName -Resolved $Resolved -Test { param($e) $e['Operator'] -eq $true -or (($e['Config'] -is [hashtable]) -and $e['Config']['Operator'] -eq $true) } -Fallback $Fallback)
+}
+
+# The application account (D24, O5): the managed entry that replaces accounts (Replaces), i.e. ApplicationUser.
+# Dependents of retired accounts move there on the operator's choice.
+function Test-CrAppUserEntry {
+    param($Entry)
+    if (-not ($Entry -is [hashtable]) -or -not ($Entry['Config'] -is [hashtable])) { return $false }
+    return ((ConvertTo-CrArray $Entry['Config']['Replaces']).Count -gt 0)
 }
 
 # Slot of the managed account that auto-logon currently uses, or of the entry that replaces it, or $null.
@@ -536,17 +553,18 @@ function New-CrPlan {
     }
     foreach ($t in (ConvertTo-CrArray $State['Tasks'])) {
         if ($t -is [hashtable] -and $t['Error'] -and -not $t['UserSid']) {
-            Add-CrPlanFinding $plan 'Info' 'Tasks' ('Scheduled task or folder could not be read; dependents there are unknown: ' + $t['Path']) $null $null $t['Error']
+            # Shown before YES: a task stored there with an account's password would keep the old one.
+            Add-CrPlanFinding $plan 'HighImpact' 'Tasks' ('Scheduled task or folder could not be read; dependents there are unknown: ' + $t['Path']) $null $null $t['Error']
         }
     }
+    $sqlInstalled = (($sql -is [hashtable]) -and $sql['DefaultInstancePresent'])
 
-    # Accounts the run would put on the new secret. An account that this run creates has no SID yet:
-    # its name goes to $created (Get-CrAutoLogonDecision -CreatedTargetNames).
+    # Accounts the run would put on the new secret and that can be verified (enabled; created accounts have no SID yet
+    # and are never auto-logon targets).
     $verified = New-Object System.Collections.ArrayList
-    $created = New-Object System.Collections.ArrayList
     $removedAdmins = New-Object System.Collections.ArrayList # accounts leaving Administrators in this run
-    $operatorName = Get-CrManagedAccountName -Resolved $Resolved -Test { param($e) $e['RoleName'] -eq 'Operator' } -Fallback 'the operator account'
-    $appUserName = Get-CrManagedAccountName -Resolved $Resolved -Test { param($e) $e['Config'] -and $e['Config']['Services'] -eq 'Auto' } -Fallback 'the application user'
+    $operatorName = Get-CrOperatorAccountName -Resolved $Resolved -Fallback 'the operator account'
+    $appUserName = Get-CrManagedAccountName -Resolved $Resolved -Test { param($e) Test-CrAppUserEntry $e } -Fallback 'the application user'
 
     foreach ($entry in (ConvertTo-CrArray $Resolved)) {
         $slot = $entry['Slot']
@@ -586,18 +604,26 @@ function New-CrPlan {
             } elseif ($acct['ToCreate']) {
                 # D21: created with the slot password, the role groups and flags (PLAN 8 step 0)
                 Add-CrPlanFinding $plan 'Drift' 'Accounts' ('Create ' + $acct['Name']) $slot $acct['Name'] 'D21: created with the slot password, its role groups and flags'
+                if ($sqlInstalled) {
+                    Add-CrPlanFinding $plan 'Info' 'SQL' 'The created account has a new SID, so it has no Windows login in SQL Server (reported, PLAN 1.1)' $slot $acct['Name']
+                }
                 $newUser = @{ Name = [string]$acct['Name']; Sid = $null }
                 Add-CrGroupFindings -Plan $plan -State $State -Role $role -User $newUser -Slot $slot -RunningSid $RunningSid -RemovedAdminSids (New-Object System.Collections.ArrayList)
-                if (-not $slotBlocked) { [void]$created.Add([string]$acct['Name']) }
             } else {
                 if ($isCheck) {
                     if ($u['Disabled']) { Add-CrPlanFinding $plan 'Info' 'Accounts' 'Account is disabled (reported only)' $slot $u['Name'] }
                     if ($u['LockedOut']) { Add-CrPlanFinding $plan 'Info' 'Accounts' 'Account is locked (reported only)' $slot $u['Name'] }
                 } else {
-                    if ($u['Disabled']) { Add-CrPlanFinding $plan 'Drift' 'Accounts' 'Enable the account (D21)' $slot $u['Name'] }
+                    # D21: only an entry with EnableIfDisabled (ApplicationUser) is enabled; the others stay disabled.
+                    $staysDisabled = ($u['Disabled'] -and -not $entry['EnableIfDisabled'])
+                    if ($u['Disabled'] -and $entry['EnableIfDisabled']) {
+                        Add-CrPlanFinding $plan 'Drift' 'Accounts' 'Enable the account (D21)' $slot $u['Name']
+                    } elseif ($staysDisabled) {
+                        Add-CrPlanFinding $plan 'Info' 'Accounts' 'Account is disabled: it gets the new password but stays disabled (D21); a logon test is not possible' $slot $u['Name']
+                    }
                     Add-CrWindowsRotationFindings -Plan $plan -State $State -User $u -Slot $slot -PasswordMode $entry['PasswordMode']
                     Add-CrDependentFindings -Plan $plan -State $State -Entry $entry -User $u -Slot $slot
-                    if (-not $slotBlocked) { [void]$verified.Add($acct['Sid']) }
+                    if (-not $slotBlocked -and -not $staysDisabled) { [void]$verified.Add($acct['Sid']) }
                 }
                 Add-CrAccountFlagFindings -Plan $plan -Role $role -User $u -Slot $slot
                 # Only completed rotate slots leave Administrators before the auto-logon step (PLAN 8);
@@ -611,7 +637,7 @@ function New-CrPlan {
             }
         }
         if ($entry['Kind'] -eq 'Windows' -and -not $isCheck) {
-            Add-CrReplacedFindings -Plan $plan -State $State -Entry $entry -Slot $slot -RunningSid $RunningSid -AppUserName $appUserName
+            Add-CrReplacedFindings -Plan $plan -State $State -Entry $entry -Slot $slot -RunningSid $RunningSid -AppUserName $appUserName -OperatorName $operatorName
         }
     }
 
@@ -630,8 +656,7 @@ function New-CrPlan {
         if ($currentSlot) { $runAutoLogon = Test-CrSlotSelected -Slot $currentSlot -Only $Only }
     }
     if ($runAutoLogon) {
-        Add-CrAutoLogonFindings -Plan $plan -State $State -Config $Config -Resolved $Resolved -VerifiedSids $verified.ToArray() -RemovedAdminSids $removedAdmins.ToArray() `
-            -CreatedTargetNames $created.ToArray()
+        Add-CrAutoLogonFindings -Plan $plan -State $State -Config $Config -Resolved $Resolved -VerifiedSids $verified.ToArray() -RemovedAdminSids $removedAdmins.ToArray()
     }
 
     $plan['HighImpact'] = @($plan['Findings'] | Where-Object { $_['Severity'] -eq 'HighImpact' })

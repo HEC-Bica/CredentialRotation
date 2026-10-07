@@ -81,14 +81,17 @@ function Test-CrSiteRules {
 }
 
 # All checks of a new password for one slot: site rules, local policy per account, slot MaxLength.
+# -ExtraNames: the slot's configured account names that don't exist on this machine. They count for the D15 name
+# tokens too, so a site password that a sibling machine with that account would reject is rejected here as well.
 function Get-CrNewSecretProblems {
-    param([System.Security.SecureString]$NewSecret, $Config, $Accounts, $SlotDefinition)
+    param([System.Security.SecureString]$NewSecret, $Config, $Accounts, $SlotDefinition, [string[]]$ExtraNames)
     $problems = New-Object System.Collections.ArrayList
     $names = New-Object System.Collections.ArrayList
     foreach ($a in $Accounts) {
         if ($a['Name']) { [void]$names.Add([string]$a['Name']) }
         if (($a['User'] -is [hashtable]) -and $a['User']['FullName']) { [void]$names.Add([string]$a['User']['FullName']) }
     }
+    foreach ($n in (ConvertTo-CrArray $ExtraNames)) { if ($n) { [void]$names.Add([string]$n) } }
     $site = Test-CrSiteRules -Secret $NewSecret -Config $Config -Names ([string[]]$names.ToArray([string]))
     foreach ($r in (ConvertTo-CrArray $site['Reasons'])) { [void]$problems.Add([string]$r) }
     foreach ($a in $Accounts) {
@@ -191,32 +194,40 @@ function Get-CrEntryPasswordMode {
     return 'Set'
 }
 
-# The account descriptor used by the prompts: @{ Name; Sid; User; PasswordMode; Create; NeedsOld }.
+# The account descriptor used by the prompts: @{ Name; Sid; User; PasswordMode; Create; NeedsOld; Disabled; Enable }.
 # Create: the account doesn't exist and is created in this run (placeholder with ToCreate, or an entry with Create
 # and an account without SID). NeedsOld: only an existing account with PasswordMode 'Change' (D9).
+# Disabled: an existing disabled account; Enable: it is enabled in this run (entry EnableIfDisabled), else it stays
+# disabled (D21: BiCA accounts, PUB-User, WinAutoUser).
 function New-CrSlotAccount {
     param($Entry, $Account)
     $sid = $null
     if ($Account['Sid']) { $sid = [string]$Account['Sid'] }
     $create = (($Account['ToCreate'] -eq $true) -or (($Entry['Create'] -eq $true) -and (-not $sid)))
     $mode = Get-CrEntryPasswordMode -Entry $Entry
+    $disabled = ((-not $create) -and ($Account['User'] -is [hashtable]) -and [bool]$Account['User']['Disabled'])
+    $enable = ($disabled -and (($Entry['EnableIfDisabled'] -eq $true) -or
+               (($Entry['Config'] -is [hashtable]) -and $Entry['Config']['EnableIfDisabled'] -eq $true)))
     return @{
         Name = [string]$Account['Name']; Sid = $sid; User = $Account['User']
         PasswordMode = $mode; Create = $create; NeedsOld = (($mode -eq 'Change') -and (-not $create))
+        Disabled = $disabled; Enable = $enable
     }
 }
 
 function Get-CrSlotAccountDisplay {
     param($Account)
     if ($Account['Create']) { return ('{0} (will be created)' -f $Account['Name']) }
+    if ($Account['Disabled'] -and $Account['Enable']) { return ('{0} (disabled, will be enabled)' -f $Account['Name']) }
+    if ($Account['Disabled']) { return ('{0} (disabled, stays disabled)' -f $Account['Name']) }
     return [string]$Account['Name']
 }
 
 # Prompts one Windows slot. $Previous carries the last old password entered (for "same as previous").
 # New password twice for every slot; the old password only for accounts with NeedsOld (D9: PasswordMode 'Change'
-# and the account exists). Reapply (D20) only for those accounts.
+# and the account exists). Reapply (D20) only for those accounts. -ExtraTokenNames: see Get-CrNewSecretProblems.
 function Read-CrOneSlotSecret {
-    param($SlotDefinition, [string]$Label, $Accounts, $Config, [hashtable]$Previous)
+    param($SlotDefinition, [string]$Label, $Accounts, $Config, [hashtable]$Previous, [string[]]$ExtraTokenNames)
     $slot = [string]$SlotDefinition['Slot']
     $nameList = New-Object System.Collections.ArrayList
     foreach ($a in $Accounts) { [void]$nameList.Add((Get-CrSlotAccountDisplay $a)) }
@@ -231,6 +242,11 @@ function Read-CrOneSlotSecret {
             Write-Host ('  {0}: the password is changed with its current password (keeps its DPAPI data, D9).' -f $a['Name'])
         } else {
             Write-Host ('  {0}: the password is set; its current password is not needed.' -f $a['Name'])
+        }
+        if ($a['Disabled'] -and $a['Enable']) {
+            Write-Host ('  {0}: the account is disabled; it is enabled in this run.' -f $a['Name'])
+        } elseif ($a['Disabled']) {
+            Write-Host ('  {0}: the account is disabled; it gets the password but stays disabled.' -f $a['Name'])
         }
     }
 
@@ -258,7 +274,7 @@ function Read-CrOneSlotSecret {
             Write-Host 'The two entries do not match.'
             continue
         }
-        $problems = Get-CrNewSecretProblems -NewSecret $entrySecret -Config $Config -Accounts $Accounts -SlotDefinition $SlotDefinition
+        $problems = Get-CrNewSecretProblems -NewSecret $entrySecret -Config $Config -Accounts $Accounts -SlotDefinition $SlotDefinition -ExtraNames $ExtraTokenNames
         if ($problems.Count -gt 0) {
             $entrySecret.Dispose()
             Write-Host 'The new password was not accepted:'
@@ -335,8 +351,10 @@ function Read-CrSlotSecrets {
         $isSql = $false
         $accounts = New-Object System.Collections.ArrayList
         $seen = New-Object System.Collections.ArrayList
+        $missingNames = New-Object System.Collections.ArrayList
         foreach ($entry in $slotEntries) {
             if ([string]$entry['Kind'] -eq 'SqlLogin') { $isSql = $true }
+            foreach ($m in (ConvertTo-CrArray $entry['Missing'])) { if ($m) { [void]$missingNames.Add([string]$m) } }
             foreach ($a in (ConvertTo-CrArray $entry['Accounts'])) {
                 if (-not ($a -is [hashtable])) { continue }
                 $key = [string]$a['Sid']
@@ -361,7 +379,8 @@ function Read-CrSlotSecrets {
             Write-CrPasswordHistoryNotice -State $State
             $noticeShown = $true
         }
-        $result[$slot] = Read-CrOneSlotSecret -SlotDefinition $definition -Label $label -Accounts ($accounts.ToArray()) -Config $Config -Previous $previous
+        $result[$slot] = Read-CrOneSlotSecret -SlotDefinition $definition -Label $label -Accounts ($accounts.ToArray()) -Config $Config -Previous $previous `
+            -ExtraTokenNames ([string[]]$missingNames.ToArray([string]))
     }
     return $result
 }

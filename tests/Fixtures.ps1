@@ -6,20 +6,22 @@
 #   Helpers: Get-CrTestUser, Get-CrTestUserSid, Get-CrTestGroup, Add-CrTestUser, Remove-CrTestUser,
 #            Add-CrTestGroup, Add-CrTestGroupMember, Remove-CrTestGroupMember, Set-CrTestRight, Add-CrTestRight
 #
-# Profiles (v10 account model, PLAN D21-D25):
-#   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no SOP-Admin and no PUB-User (both to be created);
-#         built-in Administrator renamed 'LocalAdm' (disabled); BiCA Admin, BiCA Remote (Administrators + Remote Desktop
-#         Users), WinAutoUser (enabled, password-stored task \KioskTask) - all replaced; ApplicationUser (runs SQL
-#         Server, app services, tasks, COM+); SP Admin (enabled admin, password-stored task \SpMaintenance; retired);
-#         WinUser1-3 (WinUser3 disabled; WinUser1 in RDU + hw_fn_*; WinUser2 in Power Users), FTP users TEST_FTP +
-#         ftpClient in CardCenters + Users; myftpuser (enabled, not an FTP user) and OtherAdmin (enabled admin) are
-#         the two "other enabled accounts" (D23); groups CardCenters, hw_fn_usbstor, hw_fn_cdrom, Offer Remote
-#         Assistance Helpers (BiCA Admin, BiCA Remote).
+# Profiles (account model PLAN v10.3: D18, D21-D25):
+#   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no PUB-User; built-in Administrator renamed 'LocalAdm'
+#         (disabled; replaced by ApplicationUser); BiCA Admin, BiCA Remote (Administrators + Remote Desktop Users; the
+#         operator's account) - managed, set; WinAutoUser (enabled, password-stored task \KioskTask, updated in place by
+#         the AutoLogon slot); ApplicationUser (runs SQL Server, app services, tasks, COM+); SP Admin (enabled admin,
+#         password-stored task \SpMaintenance; retired); WinUser1-3 (WinUser3 disabled; WinUser1 in RDU + hw_fn_*;
+#         WinUser2 in Power Users), FTP users TEST_FTP + ftpClient in CardCenters + Users; myftpuser (enabled, not an
+#         FTP user) and OtherAdmin (enabled admin) are the two "other enabled accounts" (D23); groups CardCenters,
+#         hw_fn_usbstor, hw_fn_cdrom, Offer Remote Assistance Helpers (BiCA Admin, BiCA Remote).
 #   IPT01 (IPT01-like, SQL Express): built-in 'Administrator' enabled (replaced by ApplicationUser); SOP-Admin exists
-#         (Administrators only); BiCA Admin (runs the service AppHelper), BiCA Remote (Administrators + RDU),
-#         ApplicationUser (runs SQL Server), PUB-User and WinAutoUser; SYS Admin (enabled admin, runs the service
-#         LegacySync; retired); no other enabled accounts; no CardCenters, no Offer Remote Assistance Helpers.
-#   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword; deny rights as on the test sites.
+#         (Administrators only; retired, v10.2); BiCA Admin (runs the service AppHelper, updated in place), BiCA Remote
+#         (Administrators + RDU), ApplicationUser (runs SQL Server), PUB-User and WinAutoUser; SYS Admin (enabled admin,
+#         runs the service LegacySync; retired); no other enabled accounts; no CardCenters, no Offer Remote Assistance
+#         Helpers.
+#   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword (SM: turned off; IPT01: switched to PUB-User);
+#         deny rights as on the test sites.
 
 $CrFixturesDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -307,7 +309,7 @@ function New-CrTestState {
     } else {
         [void]$services.Add(@{ Name = 'MSSQLSERVER'; DisplayName = 'SQL Server (MSSQLSERVER)'; StartName = $appStart; StartNameSid = $appUser; StartMode = 'Auto'; State = 'Running'; PathExecutable = $sqlExe; DependentServices = @(); DependsOn = @() })
         [void]$services.Add(@{ Name = 'SQLSERVERAGENT'; DisplayName = 'SQL Server Agent (MSSQLSERVER)'; StartName = 'NT AUTHORITY\NetworkService'; StartNameSid = 'S-1-5-20'; StartMode = 'Disabled'; State = 'Stopped'; PathExecutable = 'C:\Program Files\Microsoft SQL Server\MSSQL10_50.MSSQLSERVER\MSSQL\Binn\SQLAGENT.EXE'; DependentServices = @(); DependsOn = @('MSSQLSERVER') })
-        # Dependents of a replaced account (moved to SOP-Admin, D24) and of a retired one (operator decision, O5)
+        # Dependents of a managed account (updated in place) and of a retired one (operator decision, O5)
         [void]$services.Add(@{ Name = 'AppHelper'; DisplayName = 'App Helper'; StartName = '.\BiCA Admin'; StartNameSid = $bicaAdmin; StartMode = 'Auto'; State = 'Running'; PathExecutable = 'C:\App\Helper.exe'; DependentServices = @(); DependsOn = @() })
         [void]$services.Add(@{ Name = 'LegacySync'; DisplayName = 'Legacy Sync'; StartName = '.\SYS Admin'; StartNameSid = $sysAdmin; StartMode = 'Manual'; State = 'Stopped'; PathExecutable = 'C:\App\Sync.exe'; DependentServices = @(); DependsOn = @() })
     }
@@ -320,7 +322,7 @@ function New-CrTestState {
             @{ Path = '\AppTask1'; UserId = $taskUser; UserSid = $appUser; LogonType = 1; Enabled = $true; Error = $null },
             @{ Path = '\AppTask2'; UserId = $taskUser; UserSid = $appUser; LogonType = 1; Enabled = $true; Error = $null },
             @{ Path = '\AppServerTask'; UserId = $taskUser; UserSid = $appUser; LogonType = 6; Enabled = $true; Error = $null },
-            # Dependents of a replaced account (moved to PUB-User, D24) and of a retired one (operator decision, O5)
+            # Dependents of a managed auto-logon account (updated in place) and of a retired one (operator decision, O5)
             @{ Path = '\KioskTask'; UserId = ('{0}\WinAutoUser' -f $ComputerName); UserSid = $winAuto; LogonType = 1; Enabled = $true; Error = $null },
             @{ Path = '\SpMaintenance'; UserId = ('{0}\SP Admin' -f $ComputerName); UserSid = $spAdmin; LogonType = 1; Enabled = $true; Error = $null }
         )

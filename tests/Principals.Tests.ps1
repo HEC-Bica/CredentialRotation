@@ -36,47 +36,87 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
     $resolved = Resolve-CrAccounts -Config $config -State $state
 
     It 'returns one entry per config entry, in config order' {
-        $resolved.Count | Should Be 9
-        $resolved[0].Id | Should Be 'SOPAdmin'
-        $resolved[3].Id | Should Be 'Retired'
-        $resolved[8].Id | Should Be 'SqlService'
+        $resolved.Count | Should Be 10
+        $resolved[0].Id | Should Be 'BiCAAdmin'
+        $resolved[1].Id | Should Be 'BiCARemote'
+        $resolved[3].Id | Should Be 'AutoLogon'
+        $resolved[4].Id | Should Be 'Retired'
+        $resolved[9].Id | Should Be 'SqlService'
     }
 
-    It 'resolves a missing Create account to a placeholder (D21)' {
-        $e = Get-TestEntry $resolved 'SOPAdmin'
+    It 'resolves the existing BiCA Admin without creating it (no Replaces)' {
+        $e = Get-TestEntry $resolved 'BiCAAdmin'
+        $e.Kind | Should Be 'Windows'
+        $e.Mode | Should Be 'Rotate'
+        $e.Create | Should Be $false
+        $e.NotApplicable | Should Be $false
+        $e.Missing.Count | Should Be 0
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].Name | Should Be 'BiCA Admin'
+        $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'BiCA Admin')
+        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
+        $e.Slot | Should Be 'BiCAAdmin'
+        $e.RoleName | Should Be 'Admin'
+        $e.PasswordMode | Should Be 'Set'
+        $e.LoginsEntry | Should Be $true
+        $e.Operator | Should Be $false
+        $e.EnableIfDisabled | Should Be $false
+        $e.Replaced.Count | Should Be 0
+    }
+
+    It 'resolves a missing BiCA Admin to a placeholder (Create, D21 v10.3)' {
+        $s = New-CrTestState -Profile 'SM' -OmitUsers 'BiCA Admin'
+        $e = Get-TestEntry (Resolve-CrAccounts -Config $config -State $s) 'BiCAAdmin'
         $e.Kind | Should Be 'Windows'
         $e.Mode | Should Be 'Rotate'
         $e.Create | Should Be $true
         $e.NotApplicable | Should Be $false
         $e.Missing.Count | Should Be 0
         $e.Accounts.Count | Should Be 1
-        $e.Accounts[0].Name | Should Be 'SOP-Admin'
+        $e.Accounts[0].Name | Should Be 'BiCA Admin'
         $e.Accounts[0].Sid | Should BeNullOrEmpty
         $e.Accounts[0].User | Should BeNullOrEmpty
         $e.Accounts[0].ToCreate | Should Be $true
-        $e.Slot | Should Be 'SOPAdmin'
-        $e.RoleName | Should Be 'Operator'
+        $e.Slot | Should Be 'BiCAAdmin'
+        $e.RoleName | Should Be 'Admin'
         $e.Role.ExclusiveGroups | Should Be $true
         $e.PasswordMode | Should Be 'Set'
         $e.LoginsEntry | Should Be $true
+        $e.Operator | Should Be $false
+        $e.Replaced.Count | Should Be 0
         $e.Candidate | Should BeNullOrEmpty
         $e.AutoLogon | Should BeNullOrEmpty
     }
 
-    It 'lists the enabled replaced accounts of SOP-Admin' {
-        $e = Get-TestEntry $resolved 'SOPAdmin'
-        $e.Replaced.Count | Should Be 2
-        $e.Replaced[0].Name | Should Be 'BiCA Admin'
-        $e.Replaced[0].Sid | Should Be (Get-CrTestUserSid $state 'BiCA Admin')
-        $e.Replaced[0].User.Name | Should Be 'BiCA Admin'
-        $e.Replaced[0].Enabled | Should Be $true
-        $e.Replaced[1].Name | Should Be 'BiCA Remote'
+    It 'resolves the operator account BiCA Remote (Operator, AdminRemote role)' {
+        $e = Get-TestEntry $resolved 'BiCARemote'
+        $e.Operator | Should Be $true
+        $e.EnableIfDisabled | Should Be $false
+        $e.Create | Should Be $false
+        $e.Accounts[0].Name | Should Be 'BiCA Remote'
+        $e.Slot | Should Be 'BiCARemote'
+        $e.RoleName | Should Be 'AdminRemote'
+        (@($e.Role.AllowedExtraGroups) -contains 'S-1-5-32-555') | Should Be $true
+        $e.PasswordMode | Should Be 'Set'
+        $e.Replaced.Count | Should Be 0
+    }
+
+    It 'resolves a missing BiCA Remote to a placeholder that keeps Operator' {
+        $s = New-CrTestState -Profile 'SM' -OmitUsers 'BiCA Remote'
+        $e = Get-TestEntry (Resolve-CrAccounts -Config $config -State $s) 'BiCARemote'
+        $e.Create | Should Be $true
+        $e.Operator | Should Be $true
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].Name | Should Be 'BiCA Remote'
+        $e.Accounts[0].ToCreate | Should Be $true
     }
 
     It 'resolves an existing Change account and its replaced RID-500 (renamed, already disabled)' {
         $e = Get-TestEntry $resolved 'AppUser'
         $e.Create | Should Be $false
         $e.PasswordMode | Should Be 'Change'
+        $e.EnableIfDisabled | Should Be $true
+        $e.Operator | Should Be $false
         $e.Accounts.Count | Should Be 1
         $e.Accounts[0].Name | Should Be 'ApplicationUser'
         $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'ApplicationUser')
@@ -86,23 +126,48 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $e.Replaced[0].Enabled | Should Be $false
     }
 
+    It 'resolves a missing ApplicationUser to a placeholder and still lists the replaced RID-500' {
+        $s = New-CrTestState -Profile 'SM' -OmitUsers 'ApplicationUser'
+        $e = Get-TestEntry (Resolve-CrAccounts -Config $config -State $s) 'AppUser'
+        $e.Create | Should Be $true
+        $e.Accounts[0].Name | Should Be 'ApplicationUser'
+        $e.Accounts[0].ToCreate | Should Be $true
+        $e.Replaced.Count | Should Be 1
+        $e.Replaced[0].Name | Should Be 'LocalAdm'
+    }
+
     It 'carries the original config entry in Config' {
         $e = Get-TestEntry $resolved 'AppUser'
         $e.Config.Services | Should Be 'Auto'
-        [object]::ReferenceEquals($e.Config, $config.Accounts[1]) | Should Be $true
+        [object]::ReferenceEquals($e.Config, $config.Accounts[2]) | Should Be $true
         (Get-TestEntry $resolved 'SqlApp').Config.ServerRoles[0] | Should Be 'sysadmin'
     }
 
-    It 'creates PUB-User, replaces WinAutoUser and keeps the auto-logon block' {
-        $e = Get-TestEntry $resolved 'PubUser'
-        $e.Create | Should Be $true
-        $e.Accounts[0].Name | Should Be 'PUB-User'
-        $e.Replaced.Count | Should Be 1
-        $e.Replaced[0].Name | Should Be 'WinAutoUser'
-        $e.Replaced[0].Enabled | Should Be $true
+    It 'resolves the AutoLogon entry to WinAutoUser; the absent PUB-User is missing, not created' {
+        $e = Get-TestEntry $resolved 'AutoLogon'
+        $e.Mode | Should Be 'Rotate'
+        $e.Create | Should Be $false
+        $e.NotApplicable | Should Be $false
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].Name | Should Be 'WinAutoUser'
+        $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'WinAutoUser')
+        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
+        $e.Missing.Count | Should Be 1
+        $e.Missing[0] | Should Be 'PUB-User'
+        $e.Replaced.Count | Should Be 0
+        $e.Slot | Should Be 'AutoLogon'
+        $e.RoleName | Should Be 'User'
+        $e.PasswordMode | Should Be 'Set'
+        $e.Operator | Should Be $false
+        $e.EnableIfDisabled | Should Be $false
+    }
+
+    It 'keeps the auto-logon block and both AutoLogonUser names' {
+        $e = Get-TestEntry $resolved 'AutoLogon'
         $e.AutoLogon.RestrictedComputerPattern | Should Be '^SM'
-        $e.AutoLogonUser.Count | Should Be 1
+        $e.AutoLogonUser.Count | Should Be 2
         $e.AutoLogonUser[0].Name | Should Be 'PUB-User'
+        $e.AutoLogonUser[1].Name | Should Be 'WinAutoUser'
     }
 
     It 'resolves a Disable entry to the existing accounts' {
@@ -111,21 +176,29 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $e.Slot | Should BeNullOrEmpty
         $e.PasswordMode | Should BeNullOrEmpty
         $e.Create | Should Be $false
+        $e.Operator | Should Be $false
+        $e.EnableIfDisabled | Should Be $false
         $e.Replaced.Count | Should Be 0
         $e.Accounts.Count | Should Be 1
         $e.Accounts[0].Name | Should Be 'SP Admin'
-        $e.Missing.Count | Should Be 1
+        $e.Missing.Count | Should Be 2
         $e.Missing[0] | Should Be 'SYS Admin'
+        $e.Missing[1] | Should Be 'SOP-Admin'
         $e.NotApplicable | Should Be $false
     }
 
     It 'compares names case-insensitively' {
         $c = New-CrTestConfig
         (Get-TestConfigEntry $c 'AppUser').Name = 'applicationuser'
-        (Get-TestConfigEntry $c 'PubUser').Replaces = @('winautouser')
+        (Get-TestConfigEntry $c 'AutoLogon').Names = @('pub-user', 'winautouser')
+        (Get-TestConfigEntry $c 'Retired').Names = @('sp admin')
         $r = Resolve-CrAccounts -Config $c -State $state
         (Get-TestEntry $r 'AppUser').Accounts[0].Name | Should Be 'ApplicationUser'
-        (Get-TestEntry $r 'PubUser').Replaced[0].Name | Should Be 'WinAutoUser'
+        $al = Get-TestEntry $r 'AutoLogon'
+        $al.Accounts.Count | Should Be 1
+        $al.Accounts[0].Name | Should Be 'WinAutoUser'
+        $al.Missing[0] | Should Be 'pub-user'
+        (Get-TestEntry $r 'Retired').Accounts[0].Name | Should Be 'SP Admin'
     }
 
     It 'marks Check entries' {
@@ -134,6 +207,9 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $e.Slot | Should BeNullOrEmpty
         $e.PasswordMode | Should BeNullOrEmpty
         $e.LoginsEntry | Should Be $false
+        $e.Create | Should Be $false
+        $e.Operator | Should Be $false
+        $e.EnableIfDisabled | Should Be $false
         $e.Accounts.Count | Should Be 3
     }
 
@@ -165,13 +241,31 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
     $state = New-CrTestState -Profile 'IPT01'
     $resolved = Resolve-CrAccounts -Config (New-CrTestConfig) -State $state
 
-    It 'resolves an existing SOP-Admin without creating it' {
-        $e = Get-TestEntry $resolved 'SOPAdmin'
+    It 'resolves the existing BiCA accounts without creating them' {
+        $a = Get-TestEntry $resolved 'BiCAAdmin'
+        $a.Create | Should Be $false
+        $a.Accounts.Count | Should Be 1
+        $a.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'BiCA Admin')
+        $a.Accounts[0].ToCreate | Should BeNullOrEmpty
+        $r = Get-TestEntry $resolved 'BiCARemote'
+        $r.Create | Should Be $false
+        $r.Operator | Should Be $true
+        $r.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'BiCA Remote')
+    }
+
+    It 'selects the existing SOP-Admin by the Retired entry (Mode Disable), never creates it' {
+        $e = Get-TestEntry $resolved 'Retired'
+        $e.Mode | Should Be 'Disable'
         $e.Create | Should Be $false
-        $e.Accounts.Count | Should Be 1
-        $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'SOP-Admin')
-        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
-        $e.Replaced.Count | Should Be 2
+        $e.Slot | Should BeNullOrEmpty
+        $e.Accounts.Count | Should Be 2
+        $e.Accounts[1].Name | Should Be 'SOP-Admin'
+        $e.Accounts[1].Sid | Should Be (Get-CrTestUserSid $state 'SOP-Admin')
+        $e.Accounts[1].ToCreate | Should BeNullOrEmpty
+        foreach ($r in $resolved) {
+            if ($r.Id -eq 'Retired') { continue }
+            (Get-TestAccountNames $r) -contains 'SOP-Admin' | Should Be $false
+        }
     }
 
     It 'lists an enabled built-in Administrator as replaced by ApplicationUser' {

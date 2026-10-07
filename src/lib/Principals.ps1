@@ -85,6 +85,8 @@ function New-CrResolvedEntry {
         NotApplicable = $true
         Create        = $false
         PasswordMode  = $passwordMode
+        Operator      = ($mode -eq 'Rotate' -and $Entry['Operator'] -eq $true)
+        EnableIfDisabled = ($mode -eq 'Rotate' -and $Entry['EnableIfDisabled'] -eq $true)
         Replaced      = @()
         AutoLogon     = $Entry['AutoLogon']
         AutoLogonUser = $autoLogonUser
