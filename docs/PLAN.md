@@ -1,6 +1,6 @@
 # Credential Rotation Tool — Implementation Plan
 
-Status: draft v9.3 · 2026-10-06.
+Status: draft v9.4 · 2026-10-07 (adds D20 re-apply mode; M1 audit validated on both test sites).
 - Eleven rounds of independent review (Appendix A).
 - Updated with the **M0 inventories of two test sites** (§13.2) and the user's decisions on their findings:
   - **QS-K1:** `SM-QS-K1` and `IPT01-QS-K1`, Windows 10 LTSC 2019
@@ -92,6 +92,7 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 | D17 | **The tool never restarts the application user's dependents** (SQL Server, Agent, retail services, COM+ applications). SCM, task and COM+ credentials are updated and reported as "restart pending". They take effect at the next start (maintenance window, reboot, or after the `LOGINS` update). | Confirmed. A password change doesn't need an immediate restart. A restart would cause an outage and make the app re-read stale `LOGINS` entries. |
 | D18 | **Auto-logon policy.** Auto-logon only ever runs as a usable `PUB-User` or `WinAutoUser` (enabled, unlocked, interactive logon allowed), **never as an admin**. On **SM machines** (computer name starts with `SM`, case-insensitive) an admin or any other account is turned off, while `PUB-User`/`WinAutoUser` is kept. On other machines, any other account is switched to the selected user (`PUB-User` preferred, also over a running `WinAutoUser` auto-logon). Auto-logon that is off stays off. Rules in §7.5. | Confirmed. Test site 102575 runs auto-logon as `BiCA Admin` on both machines, with the password in plain text in the registry. |
 | D19 | **Write-filter guard.** Preflight detects EWF/FBWF (Windows Embedded Standard 7) and UWF (Windows 10). A volume counts as protected if the filter protects it in the **current session**, unless a whole-volume commit is pending for the next shutdown (EWF `-commit`). If the state can't be determined while a filter driver is installed, the volume counts as protected.<br>• **System volume protected → all of `-Apply` is blocked** (confirmed): slots, auto-logon step, enforcement phase. The tool's own journal and logs would vanish too. Audit still runs and explains why.<br>• Otherwise, a protected volume holding SQL `master` data or log files (`sys.master_files`) blocks the SQL slots. | Confirmed: unknown whether the machines use a write filter. Changes on a protected volume vanish at the next reboot. |
+| D20 | **Re-apply mode.** A Windows account whose entered new password equals its validated old password is treated as "already on the new secret" (D11): **no password change** (no history rejection, DPAPI untouched), but its dependents (SCM, tasks, COM+, auto-logon secret) are rewritten with that password, groups and flags are enforced, and every verification runs. No `LOGINS` follow-up for that account. SQL slots are left empty, which skips them (§6 step 6). | Confirmed as the safe first write test (README step 2), before any real rotation. Exercises almost the whole write path without risk of lockout. |
 
 ## 3. Execution model
 
@@ -291,6 +292,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
      - the complexity emulation from D15 (name/full-name tokens, character categories)
    - A notice reminds the operator that machines with password history (24 on `IPT01-QS-K1`, 5 on both machines of 102575) reject previously used passwords, and the tool can't check this in advance. **Site passwords must never have been used before.**
    - An empty entry skips the slot after confirmation.
+   - **Re-apply mode (D20):** if an account's new password equals its entered old password (BSTR comparison, no plaintext), the plan marks that account "re-apply: password unchanged".
 7. **Credential probe** for Windows accounts (D12, D16):
    - **Logon type:** the first type the account is allowed (granted directly or via one of its groups, and not denied), in the order Network → Interactive → Batch → Service. Examples from the test sites:
      - `BiCA Remote` → Network (denied local logon, and batch/service on IPT01)
@@ -304,6 +306,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
    - **Outcomes:**
      - old password works → change path
      - new password works → **already on the new secret** (D11)
+     - re-apply (D20): the old password works, and it equals the new one → treated as **already on the new secret**; no password change
      - both fail → the operator may re-enter the old password within the budget, or choose reset (DPAPI warning) or skip
    - **Locked accounts:** no probe. Unlock after `YES`, then validate the old password once (apply step 1). If unlocking doesn't reset the counter (spike item 2) and the budget forbids the attempt, the operator chooses: wait, reset, or skip.
    - **Minimum password age** (1 day on both IPT01 machines): if `PasswordAge < MinPasswordAge`, `ChangePassword` is impossible. The plan shows "reset instead of change (DPAPI impact)" or "skip"; the operator decides.
@@ -546,7 +549,7 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
 ```
 1  pre-steps    unlock if locked (+ single old-password validation if probe was deferred) / clear CCP (change path);
                 recorded; undone on failure before step 2
-2  secret       skip if "already on new secret"; lock state re-checked; ChangePassword/SetPassword for every
+2  secret       skip if "already on new secret" (incl. re-apply, D20); lock state re-checked; ChangePassword/SetPassword for every
                 account of the slot, or ALTER LOGIN (+UNLOCK); test each new secret immediately
                 (logon type per D16), budget re-checked first
 3  dependents   SCM -> tasks -> COM+   (auto-logon is a separate step after all slots, §7.5)
@@ -662,6 +665,7 @@ The auto-logon slot may contain two accounts (`PUB-User`, `WinAutoUser`), each w
     - on as `BiCA Admin` with a plain-text password, on an SM machine: turn off
     - the same on an IPT01 machine: switch to `WinAutoUser`
     - the auto-logon slot skipped while `BiCA Admin` is rotated: the operator chooses
+  - **re-apply (D20)** on test site 102575 with `/PS2`: every Windows slot entered with its current password, SQL slots empty. Expected: no password changed (password age unchanged), dependents and auto-logon rewritten, groups/flags enforced, re-audit clean, no `LOGINS` follow-up
   - **`ApplicationUser` running SQL Server**: rotation leaves SQL running ("restart pending"); a later manual restart or reboot starts SQL, the Agent and the retail services with the new password
 - **Failure injection:**
   - wrong old password with the counter at threshold−2
@@ -679,7 +683,7 @@ The auto-logon slot may contain two accounts (`PUB-User`, `WinAutoUser`), each w
 |---|---|---|
 | M0 | Inventory (**test sites QS-K1 and 102575 done** with v1.0, §13.2); **v1.3 on one Windows Embedded 7 and one Windows 10 machine** (`Add-Type` and netapi32 under PS 2.0, group members, write filter); further sites, esp. FR/IT and PS-2.0-only Windows 7; spike, schema freeze, VM matrix | inventory + spike results in `docs/`. The v1.3 results are the entry gate for the `Native.ps1` parts of M1; the rest of M1 can start before. |
 | M1 | Launcher, config, principals, selection + SID overlap, **effective rights**, preflight (policy via `NetUserModalsGet`, write filter D19), discovery incl. the D18 decision, audit | correct audit on VMs and both test sites, incl. one `/PS2` audit per test machine |
-| M2 | Prompting with **site rules**, probe + lockout budget + D16, run journal, adapters, rotation, check mode, groups with allow-lists and rails, **auto-logon policy (D18)**, verification, follow-up reports, exit codes | apply + re-audit clean; D9 confirmed; no apply leaves a rotated account in auto-logon; the first apply on test site 102575 runs with `/PS2` |
+| M2 | Prompting with **site rules**, probe + lockout budget + D16, run journal, adapters, rotation, check mode, groups with allow-lists and rails, **auto-logon policy (D18)**, verification, follow-up reports, exit codes | apply + re-audit clean; D9 confirmed; no apply leaves a rotated account in auto-logon; the first apply on test site 102575 is a **re-apply (D20)** with `/PS2` |
 | M3 | Slot sequencing, services (incl. SQL Server as a dependent), tasks, COM+, IIS report, retry, idempotent re-run | after a reboot every dependent starts with the new password; kill-and-rerun passes |
 | M4 | Auto-logon reboot verification | standardize, switch and turn off each behave as planned after a reboot, on every OS/language |
 | M5 | SQL rotation 2005–2017 incl. `UNLOCK` | SQL slots rotate cleanly on 2008 R2 and 2017 |
@@ -743,6 +747,7 @@ The auto-logon slot may contain two accounts (`PUB-User`, `WinAutoUser`), each w
 | Write filter | Unknown whether used → **detect**. System volume protected → **block all of `-Apply`**; a protected SQL `master` volume → block the SQL slots | D19 |
 | `WinAutoUser` → `PUB-User` | Non-SM machine with a `WinAutoUser` auto-logon and a usable `PUB-User`: **switch to `PUB-User`** | D18 |
 | PS 2.0 test host | **None available yet**; unit tests on PS 5.1 meanwhile, `/PS2` audits on the test sites | §11, O3 |
+| Re-apply test | Before the first real rotation, re-apply the current passwords as a safe write test | D20, README step 2 |
 | BiCA Admin | Administrators only; **removed** from `Offer Remote Assistance Helpers` | `Admin` role |
 | Old passwords | Usually known | D9 |
 | Password policy | Earlier answer "uniform" was **contradicted by the inventory** (§13.2). Decision: **strictest rule on every machine** | D15 |

@@ -10,7 +10,7 @@ A PowerShell tool that rotates the local Windows and SQL Server credentials on s
 
 | Milestone | Content | State |
 |---|---|---|
-| M1 | Read-only audit | On branch `feature/m1-audit`; **tested on `SM-QS-K1`** (Windows 10), Windows 7 Embedded pending |
+| M1 | Read-only audit | On branch `feature/m1-audit`; **tested on `SM-QS-K1`** (Windows 10) **and `SM-102575`** (Windows Embedded 7), PS 5.1 and PS 2.0 |
 | M2 | Password prompts, rotation, groups, flags, auto-logon policy | Not started |
 | M3 | Services, scheduled tasks, COM+ updates | Not started |
 
@@ -21,7 +21,7 @@ AppLocker blocks scripts on the development machine, so all runs happen on the t
 | Machine | Audit (PS 5.1) | Audit (`/PS2`) | Unit tests | Inventory |
 |---|---|---|---|---|
 | `SM-QS-K1` (Windows 10 LTSC 2019) | OK, findings match the machine | OK; SQL blocked (see below) | 417 / 417 | v1.4 OK |
-| `SM-102575` (Windows Embedded 7) | pending | pending | not possible (no Pester) | pending |
+| `SM-102575` (Windows Embedded 7) | OK, findings match the machine | OK, incl. SQL | not possible (no Pester) | not run |
 
 Fixed after the first runs:
 - 13 unit tests failed because of a Pester 3.4 behaviour (a mock defined in one test leaked into the next ones); each such test now has its own `Context`.
