@@ -213,12 +213,6 @@ function Test-CrAutoLogonUsable {
     return $r
 }
 
-function Get-CrAutoLogonDisplayName {
-    param($User, [string]$Fallback)
-    if ($User -and $User['Name']) { return [string]$User['Name'] }
-    return $Fallback
-}
-
 #endregion
 
 #region Public
@@ -445,10 +439,6 @@ function Get-CrAutoLogonDecision {
         if ($current) {
             $isManaged = ($managedSids -contains [string]$current['Sid'])
             $currentUsable = Test-CrAutoLogonUsable -State $State -User $current -RemovedAdminSids $removed
-            if ($isManaged -and $currentUsable['AdminPending']) {
-                $msg = ('{0} is itself an admin and its slot did not complete in this run.' -f $current['Name'])
-                if ($ambiguous -notcontains $msg) { [void]$ambiguous.Add($msg) }
-            }
             $kind = 'another account'
             if ($isManaged) {
                 $kind = 'a managed auto-logon account'
@@ -463,6 +453,8 @@ function Get-CrAutoLogonDecision {
                 if ($currentUsable['Usable']) {
                     $intended = 'Standardize'
                     [void]$reasons.Add(('{0} is a managed auto-logon account: it is kept and standardized.' -f $current['Name']))
+                } elseif ($currentUsable['AdminPending'] -and @($currentUsable['Reasons']).Count -eq 1) {
+                    [void]$ambiguous.Add(('{0} is itself an admin and its slot did not complete in this run.' -f $current['Name']))
                 } else {
                     [void]$ambiguous.Add(('The kept auto-logon account {0} is not usable: {1}.' -f $current['Name'], (@($currentUsable['Reasons']) -join ', ')))
                 }
@@ -504,7 +496,8 @@ function Get-CrAutoLogonDecision {
             $d['Action'] = 'Standardize'
         } else {
             $d['Action'] = 'NoChange'
-            [void]$reasons.Add(('{0} is not changed in this run: the stored password is still valid, so standardize changes nothing.' -f $d['TargetName']))
+            # A password changed but not verified is reported by Apply as "broken until re-run" (HighImpact).
+            [void]$reasons.Add(('{0} is not on a verified new password in this run: if its password was not changed, the stored password is still valid, so standardize changes nothing.' -f $d['TargetName']))
         }
     } elseif ($intended -eq 'Switch') {
         if ($targetVerified) {
@@ -646,15 +639,14 @@ function Invoke-CrAutoLogonAction {
         return $result
     }
 
-    $stepAction = $action
     $targetSid = [string]$Decision['TargetSid']
     $targetName = [string]$Decision['TargetName']
-    if (@('Standardize', 'Switch', 'TurnOff') -notcontains $stepAction) {
+    if (@('Standardize', 'Switch', 'TurnOff') -notcontains $action) {
         $result['Error'] = ('Unknown auto-logon action "{0}"; nothing was written.' -f $action)
         return $result
     }
 
-    if ($stepAction -ne 'TurnOff') {
+    if ($action -ne 'TurnOff') {
         if ($null -eq $Secret) {
             $result['Error'] = ('{0} needs the new secret of the target account; nothing was written.' -f $action)
             return $result
@@ -671,7 +663,7 @@ function Invoke-CrAutoLogonAction {
 
     $done = New-Object System.Collections.ArrayList
     $pending = New-Object System.Collections.ArrayList
-    $steps = Get-CrAutoLogonActionSteps -Action $stepAction -TargetName $targetName -ComputerName $computerName
+    $steps = Get-CrAutoLogonActionSteps -Action $action -TargetName $targetName -ComputerName $computerName
     $failed = $null
     foreach ($step in $steps) {
         if ($failed) {

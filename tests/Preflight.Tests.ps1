@@ -9,14 +9,18 @@ function Test-CrNativeReady { }
 
 . (Join-Path $here '..\src\lib\Preflight.ps1')
 
+# The account entries of the v10.3 config (CONTRACTS "v10: account model"), reduced to the keys Preflight reads.
 $TestConfig = @{
     Accounts = @(
-        @{ Id = 'BiCAAdmin'; Kind = 'Windows'; Name = 'BiCA Admin'; Credential = 'BiCAAdmin' }
-        @{ Id = 'AppUser'; Kind = 'Windows'
-           Candidates = @(@{ Name = 'ApplicationUser'; Credential = 'AppUserApplication' }, @{ Sid = 'RID-500'; Credential = 'AppUserBuiltinAdmin' }) }
-        @{ Id = 'AutoLogon'; Kind = 'Windows'; Credential = 'AutoLogon'; Names = @('PUB-User', 'WinAutoUser')
+        @{ Id = 'BiCAAdmin'; Kind = 'Windows'; Name = 'BiCA Admin'; Role = 'Admin'; Credential = 'BiCAAdmin'; Create = $true }
+        @{ Id = 'BiCARemote'; Kind = 'Windows'; Name = 'BiCA Remote'; Role = 'AdminRemote'; Credential = 'BiCARemote'; Create = $true; Operator = $true }
+        @{ Id = 'AppUser'; Kind = 'Windows'; Name = 'ApplicationUser'; Role = 'Admin'; Credential = 'AppUser'; Create = $true
+           EnableIfDisabled = $true; PasswordMode = 'Change'; Replaces = @('RID-500') }
+        @{ Id = 'AutoLogon'; Kind = 'Windows'; Names = @('PUB-User', 'WinAutoUser'); Role = 'User'; Credential = 'AutoLogon'
+           AutoLogonUser = @(@{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' })
            AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' } }
-        @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1'); Mode = 'Check' }
+        @{ Id = 'Retired'; Kind = 'Windows'; Names = @('SP Admin', 'SYS Admin', 'SOP-Admin'); Mode = 'Disable' }
+        @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1'); Role = 'WinUser'; Mode = 'Check' }
         @{ Id = 'SqlApp'; Kind = 'SqlLogin'; Name = 'SQLApplication'; Credential = 'SQLApplication' }
         @{ Id = 'SqlScript'; Kind = 'SqlLogin'; Name = 'SQLScript'; Credential = 'SQLScript' }
         @{ Id = 'SqlService'; Kind = 'SqlLogin'; Name = 'SQLService'; Credential = 'SQLService' }
@@ -95,8 +99,16 @@ function Test-AnyFinding {
     return $false
 }
 
+# Matching findings, written to the pipeline one by one: wrap the call in @().
+function Get-TestFindings {
+    param($Result, [string]$Severity, [string]$Pattern)
+    foreach ($f in @($Result['Findings'])) {
+        if ($f -and $f['Severity'] -eq $Severity -and ([string]$f['Message'] -match $Pattern)) { $f }
+    }
+}
+
 $SqlSlotNames = @('SQLApplication', 'SQLScript', 'SQLService')
-$WindowsSlotNames = @('BiCAAdmin', 'AppUserApplication', 'AppUserBuiltinAdmin', 'AutoLogon')
+$WindowsSlotNames = @('BiCAAdmin', 'BiCARemote', 'AppUser', 'AutoLogon')
 
 Describe 'Get-CrComputerInfo' {
     Mock Get-CrProcessEnvironment {
@@ -475,6 +487,62 @@ Describe 'Get-CrWriteFilterDecision (D19)' {
     }
 }
 
+Describe 'Get-CrPreflightSlots' {
+    It 'returns the slots of the managed Windows entries, not of Disable and Check entries' {
+        $slots = Get-CrPreflightSlots -Config $TestConfig -Kind 'Windows'
+        @($slots).Count | Should Be 4
+        foreach ($slot in $WindowsSlotNames) { (@($slots) -contains $slot) | Should Be $true }
+    }
+    It 'returns the SQL slots' {
+        $slots = Get-CrPreflightSlots -Config $TestConfig -Kind 'SqlLogin'
+        (@($slots) -join ',') | Should Be 'SQLApplication,SQLScript,SQLService'
+    }
+    It 'includes the slots of candidates' {
+        $cfg = @{ Accounts = @(@{ Id = 'AppUser'; Kind = 'Windows'
+                                  Candidates = @(@{ Name = 'ApplicationUser'; Credential = 'AppUserApplication' }, @{ Sid = 'RID-500'; Credential = 'AppUserBuiltinAdmin' }) }) }
+        $slots = Get-CrPreflightSlots -Config $cfg -Kind 'Windows'
+        (@($slots) -join ',') | Should Be 'AppUserApplication,AppUserBuiltinAdmin'
+    }
+}
+
+Describe 'Get-CrDependentDiscoveryErrors' {
+    It 'returns nothing when the sections were read or are absent' {
+        $s = @{
+            Services = @(@{ Name = 'TestSvc'; StartName = '.\ApplicationUser'; StartNameSid = 'S-1-5-21-1000-2000-3000-1003' })
+            Tasks    = @()
+            ComPlus  = @(@{ Name = 'TestApp'; Activation = 'Server'; Identity = 'ApplicationUser'; IdentitySid = 'S-1-5-21-1000-2000-3000-1003' })
+        }
+        # Comma-returned: assign the result before wrapping it in @().
+        $e = Get-CrDependentDiscoveryErrors -State $s
+        @($e).Count | Should Be 0
+        $e = Get-CrDependentDiscoveryErrors -State @{}
+        @($e).Count | Should Be 0
+    }
+    It 'reports a failed section as "Section: message"' {
+        $s = @{ Services = @(); Tasks = @(); ComPlus = @{ Error = 'catalog unreachable' } }
+        $e = Get-CrDependentDiscoveryErrors -State $s
+        @($e).Count | Should Be 1
+        $e[0] | Should Be 'ComPlus: catalog unreachable'
+    }
+    It 'reports every failed section in the order Services, Tasks, ComPlus' {
+        $s = @{ ComPlus = @{ Error = 'c failed' }; Tasks = @{ Error = 't failed' }; Services = @{ Error = 's failed' } }
+        $e = Get-CrDependentDiscoveryErrors -State $s
+        @($e).Count | Should Be 3
+        ($e -join '|') | Should Be 'Services: s failed|Tasks: t failed|ComPlus: c failed'
+    }
+    It 'ignores per-item errors in a section that was read (not a hashtable)' {
+        # One unreadable task folder is an item with Error in the Tasks array (a Plan finding), not a failed section.
+        $s = @{ Services = @(); Tasks = @(@{ Path = '\Locked'; UserId = $null; UserSid = $null; LogonType = $null; Enabled = $null; Error = 'Tasks: access denied' }); ComPlus = @() }
+        $e = Get-CrDependentDiscoveryErrors -State $s
+        @($e).Count | Should Be 0
+    }
+    It 'ignores a section hashtable without an error' {
+        $s = @{ Services = @{ Error = $null }; Tasks = @{ Error = '' } }
+        $e = Get-CrDependentDiscoveryErrors -State $s
+        @($e).Count | Should Be 0
+    }
+}
+
 Describe 'Invoke-CrPreflight' {
     Mock Test-CrNativeReady { return $true }
 
@@ -581,5 +649,60 @@ Describe 'Invoke-CrPreflight' {
         $r = Invoke-CrPreflight -State $s -Config $TestConfig
         (Test-AnyFinding $r 'Info' 'ForceGuest') | Should Be $true
         (Test-AnyFinding $r 'Info' 'complexity') | Should Be $true
+    }
+    It 'blocks the Windows slots, not the SQL slots or the machine, when a dependent discovery section failed (D24)' {
+        $s = New-TestPreflightState
+        $s['Services'] = @(); $s['Tasks'] = @()
+        $s['ComPlus'] = @{ Error = 'catalog unreachable' }
+        $r = Invoke-CrPreflight -State $s -Config $TestConfig
+        $r['MachineBlocked'] | Should Be $false
+        $r['BlockedSlots'].Count | Should Be 4
+        foreach ($slot in $WindowsSlotNames) {
+            $r['BlockedSlots'].ContainsKey($slot) | Should Be $true
+            ([string]$r['BlockedSlots'][$slot]).StartsWith('Dependents unknown') | Should Be $true
+            $r['BlockedSlots'][$slot] | Should Match 'ComPlus: catalog unreachable'
+        }
+        foreach ($slot in $SqlSlotNames) { $r['BlockedSlots'].ContainsKey($slot) | Should Be $false }
+        $slotFindings = @(Get-TestFindings $r 'Blocked' '^Dependents unknown')
+        $slotFindings.Count | Should Be 4
+        foreach ($f in $slotFindings) { $f['Area'] | Should Be 'Discovery' }
+    }
+    It 'adds one Blocked finding that no account is disabled in this run' {
+        $s = New-TestPreflightState
+        $s['ComPlus'] = @{ Error = 'catalog unreachable' }
+        $r = Invoke-CrPreflight -State $s -Config $TestConfig
+        $f = @(Get-TestFindings $r 'Blocked' '^No account is disabled')
+        $f.Count | Should Be 1
+        $f[0]['Area'] | Should Be 'Discovery'
+        $f[0]['Slot'] | Should BeNullOrEmpty
+        $f[0]['Detail'] | Should Be 'ComPlus: catalog unreachable'
+    }
+    It 'names every failed section once, in the slot reasons and the finding' {
+        $s = New-TestPreflightState
+        $s['Services'] = @{ Error = 'WMI broken' }
+        $s['Tasks'] = @{ Error = 'scheduler not available' }
+        $r = Invoke-CrPreflight -State $s -Config $TestConfig
+        $r['MachineBlocked'] | Should Be $false
+        $r['BlockedSlots']['AppUser'] | Should Be 'Dependents unknown (discovery failed): Services: WMI broken; Tasks: scheduler not available'
+        $f = @(Get-TestFindings $r 'Blocked' '^No account is disabled')
+        $f.Count | Should Be 1
+        $f[0]['Detail'] | Should Be 'Services: WMI broken; Tasks: scheduler not available'
+    }
+    It 'adds the discovery reason to a slot blocked for another reason' {
+        $s = New-TestPreflightState
+        $s['Policy'] = @{ Error = 'NetUserModalsGet failed' }
+        $s['Tasks'] = @{ Error = 'scheduler not available' }
+        $r = Invoke-CrPreflight -State $s -Config $TestConfig
+        $r['BlockedSlots']['BiCARemote'] | Should Match 'lockout budget'
+        $r['BlockedSlots']['BiCARemote'] | Should Match '; Dependents unknown \(discovery failed\): Tasks: scheduler not available$'
+    }
+    It 'blocks nothing for dependents that were read, even with an unreadable task folder' {
+        $s = New-TestPreflightState
+        $s['Services'] = @()
+        $s['Tasks'] = @(@{ Path = '\Locked'; UserId = $null; UserSid = $null; LogonType = $null; Enabled = $null; Error = 'Tasks: access denied' })
+        $s['ComPlus'] = @()
+        $r = Invoke-CrPreflight -State $s -Config $TestConfig
+        $r['BlockedSlots'].Count | Should Be 0
+        (Test-AnyFinding $r 'Blocked' '.') | Should Be $false
     }
 }

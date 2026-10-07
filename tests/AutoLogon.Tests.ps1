@@ -81,34 +81,40 @@ function New-TestState {
     }
 }
 
-$SidSop    = 'S-1-5-21-1000-2000-3000-1030'
-$SidNewPub = 'S-1-5-21-1000-2000-3000-1050'
-
-# v10 resolved entries (CONTRACTS "v10"): SOP-Admin, and PUB-User with the AutoLogon block and AutoLogonUser = PUB-User
-# only; WinAutoUser is a replaced account, not an auto-logon target. -CreatePub: PUB-User doesn't exist and is created
-# in this run (placeholder with ToCreate; -CreatedPubSid = the SID the caller filled in after creating it).
+# v10.3 resolved entries (CONTRACTS "v10", Principals.ps1): BiCAAdmin; the AutoLogon entry with the AutoLogon block,
+# AutoLogonUser = PUB-User, WinAutoUser (only key: Name) and the existing ones of them as Accounts (they are never
+# created); the Retired entry (Mode Disable). -ListNames changes the order or the content of the AutoLogonUser list.
 function New-TestResolved {
-    param($State, [switch]$CreatePub, [string]$CreatedPubSid)
+    param($State, [string[]]$ListNames = @('PUB-User', 'WinAutoUser'))
     $acc = New-Object System.Collections.ArrayList
-    foreach ($u in @($State['Users'])) {
-        if ($u['Name'] -ieq 'PUB-User') { [void]$acc.Add(@{ Name = $u['Name']; Sid = $u['Sid']; User = $u }) }
+    $missing = New-Object System.Collections.ArrayList
+    $list = New-Object System.Collections.ArrayList
+    foreach ($n in $ListNames) {
+        [void]$list.Add(@{ Name = $n })
+        $found = $null
+        if ($State['Users']) {
+            foreach ($u in @($State['Users'])) { if ($u -and ($u['Name'] -ieq $n)) { $found = $u } }
+        }
+        if ($found) {
+            [void]$acc.Add(@{ Name = $found['Name']; Sid = $found['Sid']; User = $found })
+        } else {
+            [void]$missing.Add($n)
+        }
     }
-    $create = $false
-    if (($acc.Count -eq 0) -and $CreatePub) {
-        $create = $true
-        $placeholderSid = $null
-        if ($CreatedPubSid) { $placeholderSid = $CreatedPubSid }
-        [void]$acc.Add(@{ Name = 'PUB-User'; Sid = $placeholderSid; User = $null; ToCreate = $true })
-    }
-    $sop = @{ Id = 'SOPAdmin'; Kind = 'Windows'; Mode = 'Rotate'; RoleName = 'Operator'; Slot = 'SOPAdmin'; Create = $false
-              Accounts = @(@{ Name = 'SOP-Admin'; Sid = $SidSop }); Missing = @(); AutoLogon = $null; AutoLogonUser = $null
-              Replaced = @(@{ Name = 'BiCA Admin'; Sid = $SidBica; Enabled = $true }) }
-    $pub = @{ Id = 'PubUser'; Kind = 'Windows'; Mode = 'Rotate'; RoleName = 'User'; Slot = 'PubUser'; Create = $create
-              Accounts = $acc.ToArray(); Missing = @(); NotApplicable = ($acc.Count -eq 0)
-              AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' }
-              AutoLogonUser = @(@{ Name = 'PUB-User'; RequireEnabled = $true })
-              Replaced = @(@{ Name = 'WinAutoUser'; Sid = $SidWinAuto; Enabled = $true }) }
-    return , @($sop, $pub)
+    $bica = @{ Id = 'BiCAAdmin'; Kind = 'Windows'; Mode = 'Rotate'; RoleName = 'Admin'; Slot = 'BiCAAdmin'; Create = $false
+               PasswordMode = 'Set'; Operator = $false; EnableIfDisabled = $false
+               Accounts = @(@{ Name = 'BiCA Admin'; Sid = $SidBica; User = $null }); Missing = @(); NotApplicable = $false
+               AutoLogon = $null; AutoLogonUser = $null; Replaced = @() }
+    $auto = @{ Id = 'AutoLogon'; Kind = 'Windows'; Mode = 'Rotate'; RoleName = 'User'; Slot = 'AutoLogon'; Create = $false
+               PasswordMode = 'Set'; Operator = $false; EnableIfDisabled = $false
+               Accounts = $acc.ToArray(); Missing = $missing.ToArray(); NotApplicable = ($acc.Count -eq 0)
+               AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' }
+               AutoLogonUser = $list.ToArray(); Replaced = @() }
+    $retired = @{ Id = 'Retired'; Kind = 'Windows'; Mode = 'Disable'; RoleName = $null; Slot = $null; Create = $false
+                  PasswordMode = $null; Operator = $false; EnableIfDisabled = $false
+                  Accounts = @(); Missing = @('SP Admin', 'SYS Admin', 'SOP-Admin'); NotApplicable = $true
+                  AutoLogon = $null; AutoLogonUser = $null; Replaced = @() }
+    return , @($bica, $auto, $retired)
 }
 
 $TestConfig = @{ Accounts = @() }
@@ -116,9 +122,9 @@ $AllVerified = @('S-1-5-21-1000-2000-3000-1001', 'S-1-5-21-1000-2000-3000-1010',
 $AutoRemoved = @('S-1-5-21-1000-2000-3000-1010', 'S-1-5-21-1000-2000-3000-1011')
 
 function Invoke-TestDecision {
-    param($State, $Verified = $AllVerified, $Removed = $AutoRemoved, [string[]]$Created = @(), [switch]$CreatePub, [string]$CreatedPubSid)
-    return Get-CrAutoLogonDecision -State $State -Resolved (New-TestResolved $State -CreatePub:$CreatePub -CreatedPubSid $CreatedPubSid) `
-        -Config $TestConfig -VerifiedSids $Verified -RemovedAdminSids $Removed -CreatedTargetNames $Created
+    param($State, $Verified = $AllVerified, $Removed = $AutoRemoved, [string[]]$ListNames = @('PUB-User', 'WinAutoUser'))
+    return Get-CrAutoLogonDecision -State $State -Resolved (New-TestResolved $State -ListNames $ListNames) `
+        -Config $TestConfig -VerifiedSids $Verified -RemovedAdminSids $Removed
 }
 
 function Test-AnyMatch {
@@ -149,9 +155,15 @@ Describe 'Get-CrAutoLogonDecision' {
             @($d['HighImpact']).Count | Should Be 0
             @($d['OperatorOptions']).Count | Should Be 0
         }
-        It 'leaves off even when PUB-User is created in this run' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -AutoAdminLogon '0' -UserName 'WinAutoUser')
-            (Invoke-TestDecision $s -CreatePub -Created @('PUB-User'))['Action'] | Should Be 'LeaveOff'
+        It 'leaves off with a usable auto-logon account in DefaultUserName (never turns it on)' {
+            foreach ($c in @('SM-SITEA', 'IPT01-SITEA')) {
+                foreach ($n in @('PUB-User', 'WinAutoUser')) {
+                    $s = New-TestState -Computer $c -AutoLogon (New-TestAutoLogon -AutoAdminLogon '0' -UserName $n)
+                    $d = Invoke-TestDecision $s
+                    $d['Action'] | Should Be 'LeaveOff'
+                    $d['TargetSid'] | Should BeNullOrEmpty
+                }
+            }
         }
         It 'reports a plain-text DefaultPassword while off without changing it' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -AutoAdminLogon '0' -UserName 'BiCA Admin' -PlainPassword)
@@ -174,25 +186,47 @@ Describe 'Get-CrAutoLogonDecision' {
             $d['Action'] | Should Be 'Standardize'
             $d['TargetSid'] | Should Be $SidPub
             $d['CurrentSid'] | Should Be $SidPub
-            $d['TargetCreated'] | Should Be $false
+            (Test-AnyMatch $d['Reasons'] 'PUB-User is a managed auto-logon account: it is kept and standardized') | Should Be $true
+            @($d['HighImpact']).Count | Should Be 0
+            @($d['OperatorOptions']).Count | Should Be 0
         }
-        It 'turns off a WinAutoUser auto-logon (WinAutoUser is any other account, D22)' {
+        It 'keeps and standardizes a usable WinAutoUser (managed auto-logon account, v10.1)' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
             $d = Invoke-TestDecision $s
-            $d['Action'] | Should Be 'TurnOff'
+            $d['Action'] | Should Be 'Standardize'
             $d['CurrentSid'] | Should Be $SidWinAuto
-            $d['TargetSid'] | Should BeNullOrEmpty
-            (Test-AnyMatch $d['Reasons'] 'SM machine: auto-logon as any account other than PUB-User is turned off') | Should Be $true
-            (Test-AnyMatch $d['HighImpact'] 'WinAutoUser is turned off') | Should Be $true
+            $d['TargetSid'] | Should Be $SidWinAuto
+            $d['TargetName'] | Should Be 'WinAutoUser'
+            (Test-AnyMatch $d['Reasons'] 'on as WinAutoUser \(a managed auto-logon account\)') | Should Be $true
+            @($d['HighImpact']).Count | Should Be 0
         }
-        It 'turns off a WinAutoUser auto-logon also when WinAutoUser is not usable' {
-            $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser') -NoInteractive @($SidWinAuto)
-            (Invoke-TestDecision $s)['Action'] | Should Be 'TurnOff'
-        }
-        It 'turns off a WinAutoUser auto-logon when PUB-User is missing or created in this run' {
+        It 'keeps WinAutoUser when PUB-User does not exist' {
             $s = New-TestState -Computer 'SM-SITEA' -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            (Invoke-TestDecision $s)['Action'] | Should Be 'TurnOff'
-            (Invoke-TestDecision $s -CreatePub -Created @('PUB-User'))['Action'] | Should Be 'TurnOff'
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Standardize'
+            $d['TargetSid'] | Should Be $SidWinAuto
+        }
+        It 'leaves a kept account that is not changed in this run as it is (NoChange)' {
+            $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
+            $d = Invoke-TestDecision $s -Verified @($SidBica)
+            $d['Action'] | Should Be 'NoChange'
+            $d['TargetSid'] | Should Be $SidPub
+            (Test-AnyMatch $d['Reasons'] 'the stored password is still valid') | Should Be $true
+        }
+        It 'is ambiguous when the kept WinAutoUser is denied interactive logon (as on the SM test sites)' {
+            $s = New-TestState -Computer 'SM-SITEA' -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser') -NoInteractive @($SidWinAuto)
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['CurrentSid'] | Should Be $SidWinAuto
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account WinAutoUser is not usable: is not allowed interactive logon') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+        }
+        It 'is ambiguous for an auto-logon as a disabled WinAutoUser' {
+            $s = New-TestState -Computer 'SM-SITEA' -Users (New-TestUsers -WinAutoDisabled) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Ambiguous'
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account WinAutoUser is not usable: is disabled') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
         }
         It 'turns off an admin auto-logon' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin' -PlainPassword)
@@ -203,7 +237,12 @@ Describe 'Get-CrAutoLogonDecision' {
         }
         It 'turns off an auto-logon as any other account' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
-            (Invoke-TestDecision $s)['Action'] | Should Be 'TurnOff'
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'TurnOff'
+            $d['CurrentSid'] | Should Be $SidWinUser1
+            $d['TargetSid'] | Should BeNullOrEmpty
+            (Test-AnyMatch $d['Reasons'] 'SM machine: auto-logon as any account other than PUB-User / WinAutoUser is turned off') | Should Be $true
+            (Test-AnyMatch $d['HighImpact'] 'WinUser1 is turned off') | Should Be $true
         }
         It 'matches the SM pattern case-insensitively via Computer.IsSm' {
             $s = New-TestState -Computer 'IPT01-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
@@ -217,6 +256,12 @@ Describe 'Get-CrAutoLogonDecision' {
             (Test-AnyMatch $d['Reasons'] 'kept auto-logon account PUB-User is not usable') | Should Be $true
             ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
         }
+        It 'is ambiguous when the kept PUB-User is locked out' {
+            $s = New-TestState -Computer 'SM-SITEA' -Users (New-TestUsers -PubLocked) -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Ambiguous'
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account PUB-User is not usable: is locked out') | Should Be $true
+        }
         It 'is ambiguous when the kept PUB-User is an admin whose slot did not complete' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'PUB-User') -Admins @($SidBica, $SidPub)
             $d = Invoke-TestDecision $s -Removed @()
@@ -227,9 +272,12 @@ Describe 'Get-CrAutoLogonDecision' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'PUB-User') -Admins @($SidBica, $SidPub)
             (Invoke-TestDecision $s -Removed @($SidPub))['Action'] | Should Be 'Standardize'
         }
-        It 'standardizes a disabled PUB-User that this run enables and verifies' {
+        It 'is ambiguous for a disabled PUB-User even when it is verified (never enabled, D21)' {
             $s = New-TestState -Computer 'SM-SITEA' -Users (New-TestUsers -PubDisabled) -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
-            (Invoke-TestDecision $s -Verified @($SidPub))['Action'] | Should Be 'Standardize'
+            $d = Invoke-TestDecision $s -Verified @($SidPub)
+            $d['Action'] | Should Be 'Ambiguous'
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account PUB-User is not usable: is disabled') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
         }
         It 'is ambiguous for a disabled PUB-User that is not verified in this run' {
             $s = New-TestState -Computer 'SM-SITEA' -Users (New-TestUsers -PubDisabled) -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
@@ -244,50 +292,76 @@ Describe 'Get-CrAutoLogonDecision' {
     }
 
     Context 'Other machine' {
-        It 'standardizes the selected PUB-User' {
+        It 'keeps and standardizes PUB-User' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
             $d = Invoke-TestDecision $s
             $d['Action'] | Should Be 'Standardize'
             $d['TargetSid'] | Should Be $SidPub
             @($d['HighImpact']).Count | Should Be 0
         }
-        It 'switches a WinAutoUser auto-logon to a usable PUB-User' {
+        It 'keeps an active WinAutoUser although PUB-User is usable: standardize, no switch (v10.1)' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
             $d = Invoke-TestDecision $s
-            $d['Action'] | Should Be 'Switch'
-            $d['TargetSid'] | Should Be $SidPub
+            $d['Action'] | Should Be 'Standardize'
             $d['CurrentSid'] | Should Be $SidWinAuto
-            (Test-AnyMatch $d['Reasons'] 'on as WinAutoUser \(another account\)') | Should Be $true
+            $d['TargetSid'] | Should Be $SidWinAuto
+            $d['TargetName'] | Should Be 'WinAutoUser'
+            (Test-AnyMatch $d['Reasons'] 'on as WinAutoUser \(a managed auto-logon account\)') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'switched') | Should Be $false
+            @($d['HighImpact']).Count | Should Be 0
         }
-        It 'never standardizes WinAutoUser: ambiguous when PUB-User neither exists nor is created' {
+        It 'keeps an active WinAutoUser that is not changed in this run although PUB-User is (NoChange, no switch)' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidPub)
+            $d['Action'] | Should Be 'NoChange'
+            $d['TargetSid'] | Should Be $SidWinAuto
+            (Test-AnyMatch $d['Reasons'] 'WinAutoUser is not on a verified new password in this run') | Should Be $true
+        }
+        It 'keeps WinAutoUser when PUB-User does not exist' {
             $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Standardize'
+            $d['TargetSid'] | Should Be $SidWinAuto
+        }
+        It 'switches to WinAutoUser when PUB-User is disabled (a disabled account is never selected, even if verified)' {
+            $s = New-TestState -Users (New-TestUsers -PubDisabled) -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidPub, $SidWinAuto)
+            $d['Action'] | Should Be 'Switch'
+            $d['CurrentSid'] | Should Be $SidBica
+            $d['TargetSid'] | Should Be $SidWinAuto
+            $d['TargetName'] | Should Be 'WinAutoUser'
+            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable auto-logon target: is disabled') | Should Be $true
+            (Test-AnyMatch $d['HighImpact'] 'from BiCA Admin to WinAutoUser') | Should Be $true
+        }
+        It 'is ambiguous when the only listed account left is a disabled PUB-User, even if it is verified' {
+            $s = New-TestState -Users (New-TestUsers -PubDisabled -NoWinAuto) -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidPub)
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['TargetSid'] | Should BeNullOrEmpty
+            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target \(PUB-User / WinAutoUser\) exists for a switch') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+        }
+        It 'switches to WinAutoUser when PUB-User is locked out' {
+            $s = New-TestState -Users (New-TestUsers -PubLocked) -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetSid'] | Should Be $SidWinAuto
+            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable auto-logon target: is locked out') | Should Be $true
+        }
+        It 'switches to WinAutoUser when PUB-User is denied interactive logon' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin') -NoInteractive @($SidPub)
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetSid'] | Should Be $SidWinAuto
+            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable auto-logon target: is not allowed interactive logon') | Should Be $true
+        }
+        It 'is ambiguous when neither PUB-User nor WinAutoUser is allowed interactive logon' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin') -NoInteractive @($SidPub, $SidWinAuto)
             $d = Invoke-TestDecision $s
             $d['Action'] | Should Be 'Ambiguous'
             $d['TargetSid'] | Should BeNullOrEmpty
-            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target \(PUB-User\)') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target') | Should Be $true
             ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
-        }
-        It 'is ambiguous when PUB-User is disabled and not enabled by this run' {
-            $s = New-TestState -Users (New-TestUsers -PubDisabled) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $d = Invoke-TestDecision $s -Verified @($SidBica)
-            $d['Action'] | Should Be 'Ambiguous'
-            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable.*disabled') | Should Be $true
-        }
-        It 'switches to a disabled PUB-User that this run enables and verifies' {
-            $s = New-TestState -Users (New-TestUsers -PubDisabled) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $d = Invoke-TestDecision $s
-            $d['Action'] | Should Be 'Switch'
-            $d['TargetSid'] | Should Be $SidPub
-        }
-        It 'is ambiguous when PUB-User is locked out' {
-            $s = New-TestState -Users (New-TestUsers -PubLocked) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $d = Invoke-TestDecision $s
-            $d['Action'] | Should Be 'Ambiguous'
-            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable.*locked') | Should Be $true
-        }
-        It 'is ambiguous when PUB-User is denied interactive logon' {
-            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser') -NoInteractive @($SidPub)
-            (Invoke-TestDecision $s)['Action'] | Should Be 'Ambiguous'
         }
         It 'switches an admin auto-logon to the selected user with the standard-user high-impact text' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin' -PlainPassword)
@@ -303,17 +377,37 @@ Describe 'Get-CrAutoLogonDecision' {
             $d['Action'] | Should Be 'Switch'
             $d['TargetName'] | Should Be 'PUB-User'
         }
-        It 'is ambiguous when no usable target exists for a switch' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
+        It 'is ambiguous when no usable target exists for a switch (neither account exists)' {
+            $s = New-TestState -Users (New-TestUsers -NoPub -NoWinAuto) -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
             $d = Invoke-TestDecision $s
             $d['Action'] | Should Be 'Ambiguous'
-            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target') | Should Be $true
+            $d['TargetSid'] | Should BeNullOrEmpty
+            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target \(PUB-User / WinAutoUser\) exists for a switch') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
         }
-        It 'is ambiguous when the standardized PUB-User is not usable' {
+        It 'is ambiguous when the kept PUB-User is not usable, without switching to the usable WinAutoUser' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'PUB-User') -NoInteractive @($SidPub)
             $d = Invoke-TestDecision $s
             $d['Action'] | Should Be 'Ambiguous'
-            (Test-AnyMatch $d['Reasons'] 'standardized auto-logon account PUB-User is not usable') | Should Be $true
+            $d['TargetSid'] | Should Be $SidPub
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account PUB-User is not usable: is not allowed interactive logon') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+        }
+        It 'is ambiguous for an auto-logon as a disabled PUB-User' {
+            $s = New-TestState -Users (New-TestUsers -PubDisabled) -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['TargetSid'] | Should Be $SidPub
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account PUB-User is not usable: is disabled') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+        }
+        It 'is ambiguous for an auto-logon as a disabled WinAutoUser, without switching to the usable PUB-User' {
+            $s = New-TestState -Users (New-TestUsers -WinAutoDisabled) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['TargetSid'] | Should Be $SidWinAuto
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account WinAutoUser is not usable: is disabled') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
         }
         It 'is ambiguous when a preferred PUB-User is an admin whose slot did not complete' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin') -Admins @($SidBica, $SidPub)
@@ -331,66 +425,29 @@ Describe 'Get-CrAutoLogonDecision' {
         }
     }
 
-    Context 'PUB-User created in this run (D21)' {
-        It 'switches a WinAutoUser auto-logon to the created PUB-User listed in -CreatedTargetNames' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $d = Invoke-TestDecision $s -Verified @() -CreatePub -Created @('PUB-User')
+    Context 'Selection list (AutoLogonUser)' {
+        It 'selects the first usable account in the order of the list' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
+            $d = Invoke-TestDecision $s -ListNames @('WinAutoUser', 'PUB-User')
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetSid'] | Should Be $SidWinAuto
+        }
+        It 'keeps only the listed accounts as managed auto-logon accounts' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
+            $d = Invoke-TestDecision $s -ListNames @('PUB-User')
             $d['Action'] | Should Be 'Switch'
             $d['CurrentSid'] | Should Be $SidWinAuto
-            $d['TargetName'] | Should Be 'PUB-User'
-            $d['TargetSid'] | Should BeNullOrEmpty
-            $d['TargetCreated'] | Should Be $true
-            (Test-AnyMatch $d['Reasons'] 'PUB-User does not exist yet; it is created in this run') | Should Be $true
-            (Test-AnyMatch $d['HighImpact'] 'from WinAutoUser to PUB-User') | Should Be $true
+            $d['TargetSid'] | Should Be $SidPub
         }
-        It 'switches an admin auto-logon to the created PUB-User whose SID is verified' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin' -PlainPassword)
-            $d = Invoke-TestDecision $s -Verified @($SidNewPub) -CreatePub -CreatedPubSid $SidNewPub
-            $d['Action'] | Should Be 'Switch'
-            $d['TargetSid'] | Should Be $SidNewPub
-            $d['TargetName'] | Should Be 'PUB-User'
-            $d['TargetCreated'] | Should Be $true
-        }
-        It 'accepts -CreatedTargetNames without a placeholder in Resolved' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
-            $d = Invoke-TestDecision $s -Verified @() -Created @('pub-user')
-            $d['Action'] | Should Be 'Switch'
-            $d['TargetName'] | Should Be 'PUB-User'
-        }
-        It 'asks the operator when the created PUB-User is not verified (slot skipped or failed)' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
-            $d = Invoke-TestDecision $s -Verified @($SidBica) -CreatePub
-            $d['Action'] | Should Be 'Ambiguous'
-            $d['TargetName'] | Should Be 'PUB-User'
-            $d['TargetCreated'] | Should Be $true
-            (Test-AnyMatch $d['Reasons'] 'switch to PUB-User impossible') | Should Be $true
-            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
-            (Test-AnyMatch $d['HighImpact'] 'broken until re-run') | Should Be $true
-        }
-        It 'ignores created names outside the AutoLogonUser list' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $d = Invoke-TestDecision $s -Created @('SOP-Admin', 'WinAutoUser')
-            $d['Action'] | Should Be 'Ambiguous'
-            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target') | Should Be $true
-        }
-        It 'does not change the state while evaluating the created account' {
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $s['Groups'] = @(@{ Name = 'Users'; Sid = 'S-1-5-32-545'; MemberSids = @('S-1-5-11', $SidWinAuto); Error = $null })
-            $before = @($s['Users']).Count
-            [void](Invoke-TestDecision $s -CreatePub -Created @('PUB-User'))
-            @($s['Groups'][0]['MemberSids']).Count | Should Be 2
-            @($s['Users']).Count | Should Be $before
-        }
-    }
-
-    Context 'created PUB-User that would be denied interactive logon' {
-        It 'is not a usable target' {
-            Mock Get-CrEffectiveLogonRights { return @{ Network = $true; Interactive = $false; RemoteInteractive = $false; Batch = $true; Service = $true } }
-            $s = New-TestState -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $d = Invoke-TestDecision $s -CreatePub -Created @('PUB-User')
-            $d['Action'] | Should Be 'Ambiguous'
-            (Test-AnyMatch $d['Reasons'] 'PUB-User \(created in this run\) is not a usable.*interactive') | Should Be $true
-            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target') | Should Be $true
+        It 'uses the AutoLogonUser list of the config entry when the resolved entry has none' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
+            $block = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' }
+            $entry = @{ Id = 'AutoLogon'; Kind = 'Windows'; Mode = 'Rotate'; Accounts = @(); Missing = @(); AutoLogon = $block; AutoLogonUser = $null }
+            $config = @{ Accounts = @(@{ Id = 'AutoLogon'; Kind = 'Windows'; Names = @('PUB-User', 'WinAutoUser'); AutoLogon = $block
+                                         AutoLogonUser = @(@{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' }) }) }
+            $d = Get-CrAutoLogonDecision -State $s -Resolved @($entry) -Config $config -VerifiedSids $AllVerified -RemovedAdminSids $AutoRemoved
+            $d['Action'] | Should Be 'Standardize'
+            $d['TargetSid'] | Should Be $SidWinAuto
         }
     }
 
@@ -475,20 +532,42 @@ Describe 'Get-CrAutoLogonDecision' {
     }
 
     Context 'Password source per target account' {
-        It 'changes nothing when the standardized account is not changed in this run' {
+        It 'changes nothing when the kept account is not changed in this run' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'PUB-User' -PlainPassword)
             $d = Invoke-TestDecision $s -Verified @($SidBica)
             $d['Action'] | Should Be 'NoChange'
             (Test-AnyMatch $d['Reasons'] 'standardize changes nothing') | Should Be $true
             (Test-AnyMatch $d['Reasons'] 'plain-text DefaultPassword') | Should Be $true
         }
-        It 'asks the operator when the switch target is not on the new secret (PUB-User slot skipped)' {
+        It 'asks the operator when the switch target is not on the new secret (auto-logon slot skipped)' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin' -PlainPassword)
             $d = Invoke-TestDecision $s -Verified @($SidBica)
             $d['Action'] | Should Be 'Ambiguous'
             $d['TargetSid'] | Should Be $SidPub
+            (Test-AnyMatch $d['Reasons'] 'switch to PUB-User impossible') | Should Be $true
             ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
             (Test-AnyMatch $d['HighImpact'] 'broken until re-run') | Should Be $true
+        }
+        It 'asks the operator instead of falling back to WinAutoUser when only WinAutoUser succeeded in the auto-logon slot' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidWinAuto)
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['TargetSid'] | Should Be $SidPub
+            (Test-AnyMatch $d['Reasons'] 'switch to PUB-User impossible') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+        }
+        It 'standardizes a kept WinAutoUser that succeeded while PUB-User failed' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidWinAuto)
+            $d['Action'] | Should Be 'Standardize'
+            $d['TargetSid'] | Should Be $SidWinAuto
+            @($d['OperatorOptions']).Count | Should Be 0
+        }
+        It 'leaves a kept PUB-User as it is when only WinAutoUser succeeded' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidWinAuto)
+            $d['Action'] | Should Be 'NoChange'
+            $d['TargetSid'] | Should Be $SidPub
         }
         It 'does not report a broken auto-logon when the current account is not rotated' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
@@ -496,16 +575,11 @@ Describe 'Get-CrAutoLogonDecision' {
             $d['Action'] | Should Be 'Ambiguous'
             (Test-AnyMatch $d['HighImpact'] 'broken') | Should Be $false
         }
-        It 'does not offer StandardizeCurrent for a WinAutoUser auto-logon (not an auto-logon target, D22)' {
-            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidWinAuto)
-            $d['Action'] | Should Be 'Ambiguous'
-            $d['TargetSid'] | Should Be $SidPub
-            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
-        }
         It 'switches when the target is verified' {
-            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
-            (Invoke-TestDecision $s -Verified @($SidPub))['Action'] | Should Be 'Switch'
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
+            $d = Invoke-TestDecision $s -Verified @($SidPub)
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetSid'] | Should Be $SidPub
         }
         It 'turns off without needing a verified account' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
@@ -536,18 +610,129 @@ Describe 'Get-CrAutoLogonDecision' {
         }
         It 'SM on as BiCA Admin with plain-text password: turn off' {
             $s = New-TestState -Computer 'SM-SITEB' -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin' -PlainPassword) -NoInteractive @($SidWinAuto)
-            $d = Invoke-TestDecision $s -Verified @() -CreatePub -Created @('PUB-User')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidWinAuto)
             $d['Action'] | Should Be 'TurnOff'
             (Test-AnyMatch $d['HighImpact'] 'logon screen') | Should Be $true
         }
-        It 'IPT01 on as "Bica Admin" with plain-text password, no PUB-User: switch to the PUB-User created in this run' {
+        It 'IPT01 on as "Bica Admin" with plain-text password, no PUB-User: switch to WinAutoUser' {
             $s = New-TestState -Computer 'IPT01-SITEB' -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'Bica Admin' -PlainPassword)
-            $d = Invoke-TestDecision $s -Verified @() -CreatePub -Created @('PUB-User')
+            $d = Invoke-TestDecision $s -Verified @($SidBica, $SidWinAuto)
             $d['Action'] | Should Be 'Switch'
             $d['CurrentSid'] | Should Be $SidBica
-            $d['TargetName'] | Should Be 'PUB-User'
-            $d['TargetCreated'] | Should Be $true
+            $d['TargetSid'] | Should Be $SidWinAuto
+            $d['TargetName'] | Should Be 'WinAutoUser'
+            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable auto-logon target: does not exist') | Should Be $true
             (Test-AnyMatch $d['HighImpact'] 'standard user') | Should Be $true
+        }
+    }
+}
+
+# The D18 decision on the machine fixtures (Fixtures.ps1, modelled on the test sites, PLAN 13.2) with the shipped
+# config resolved by Resolve-CrAccounts and the real Rights.ps1 (no mocks: effective rights from the fixtures' rights
+# and groups). VerifiedSids = the existing accounts among -VerifiedNames (the audit passes the accounts it would set).
+function Invoke-TestFixtureDecision {
+    param($State, [string[]]$VerifiedNames = @('BiCA Admin', 'PUB-User', 'WinAutoUser'))
+    $config = New-CrTestConfig
+    $resolved = Resolve-CrAccounts -Config $config -State $State
+    $verified = New-Object System.Collections.ArrayList
+    foreach ($n in $VerifiedNames) {
+        $u = Get-CrTestUser -State $State -Name $n
+        if ($u) { [void]$verified.Add([string]$u['Sid']) }
+    }
+    $verifiedSids = $verified.ToArray()
+    return Get-CrAutoLogonDecision -State $State -Resolved $resolved -Config $config -VerifiedSids $verifiedSids -RemovedAdminSids @()
+}
+
+Describe 'Get-CrAutoLogonDecision on the machine fixtures (PLAN 7.5 test sites)' {
+    Context 'SM-like machine' {
+        It 'turns off the auto-logon as BiCA Admin with a plain-text password' {
+            $s = New-CrTestState -Profile SM
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'TurnOff'
+            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'BiCA Admin')
+            $d['TargetSid'] | Should BeNullOrEmpty
+            (Test-AnyMatch $d['Reasons'] 'plain-text DefaultPassword') | Should Be $true
+            (Test-AnyMatch $d['HighImpact'] 'waits at the logon screen') | Should Be $true
+        }
+        It 'is ambiguous for an auto-logon as WinAutoUser, which is denied local logon there' {
+            $s = New-CrTestState -Profile SM
+            $s['AutoLogon']['DefaultUserName'] = 'WinAutoUser'
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account WinAutoUser is not usable: is not allowed interactive logon') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+        }
+        It 'keeps and standardizes an auto-logon as an existing PUB-User' {
+            $s = New-CrTestState -Profile SM
+            $pub = Add-CrTestUser -State $s -Name 'PUB-User' -Groups @('Users') -PasswordNeverExpires
+            $s['AutoLogon']['DefaultUserName'] = 'PUB-User'
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Standardize'
+            $d['TargetSid'] | Should Be $pub['Sid']
+        }
+        It 'leaves off an auto-logon that is off, with a stale DefaultUserName and an old computer name' {
+            $s = New-CrTestState -Profile SM
+            $s['AutoLogon']['AutoAdminLogon'] = '0'
+            $s['AutoLogon']['DefaultUserName'] = 'WinUser1'
+            $s['AutoLogon']['DefaultDomainName'] = 'SM-OLDNAME'
+            $s['AutoLogon']['DefaultPasswordPresent'] = $false
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'LeaveOff'
+            (Test-AnyMatch $d['Reasons'] 'SM-OLDNAME.*mismatch') | Should Be $true
+        }
+    }
+
+    Context 'IPT01-like machine' {
+        It 'switches the auto-logon as "Bica Admin" to PUB-User when PUB-User is verified' {
+            $s = New-CrTestState -Profile IPT01
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Switch'
+            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'BiCA Admin')
+            $d['CurrentName'] | Should Be 'BiCA Admin'
+            $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'PUB-User')
+            $d['TargetName'] | Should Be 'PUB-User'
+            (Test-AnyMatch $d['HighImpact'] 'from BiCA Admin to PUB-User') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'legal-notice text without a caption') | Should Be $true
+        }
+        It 'asks the operator (TurnOff or LeaveUnchanged) when PUB-User is not verified' {
+            $s = New-CrTestState -Profile IPT01
+            $d = Invoke-TestFixtureDecision $s -VerifiedNames @('BiCA Admin')
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['TargetName'] | Should Be 'PUB-User'
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+            (Test-AnyMatch $d['HighImpact'] 'broken until re-run') | Should Be $true
+        }
+        It 'switches to WinAutoUser (only denied RDP there) when PUB-User is disabled' {
+            $s = New-CrTestState -Profile IPT01
+            (Get-CrTestUser $s 'PUB-User')['Disabled'] = $true
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
+            $d['TargetName'] | Should Be 'WinAutoUser'
+        }
+        It 'switches to WinAutoUser when PUB-User does not exist (as on test site 102575)' {
+            $s = New-CrTestState -Profile IPT01 -OmitUsers 'PUB-User'
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetName'] | Should Be 'WinAutoUser'
+        }
+        It 'keeps an active WinAutoUser auto-logon although PUB-User is usable (no switch, v10.1)' {
+            $s = New-CrTestState -Profile IPT01
+            $s['AutoLogon']['DefaultUserName'] = 'WinAutoUser'
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Standardize'
+            $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
+            @($d['HighImpact']).Count | Should Be 0
+        }
+        It 'is ambiguous for an auto-logon as a disabled WinAutoUser' {
+            $s = New-CrTestState -Profile IPT01
+            (Get-CrTestUser $s 'WinAutoUser')['Disabled'] = $true
+            $s['AutoLogon']['DefaultUserName'] = 'WinAutoUser'
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Ambiguous'
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account WinAutoUser is not usable: is disabled') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
         }
     }
 }
@@ -771,28 +956,38 @@ Describe 'Invoke-CrAutoLogonAction' {
         }
     }
 
-    Context 'Switch to a PUB-User created in this run (not yet in $State.Users)' {
+    Context 'Switch to WinAutoUser' {
+        It 'writes WinAutoUser as DefaultUserName' {
+            $tcCalls = New-Object System.Collections.ArrayList
+            $d = New-TestActionDecision 'Switch' $SidWinAuto 'WinAutoUser' $SidBica 'BiCA Admin'
+            $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
+            $r['Success'] | Should Be $true
+            ($tcCalls -contains 'Set:DefaultUserName=WinAutoUser:String') | Should Be $true
+            ($tcCalls -contains 'Remove:AutoLogonSID') | Should Be $true
+            @($tcCalls)[$tcCalls.Count - 1] | Should Be 'Set:AutoAdminLogon=1:String'
+        }
+    }
+
+    Context 'Switch to a target without a SID in the decision' {
         It 'writes the decision''s target name' {
             $tcCalls = New-Object System.Collections.ArrayList
             $d = New-TestActionDecision 'Switch' $null 'PUB-User' $SidBica 'BiCA Admin'
-            $d['TargetCreated'] = $true
-            $noPubState = New-TestState -Computer 'IPT01-SITEA' -Users (New-TestUsers -NoPub) -AutoLogon (New-TestAutoLogon -UserName 'BiCA Admin')
-            $r = Invoke-CrAutoLogonAction -Decision $d -State $noPubState -Secret $tcSecret
+            $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
             $r['Success'] | Should Be $true
             ($tcCalls -contains 'Set:DefaultUserName=PUB-User:String') | Should Be $true
             @($tcCalls)[$tcCalls.Count - 1] | Should Be 'Set:AutoAdminLogon=1:String'
         }
     }
 
-    Context 'StandardizeCurrent (operator option)' {
-        It 'standardizes the current account, not the switch target' {
+    Context 'StandardizeCurrent (removed in v10.1)' {
+        It 'is an unknown action: writes nothing and fails' {
             $tcCalls = New-Object System.Collections.ArrayList
             $d = New-TestActionDecision 'StandardizeCurrent' $SidPub 'PUB-User' $SidWinAuto 'WinAutoUser'
             $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
-            $r['Success'] | Should Be $true
-            ($tcCalls -contains 'Set:DefaultUserName=WinAutoUser:String') | Should Be $true
-            ($tcCalls -contains 'Remove:AutoLogonSID') | Should Be $false
-            @($tcCalls)[$tcCalls.Count - 1] | Should Be 'Set:AutoAdminLogon=1:String'
+            $r['Success'] | Should Be $false
+            $r['Written'] | Should Be $false
+            $r['Error'] | Should Match 'Unknown auto-logon action "StandardizeCurrent"'
+            $tcCalls.Count | Should Be 0
         }
     }
 
@@ -915,7 +1110,7 @@ Describe 'Invoke-CrAutoLogonAction' {
     Context 'Standardize or Switch without a secret' {
         It 'writes nothing and fails' {
             $tcCalls = New-Object System.Collections.ArrayList
-            foreach ($a in @('Standardize', 'Switch', 'StandardizeCurrent')) {
+            foreach ($a in @('Standardize', 'Switch')) {
                 $d = New-TestActionDecision $a $SidPub 'PUB-User' $SidPub 'PUB-User'
                 $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $null
                 $r['Success'] | Should Be $false

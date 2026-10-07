@@ -287,7 +287,7 @@ function Test-CrConfigManagedKeys {
     if (($Account['Create'] -eq $true) -and -not $singleName) {
         [void]$Errors.Add(('{0}: Create requires a single Name.' -f $Where))
     }
-    if (($Account['Operator'] -eq $true) -and -not $singleName) {
+    if (($Account['Operator'] -is [bool]) -and $Account['Operator'] -and -not $singleName) {
         [void]$Errors.Add(('{0}: Operator requires a single Name (the operator''s account, D25).' -f $Where))
     }
     # D21: the auto-logon accounts are never created.
@@ -574,7 +574,7 @@ function Test-CrConfig {
                     if (($a -is [hashtable]) -and $a['Name']) { [void]$autoLogonNames.Add([string]$a['Name']) }
                 }
             }
-            if ($account['Operator'] -eq $true) { $operatorEntries++ }
+            if (($account['Operator'] -is [bool]) -and $account['Operator']) { $operatorEntries++ }
             if ([string]$account['Mode'] -eq 'Disable') {
                 if ($account['Name']) { [void]$disableNames.Add([string]$account['Name']) }
                 foreach ($n in (ConvertTo-CrArray $account['Names'])) { if ($n) { [void]$disableNames.Add([string]$n) } }

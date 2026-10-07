@@ -259,7 +259,7 @@ PLAN v10.3: §1, §1.1, D9, D18, D20–D25, §5 config example, §6 steps 6–7,
   - `Replaces` (string[]: names or `RID-500`)
   - `PasswordMode` (`'Set'` default | `'Change'`)
   - `Operator` (bool; single `Name`; at most one entry: the operator's account, D25)
-  - `EnableIfDisabled` (bool: an existing disabled account is enabled; only `AppUser`)
+  - `EnableIfDisabled` (bool: an existing disabled account is enabled; in the default config only `AppUser`)
 - `Mode` values: `'Check'` | `'Disable'` (a `Disable` entry has `Name`/`Names`, no Role/Credential). `Candidates` stays supported but the default config doesn't use it.
 - Top-level `OtherEnabledAccounts = 'Ask'` (only value).
 - The `AutoLogon` entry: `Names = @('PUB-User','WinAutoUser')`, `AutoLogonUser = @( @{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' } )` (only key: `Name`), the `AutoLogon` block, `Services`/`ScheduledTasks`/`ComPlus = 'Auto'`.

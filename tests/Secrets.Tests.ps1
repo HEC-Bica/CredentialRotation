@@ -440,7 +440,7 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
             ($null -eq $s.Accounts[1].OldSecret) | Should Be $true
             $io.SecurePrompts.Count | Should Be 2
             ($io.SecurePrompts[0] -like '*(PUB-User, WinAutoUser (disabled, stays disabled))*') | Should Be $true
-            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*WinAutoUser*disabled*stays disabled*' } -Times 1 -Exactly
+            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*WinAutoUser: the account is disabled*stays disabled*' } -Times 1 -Exactly
             Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*enabled in this run*' } -Times 0 -Exactly
             Assert-MockCalled Test-CrLocalPasswordPolicy -Times 1 -Exactly -ParameterFilter { $UserName -eq 'WinAutoUser' }
         }
@@ -494,7 +494,7 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
             (Test-CrTestSecureEqual -A $a.OldSecret -B (New-CrTestSecure 'Old-Dummy-6')) | Should Be $true
             $io.SecurePrompts.Count | Should Be 3
             ($io.SecurePrompts[0] -like '*ApplicationUser (disabled, will be enabled)*') | Should Be $true
-            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*ApplicationUser*disabled*enabled in this run*' } -Times 1 -Exactly
+            Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*ApplicationUser: the account is disabled*enabled in this run*' } -Times 1 -Exactly
             Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*stays disabled*' } -Times 0 -Exactly
         }
     }
@@ -576,11 +576,12 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
         $io = New-CrTestInput -Secure @('') -Lines @('Y')
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
-        It 'skips the slot on an empty entry confirmed with Y' {
-            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('PubUser')
-            $r['PubUser'].Skipped | Should Be $true
-            $r['PubUser'].Reason | Should Be 'Skipped by the operator'
-            $r['PubUser'].NewSecret | Should Be $null
+        It 'skips the slot (both auto-logon accounts) on an empty entry confirmed with Y' {
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('AutoLogon')
+            $r['AutoLogon'].Skipped | Should Be $true
+            $r['AutoLogon'].Reason | Should Be 'Skipped by the operator'
+            $r['AutoLogon'].NewSecret | Should Be $null
+            @($r['AutoLogon'].Accounts).Count | Should Be 0
             $io.SecurePrompts.Count | Should Be 1
             ($io.LinePrompts[0] -like '*skip*') | Should Be $true
         }
@@ -591,8 +592,8 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         It 'asks for the new password again' {
-            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('PubUser')
-            $r['PubUser'].Skipped | Should Be $false
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('BiCARemote')
+            $r['BiCARemote'].Skipped | Should Be $false
             $io.SecurePrompts.Count | Should Be 3
         }
     }
@@ -615,30 +616,39 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         It 'does not prompt a blocked slot' {
-            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('SOPAdmin') -BlockedSlots @{ SOPAdmin = 'write filter' }
-            $r['SOPAdmin'].Skipped | Should Be $true
-            $r['SOPAdmin'].Reason | Should Be 'Blocked: write filter'
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('BiCAAdmin') -BlockedSlots @{ BiCAAdmin = 'write filter' }
+            $r['BiCAAdmin'].Skipped | Should Be $true
+            $r['BiCAAdmin'].Reason | Should Be 'Blocked: write filter'
             $io.SecurePrompts.Count | Should Be 0
         }
     }
 
     Context 'full run' {
-        # SOPAdmin: new x2 | AppUser: new x2, old | PubUser: new x2 | SQLApplication: skipped
-        $io = New-CrTestInput -Secure @('Dummy-4a', 'Dummy-4a', 'Dummy-4b', 'Dummy-4b', 'Old-Dummy-2', 'Dummy-4c', 'Dummy-4c')
+        # BiCAAdmin: new x2 | AppUser: new x2, old | AutoLogon: new x2 | SQLApplication: skipped | BiCARemote: new x2
+        $io = New-CrTestInput -Secure @('Dummy-4a', 'Dummy-4a', 'Dummy-4b', 'Dummy-4b', 'Old-Dummy-2', 'Dummy-4c', 'Dummy-4c', 'Dummy-4d', 'Dummy-4d')
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
-        It 'prompts the Windows slots in Order, old password only for ApplicationUser, skips SQL, Disable and Check entries' {
+        It 'prompts the Windows slots in Order with BiCA Remote last, old password only for ApplicationUser, skips SQL, Disable and Check entries' {
             $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state
             $keys = @($r.Keys)
-            $keys.Count | Should Be 4
-            foreach ($k in @('SOPAdmin', 'AppUser', 'PubUser', 'SQLApplication')) { ($keys -contains $k) | Should Be $true }
-            ($io.SecurePrompts[0] -like '*SOP-Admin*') | Should Be $true
+            $keys.Count | Should Be 5
+            foreach ($k in @('BiCAAdmin', 'AppUser', 'AutoLogon', 'SQLApplication', 'BiCARemote')) { ($keys -contains $k) | Should Be $true }
+            $io.SecurePrompts.Count | Should Be 9
+            ($io.SecurePrompts[0] -like '*BiCA Admin (will be created)*') | Should Be $true
             ($io.SecurePrompts[2] -like '*ApplicationUser*') | Should Be $true
             ($io.SecurePrompts[4] -like '*old*ApplicationUser*') | Should Be $true
-            ($io.SecurePrompts[5] -like '*PUB-User*') | Should Be $true
-            ($null -eq $r['SOPAdmin'].Accounts[0].OldSecret) | Should Be $true
-            ($null -eq $r['PubUser'].Accounts[0].OldSecret) | Should Be $true
+            ($io.SecurePrompts[5] -like '*(PUB-User, WinAutoUser)*') | Should Be $true
+            ($io.SecurePrompts[7] -like 'New password*BiCA Remote*') | Should Be $true
+            ($io.SecurePrompts[8] -like 'Repeat*BiCA Remote*') | Should Be $true
+            $all = $io.SecurePrompts -join '|'
+            foreach ($n in @('SOP-Admin', 'SP Admin', 'WinUser1', 'SQLApplication')) { ($all -like ('*' + $n + '*')) | Should Be $false }
+            ($null -eq $r['BiCAAdmin'].Accounts[0].OldSecret) | Should Be $true
+            @($r['AutoLogon'].Accounts).Count | Should Be 2
+            foreach ($a in $r['AutoLogon'].Accounts) { ($null -eq $a.OldSecret) | Should Be $true }
+            ($null -eq $r['BiCARemote'].Accounts[0].OldSecret) | Should Be $true
             (Test-CrTestSecureEqual -A $r['AppUser'].Accounts[0].OldSecret -B (New-CrTestSecure 'Old-Dummy-2')) | Should Be $true
+            (Test-CrTestSecureEqual -A $r['BiCARemote'].NewSecret -B (New-CrTestSecure 'Dummy-4d')) | Should Be $true
+            $r['SQLApplication'].Skipped | Should Be $true
             $io.Secure.Count | Should Be 0
             $io.LinePrompts.Count | Should Be 0
             Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*never have been used before*' } -Times 1 -Exactly
@@ -651,8 +661,8 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         Mock Test-CrSecretComplexity { @{ Ok = $false; TooShort = $true; Categories = 2; MissingCategories = @(); ContainsNameToken = $false } }
         It 'skips the slot with a finding after three tries' {
-            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('SOPAdmin')
-            $s = $r['SOPAdmin']
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('BiCAAdmin')
+            $s = $r['BiCAAdmin']
             $s.Skipped | Should Be $true
             $s.Reason | Should Be 'No valid new password after 3 tries'
             @($s.Findings).Count | Should Be 1
@@ -667,21 +677,22 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         Mock Test-CrLocalPasswordPolicy { @{ Ok = $false; Status = 2245 } }
         It 'checks the local policy per account and rejects on failure' {
-            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('PubUser')
-            $r['PubUser'].Skipped | Should Be $true
+            $r = Read-CrSlotSecrets -Config $config -Resolved $resolved -State $state -Only @('AutoLogon')
+            $r['AutoLogon'].Skipped | Should Be $true
             Assert-MockCalled Test-CrLocalPasswordPolicy -ParameterFilter { $UserName -eq 'PUB-User' } -Times 3 -Exactly
+            Assert-MockCalled Test-CrLocalPasswordPolicy -ParameterFilter { $UserName -eq 'WinAutoUser' } -Times 3 -Exactly
         }
     }
 
     Context 'slot MaxLength' {
         $cfg = New-CrTestV10Config
-        foreach ($c in $cfg.Credentials) { if ($c.Slot -eq 'PubUser') { $c.MaxLength = 6 } }
+        foreach ($c in $cfg.Credentials) { if ($c.Slot -eq 'BiCARemote') { $c.MaxLength = 6 } }
         $io = New-CrTestInput -Secure @('Dummy-6a', 'Dummy-6a', 'Dummy-6a', 'Dummy-6a', 'Dummy-6a', 'Dummy-6a')
         Mock Read-CrSecureHost { [void]$io.SecurePrompts.Add($Prompt); $next = $io.Secure[0]; $io.Secure.RemoveAt(0); return $next }
         Mock Read-CrHostLine { [void]$io.LinePrompts.Add($Prompt); $next = $io.Lines[0]; $io.Lines.RemoveAt(0); return $next }
         It 'rejects a password longer than MaxLength' {
-            $r = Read-CrSlotSecrets -Config $cfg -Resolved $resolved -State $state -Only @('PubUser')
-            $r['PubUser'].Skipped | Should Be $true
+            $r = Read-CrSlotSecrets -Config $cfg -Resolved $resolved -State $state -Only @('BiCARemote')
+            $r['BiCARemote'].Skipped | Should Be $true
             Assert-MockCalled Write-Host -ParameterFilter { $Object -like '*longer than 6*' } -Times 3 -Exactly
         }
     }

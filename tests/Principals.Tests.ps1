@@ -264,7 +264,7 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
         $e.Accounts[1].ToCreate | Should BeNullOrEmpty
         foreach ($r in $resolved) {
             if ($r.Id -eq 'Retired') { continue }
-            (Get-TestAccountNames $r) -contains 'SOP-Admin' | Should Be $false
+            ((Get-TestAccountNames $r) -contains 'SOP-Admin') | Should Be $false
         }
     }
 
@@ -284,25 +284,82 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
     }
 
     It 'skips replaced accounts that do not exist' {
-        $s = New-CrTestState -Profile 'IPT01' -OmitUsers @('BiCA Admin', 'WinAutoUser')
-        $r = Resolve-CrAccounts -Config (New-CrTestConfig) -State $s
-        $sop = Get-TestEntry $r 'SOPAdmin'
-        $sop.Replaced.Count | Should Be 1
-        $sop.Replaced[0].Name | Should Be 'BiCA Remote'
-        (Get-TestEntry $r 'PubUser').Replaced.Count | Should Be 0
+        $s = New-CrTestState -Profile 'IPT01' -OmitUsers 'Administrator'
+        $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AppUser'
+        $e.Replaced.Count | Should Be 0
+        $e.Accounts[0].Name | Should Be 'ApplicationUser'
     }
 
-    It 'resolves the PUB-User entry to the existing account' {
-        $e = Get-TestEntry $resolved 'PubUser'
+    It 'resolves the AutoLogon entry to both existing accounts, in config order' {
+        $e = Get-TestEntry $resolved 'AutoLogon'
         $e.Create | Should Be $false
-        $e.Accounts.Count | Should Be 1
+        $e.NotApplicable | Should Be $false
+        $e.Accounts.Count | Should Be 2
         $e.Accounts[0].Name | Should Be 'PUB-User'
+        $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'PUB-User')
+        $e.Accounts[1].Name | Should Be 'WinAutoUser'
+        $e.Accounts[1].Sid | Should Be (Get-CrTestUserSid $state 'WinAutoUser')
+        $e.Missing.Count | Should Be 0
+        $e.Replaced.Count | Should Be 0
     }
 
-    It 'resolves the Disable entry to SYS Admin' {
+    It 'resolves a disabled auto-logon account too (no placeholder; enabled state is not its business)' {
+        $s = New-CrTestState -Profile 'IPT01' -Customize {
+            param($st)
+            $u = Get-CrTestUser $st 'WinAutoUser'
+            $u.Disabled = $true
+            $u.Flags = $u.Flags -bor 0x2
+        }
+        $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AutoLogon'
+        $e.Create | Should Be $false
+        $e.EnableIfDisabled | Should Be $false
+        $e.Accounts.Count | Should Be 2
+        $e.Accounts[1].Name | Should Be 'WinAutoUser'
+        $e.Accounts[1].User.Disabled | Should Be $true
+        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
+        $e.Accounts[1].ToCreate | Should BeNullOrEmpty
+        $e.Missing.Count | Should Be 0
+    }
+
+    It 'lists an absent auto-logon account as missing next to a disabled one (never created)' {
+        $s = New-CrTestState -Profile 'IPT01' -OmitUsers 'PUB-User' -Customize {
+            param($st)
+            $u = Get-CrTestUser $st 'WinAutoUser'
+            $u.Disabled = $true
+            $u.Flags = $u.Flags -bor 0x2
+        }
+        $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AutoLogon'
+        $e.Create | Should Be $false
+        $e.NotApplicable | Should Be $false
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].Name | Should Be 'WinAutoUser'
+        $e.Accounts[0].User.Disabled | Should Be $true
+        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
+        $e.Missing.Count | Should Be 1
+        $e.Missing[0] | Should Be 'PUB-User'
+    }
+
+    It 'is not applicable when neither auto-logon account exists (no placeholders)' {
+        $s = New-CrTestState -Profile 'IPT01' -OmitUsers @('PUB-User', 'WinAutoUser')
+        $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AutoLogon'
+        $e.Create | Should Be $false
+        $e.NotApplicable | Should Be $true
+        $e.Accounts.Count | Should Be 0
+        $e.Missing.Count | Should Be 2
+        $e.Missing[0] | Should Be 'PUB-User'
+        $e.Missing[1] | Should Be 'WinAutoUser'
+    }
+
+    It 'resolves the Disable entry to SYS Admin and SOP-Admin' {
         $e = Get-TestEntry $resolved 'Retired'
-        (Get-TestAccountNames $e)[0] | Should Be 'SYS Admin'
+        $names = Get-TestAccountNames $e
+        $names.Count | Should Be 2
+        $names[0] | Should Be 'SYS Admin'
+        $names[1] | Should Be 'SOP-Admin'
+        $e.Missing.Count | Should Be 1
         $e.Missing[0] | Should Be 'SP Admin'
+        $e.Operator | Should Be $false
+        $e.EnableIfDisabled | Should Be $false
     }
 
     It 'marks entries without accounts as not applicable' {
@@ -316,12 +373,13 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
 
     It 'is not applicable when a managed account without Create is missing' {
         $c = New-CrTestConfig
-        (Get-TestConfigEntry $c 'SOPAdmin').Remove('Create')
-        $s = New-CrTestState -Profile 'IPT01' -OmitUsers 'SOP-Admin'
-        $e = Get-TestEntry (Resolve-CrAccounts -Config $c -State $s) 'SOPAdmin'
+        (Get-TestConfigEntry $c 'BiCAAdmin').Remove('Create')
+        $s = New-CrTestState -Profile 'IPT01' -OmitUsers 'BiCA Admin'
+        $e = Get-TestEntry (Resolve-CrAccounts -Config $c -State $s) 'BiCAAdmin'
         $e.Create | Should Be $false
         $e.NotApplicable | Should Be $true
-        $e.Missing[0] | Should Be 'SOP-Admin'
+        $e.Accounts.Count | Should Be 0
+        $e.Missing[0] | Should Be 'BiCA Admin'
     }
 
     It 'reports SQL logins as missing when SQL is not connected' {
@@ -344,12 +402,13 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
     It 'never creates an account when the Users part failed' {
         $s = New-CrTestState -Profile 'SM' -Parts @{ Users = @{ Error = 'access denied' } }
         $r = Resolve-CrAccounts -Config (New-CrTestConfig) -State $s
-        $e = Get-TestEntry $r 'SOPAdmin'
+        $e = Get-TestEntry $r 'BiCAAdmin'
         $e.Create | Should Be $false
         $e.NotApplicable | Should Be $true
-        $e.Missing[0] | Should Be 'SOP-Admin'
+        $e.Missing[0] | Should Be 'BiCA Admin'
         $e.Error | Should Match 'access denied'
         $e.Replaced.Count | Should Be 0
+        (Get-TestEntry $r 'AppUser').Create | Should Be $false
     }
 }
 
@@ -357,7 +416,7 @@ Describe 'Resolve-CrAccounts with Candidates (still supported)' {
     It 'falls back to the second candidate (RID-500)' {
         $c = New-CrTestConfig
         Add-TestAccount $c @{ Id = 'Cand'; Kind = 'Windows'
-                              Candidates = @(@{ Name = 'Kiosk'; Role = 'User'; Credential = 'PubUser' }, @{ Sid = 'RID-500'; Role = 'Admin'; Credential = 'AppUser' }) }
+                              Candidates = @(@{ Name = 'Kiosk'; Role = 'User'; Credential = 'AutoLogon' }, @{ Sid = 'RID-500'; Role = 'Admin'; Credential = 'AppUser' }) }
         $state = New-CrTestState -Profile 'SM'
         $e = Get-TestEntry (Resolve-CrAccounts -Config $c -State $state) 'Cand'
         $e.Candidate | Should Be 1
@@ -392,6 +451,26 @@ Describe 'Get-CrOtherEnabledAccounts' {
         $state = New-CrTestState -Profile 'IPT01'
         $resolved = Resolve-CrAccounts -Config (New-CrTestConfig) -State $state
         (Get-CrOtherEnabledAccounts -State $state -Resolved $resolved).Count | Should Be 0
+    }
+
+    It 'excludes PUB-User, WinAutoUser and SOP-Admin because the AutoLogon and Retired entries select them (IPT01)' {
+        $state = New-CrTestState -Profile 'IPT01'
+        $c = New-CrTestConfig
+        $kept = @()
+        foreach ($a in $c.Accounts) { if (@('AutoLogon', 'Retired') -notcontains $a.Id) { $kept += $a } }
+        $c.Accounts = $kept
+        $others = Get-CrOtherEnabledAccounts -State $state -Resolved (Resolve-CrAccounts -Config $c -State $state)
+        $names = @(); foreach ($u in $others) { $names += $u.Name }
+        $names.Count | Should Be 4
+        foreach ($n in @('PUB-User', 'WinAutoUser', 'SOP-Admin', 'SYS Admin')) { ($names -contains $n) | Should Be $true }
+    }
+
+    It 'ignores create placeholders (no SID yet)' {
+        $state = New-CrTestState -Profile 'SM' -OmitUsers 'BiCA Admin'
+        $resolved = Resolve-CrAccounts -Config (New-CrTestConfig) -State $state
+        (Get-TestEntry $resolved 'BiCAAdmin').Create | Should Be $true
+        $others = Get-CrOtherEnabledAccounts -State $state -Resolved $resolved
+        $others.Count | Should Be 2
     }
 
     It 'skips a disabled extra account' {
@@ -431,7 +510,7 @@ Describe 'NamePattern exclusion and SID overlap' {
 
     It 'excludes a replaced account from NamePattern' {
         $c = New-CrTestConfig
-        (Get-TestConfigEntry $c 'PubUser').Replaces = @('WinAutoUser', 'ftpClient')
+        (Get-TestConfigEntry $c 'AppUser').Replaces = @('RID-500', 'ftpClient')
         $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM')
         $names = Get-TestAccountNames (Get-TestEntry $resolved 'FtpUsers')
         ($names -contains 'ftpClient') | Should Be $false
@@ -440,7 +519,7 @@ Describe 'NamePattern exclusion and SID overlap' {
 
     It 'excludes a name of a Disable entry from NamePattern' {
         $c = New-CrTestConfig
-        (Get-TestConfigEntry $c 'Retired').Names = @('SP Admin', 'SYS Admin', 'ftpClient')
+        (Get-TestConfigEntry $c 'Retired').Names = @('SP Admin', 'SYS Admin', 'SOP-Admin', 'ftpClient')
         $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM')
         $names = Get-TestAccountNames (Get-TestEntry $resolved 'FtpUsers')
         ($names -contains 'ftpClient') | Should Be $false
@@ -449,23 +528,34 @@ Describe 'NamePattern exclusion and SID overlap' {
 
     It 'reports a SID selected by two named entries as Ambiguous' {
         $c = New-CrTestConfig
-        Add-TestAccount $c @{ Id = 'Dup'; Kind = 'Windows'; Name = 'SOP-Admin'; Role = 'Admin'; Credential = 'SOPAdmin' }
+        Add-TestAccount $c @{ Id = 'Dup'; Kind = 'Windows'; Name = 'BiCA Admin'; Role = 'Admin'; Credential = 'BiCAAdmin' }
         $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'IPT01')
         $findings = Find-CrSidOverlap -Resolved $resolved
         $findings.Count | Should Be 1
         $findings[0].Severity | Should Be 'Ambiguous'
-        $findings[0].Account | Should Be 'SOP-Admin'
-        $findings[0].Message | Should Match 'SOPAdmin, Dup'
+        $findings[0].Account | Should Be 'BiCA Admin'
+        $findings[0].Message | Should Match 'BiCAAdmin, Dup'
     }
 
-    It 'reports a replaced account that another entry selects' {
+    It 'reports an auto-logon account that a Disable entry also selects' {
         $c = New-CrTestConfig
-        Add-TestAccount $c @{ Id = 'Kiosk'; Kind = 'Windows'; Name = 'WinAutoUser'; Role = 'User'; Mode = 'Check' }
+        (Get-TestConfigEntry $c 'Retired').Names = @('SP Admin', 'SYS Admin', 'SOP-Admin', 'WinAutoUser')
         $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM')
         $findings = Find-CrSidOverlap -Resolved $resolved
         $findings.Count | Should Be 1
         $findings[0].Account | Should Be 'WinAutoUser'
-        $findings[0].Message | Should Match 'PubUser \(replaces\), Kiosk'
+        $findings[0].Message | Should Match 'AutoLogon, Retired'
+    }
+
+    It 'reports a replaced account that another entry selects' {
+        $c = New-CrTestConfig
+        (Get-TestConfigEntry $c 'AppUser').Replaces = @('RID-500', 'OtherAdmin')
+        Add-TestAccount $c @{ Id = 'Kiosk'; Kind = 'Windows'; Name = 'OtherAdmin'; Role = 'User'; Mode = 'Check' }
+        $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM')
+        $findings = Find-CrSidOverlap -Resolved $resolved
+        $findings.Count | Should Be 1
+        $findings[0].Account | Should Be 'OtherAdmin'
+        $findings[0].Message | Should Match 'AppUser \(replaces\), Kiosk'
     }
 
     It 'reports a renamed RID-500 that another entry names explicitly' {
@@ -489,11 +579,12 @@ Describe 'NamePattern exclusion and SID overlap' {
 
     It 'reports a Disable account that is also replaced' {
         $c = New-CrTestConfig
-        (Get-TestConfigEntry $c 'Retired').Names = @('SP Admin', 'SYS Admin', 'BiCA Admin')
+        (Get-TestConfigEntry $c 'AppUser').Replaces = @('RID-500', 'SP Admin')
         $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM')
         $findings = Find-CrSidOverlap -Resolved $resolved
         $findings.Count | Should Be 1
-        $findings[0].Message | Should Match 'SOPAdmin \(replaces\), Retired'
+        $findings[0].Account | Should Be 'SP Admin'
+        $findings[0].Message | Should Match 'AppUser \(replaces\), Retired'
     }
 
     It 'reports an overlap between two NamePattern entries' {
@@ -515,8 +606,10 @@ Describe 'NamePattern exclusion and SID overlap' {
 
     It 'ignores create placeholders (no SID yet)' {
         $c = New-CrTestConfig
-        Add-TestAccount $c @{ Id = 'Twin'; Kind = 'Windows'; Name = 'SOP-Admin'; Role = 'Operator'; Credential = 'SOPAdmin'; Create = $true }
-        $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM')
+        Add-TestAccount $c @{ Id = 'Twin'; Kind = 'Windows'; Name = 'BiCA Admin'; Role = 'Admin'; Credential = 'BiCAAdmin'; Create = $true }
+        $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM' -OmitUsers 'BiCA Admin')
+        (Get-TestEntry $resolved 'BiCAAdmin').Accounts[0].ToCreate | Should Be $true
+        (Get-TestEntry $resolved 'Twin').Accounts[0].ToCreate | Should Be $true
         (Find-CrSidOverlap -Resolved $resolved).Count | Should Be 0
     }
 }
