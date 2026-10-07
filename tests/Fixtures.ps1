@@ -382,5 +382,7 @@ function New-CrTestConfig {
     param([string]$Path)
     if (-not $Path) { $Path = Join-Path (Join-Path (Split-Path -Parent $CrFixturesDirectory) 'config') 'CredentialRotation.psd1' }
     $full = (Resolve-Path -LiteralPath $Path).ProviderPath
-    return (Import-LocalizedData -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -UICulture en-US -ErrorAction Stop)
+    $cfg = $null
+    Import-LocalizedData -BindingVariable cfg -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -UICulture en-US -ErrorAction Stop
+    return $cfg
 }

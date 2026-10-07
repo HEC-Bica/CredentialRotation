@@ -184,11 +184,13 @@ Describe 'Select-CrProbeLogonType (D16)' {
         $p.Fallback | Should Be $true
     }
 
-    It 'follows the order Network, Interactive, Batch, Service' {
-        Mock Get-CrEffectiveLogonRights { @{ Network = $false; Interactive = $false; RemoteInteractive = $true; Batch = $true; Service = $true } }
-        $p = Select-CrProbeLogonType -UserSid 'S-1-5-21-1000-2000-3000-1999' -State @{}
-        $p.LogonType | Should Be 'Batch'
-        Assert-MockCalled Get-CrEffectiveLogonRights -Times 1 -Exactly
+    Context 'follows the order Network, Interactive, Batch, Service' {
+        It 'follows the order Network, Interactive, Batch, Service' {
+            Mock Get-CrEffectiveLogonRights { @{ Network = $false; Interactive = $false; RemoteInteractive = $true; Batch = $true; Service = $true } }
+            $p = Select-CrProbeLogonType -UserSid 'S-1-5-21-1000-2000-3000-1999' -State @{}
+            $p.LogonType | Should Be 'Batch'
+            Assert-MockCalled Get-CrEffectiveLogonRights -Times 1 -Exactly
+        }
     }
 }
 

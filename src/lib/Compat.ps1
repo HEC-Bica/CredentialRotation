@@ -75,6 +75,16 @@ function New-CrFinding {
     }
 }
 
+# Innermost exception message: "type initializer" and "exception calling" wrappers hide the real cause.
+function Get-CrInnermostMessage {
+    param($ErrorRecord)
+    $ex = $ErrorRecord
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ex = $ErrorRecord.Exception }
+    if (-not $ex) { return $null }
+    while ($ex.InnerException) { $ex = $ex.InnerException }
+    return $ex.Message
+}
+
 # Returns the input as an array; $null becomes an empty array (PS 2.0: @($null) has one element).
 function ConvertTo-CrArray {
     param($Value)

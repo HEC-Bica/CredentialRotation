@@ -3,3 +3,7 @@ dist/
 
 # Inventory reports contain account names and SIDs; never commit them
 tools/CR-Inventory_*.json
+
+# Test-site output (account and machine names)
+logs/
+ConsoleOutput*.txt

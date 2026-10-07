@@ -32,21 +32,25 @@ Describe 'Get-CrNativeSource' {
 }
 
 Describe 'Initialize-CrNative' {
-    It 'never throws and records the compile error' {
-        Mock Test-CrNativeTypeLoaded { $false }
-        Mock Add-Type { throw 'compile failed' }
-        $script:CrNativeReady = $null
-        $script:CrNativeError = $null
-        { Initialize-CrNative } | Should Not Throw
-        Test-CrNativeReady | Should Be $false
-        $script:CrNativeError | Should Be 'compile failed'
+    Context 'never throws and records the compile error' {
+        It 'never throws and records the compile error' {
+            Mock Test-CrNativeTypeLoaded { $false }
+            Mock Add-Type { throw 'compile failed' }
+            $script:CrNativeReady = $null
+            $script:CrNativeError = $null
+            { Initialize-CrNative } | Should Not Throw
+            Test-CrNativeReady | Should Be $false
+            $script:CrNativeError | Should Be 'compile failed'
+        }
     }
 
-    It 'makes the wrappers throw with the compile error when not ready' {
-        Mock Test-CrNativeTypeLoaded { $false }
-        Mock Add-Type { throw 'compile failed' }
-        $script:CrNativeReady = $null
-        { Get-CrMachineSid } | Should Throw 'compile failed'
+    Context 'makes the wrappers throw with the compile error when not ready' {
+        It 'makes the wrappers throw with the compile error when not ready' {
+            Mock Test-CrNativeTypeLoaded { $false }
+            Mock Add-Type { throw 'compile failed' }
+            $script:CrNativeReady = $null
+            { Get-CrMachineSid } | Should Throw 'compile failed'
+        }
     }
 
     It 'compiles the real source and is idempotent' {
@@ -72,62 +76,72 @@ Describe 'Get-CrLsaRightNames' {
 Describe 'Get-CrLsaRightsMap' {
     Mock Assert-CrNativeReady { }
 
-    It 'returns all ten rights with SID arrays, empty when nobody holds a right' {
-        Mock Get-CrLsaAccountsWithRight {
-            if ($Right -eq 'SeServiceLogonRight') { return , @('S-1-5-21-1000-2000-3000-1001', 'S-1-5-80-0') }
-            if ($Right -eq 'SeDenyInteractiveLogonRight') { return 'S-1-5-21-1000-2000-3000-1002' }
-            return , @()
+    Context 'returns all ten rights with SID arrays, empty when nobody holds a right' {
+        It 'returns all ten rights with SID arrays, empty when nobody holds a right' {
+            Mock Get-CrLsaAccountsWithRight {
+                if ($Right -eq 'SeServiceLogonRight') { return , @('S-1-5-21-1000-2000-3000-1001', 'S-1-5-80-0') }
+                if ($Right -eq 'SeDenyInteractiveLogonRight') { return 'S-1-5-21-1000-2000-3000-1002' }
+                return , @()
+            }
+            $map = Get-CrLsaRightsMap
+            $map.Count | Should Be 10
+            foreach ($r in $crExpectedRights) {
+                $map.ContainsKey($r) | Should Be $true
+                ($map[$r] -is [array]) | Should Be $true
+            }
+            $map['SeServiceLogonRight'].Count | Should Be 2
+            $map['SeServiceLogonRight'][0] | Should Be 'S-1-5-21-1000-2000-3000-1001'
+            $map['SeDenyInteractiveLogonRight'].Count | Should Be 1
+            $map['SeDenyInteractiveLogonRight'][0] | Should Be 'S-1-5-21-1000-2000-3000-1002'
+            $map['SeNetworkLogonRight'].Count | Should Be 0
+            Assert-MockCalled Get-CrLsaAccountsWithRight -Times 10 -Exactly
         }
-        $map = Get-CrLsaRightsMap
-        $map.Count | Should Be 10
-        foreach ($r in $crExpectedRights) {
-            $map.ContainsKey($r) | Should Be $true
-            ($map[$r] -is [array]) | Should Be $true
-        }
-        $map['SeServiceLogonRight'].Count | Should Be 2
-        $map['SeServiceLogonRight'][0] | Should Be 'S-1-5-21-1000-2000-3000-1001'
-        $map['SeDenyInteractiveLogonRight'].Count | Should Be 1
-        $map['SeDenyInteractiveLogonRight'][0] | Should Be 'S-1-5-21-1000-2000-3000-1002'
-        $map['SeNetworkLogonRight'].Count | Should Be 0
-        Assert-MockCalled Get-CrLsaAccountsWithRight -Times 10 -Exactly
     }
 
-    It 'throws when a right cannot be read' {
-        Mock Get-CrLsaAccountsWithRight {
-            if ($Right -eq 'SeBatchLogonRight') { throw 'Access is denied' }
-            return , @()
+    Context 'throws when a right cannot be read' {
+        It 'throws when a right cannot be read' {
+            Mock Get-CrLsaAccountsWithRight {
+                if ($Right -eq 'SeBatchLogonRight') { throw 'Access is denied' }
+                return , @()
+            }
+            { Get-CrLsaRightsMap } | Should Throw 'Access is denied'
         }
-        { Get-CrLsaRightsMap } | Should Throw 'Access is denied'
     }
 }
 
 Describe 'Get-CrUserModals' {
-    It 'maps the raw values to the contract keys' {
-        Mock Get-CrUserModalsRaw { return , @([long]8, [long]7776000, [long]86400, [long]24, [long]900, [long]1800, [long]10) }
-        $m = Get-CrUserModals
-        $m['MinPasswordLength'] | Should Be 8
-        $m['MaxPasswordAgeSeconds'] | Should Be 7776000
-        $m['MinPasswordAgeSeconds'] | Should Be 86400
-        $m['PasswordHistoryLength'] | Should Be 24
-        $m['LockoutDurationSeconds'] | Should Be 900
-        $m['LockoutObservationSeconds'] | Should Be 1800
-        $m['LockoutThreshold'] | Should Be 10
-        $m.Count | Should Be 7
-        ($m['MinPasswordLength'] -is [int]) | Should Be $true
-        ($m['MaxPasswordAgeSeconds'] -is [long]) | Should Be $true
+    Context 'maps the raw values to the contract keys' {
+        It 'maps the raw values to the contract keys' {
+            Mock Get-CrUserModalsRaw { return , @([long]8, [long]7776000, [long]86400, [long]24, [long]900, [long]1800, [long]10) }
+            $m = Get-CrUserModals
+            $m['MinPasswordLength'] | Should Be 8
+            $m['MaxPasswordAgeSeconds'] | Should Be 7776000
+            $m['MinPasswordAgeSeconds'] | Should Be 86400
+            $m['PasswordHistoryLength'] | Should Be 24
+            $m['LockoutDurationSeconds'] | Should Be 900
+            $m['LockoutObservationSeconds'] | Should Be 1800
+            $m['LockoutThreshold'] | Should Be 10
+            $m.Count | Should Be 7
+            ($m['MinPasswordLength'] -is [int]) | Should Be $true
+            ($m['MaxPasswordAgeSeconds'] -is [long]) | Should Be $true
+        }
     }
 
-    It 'maps TIMEQ_FOREVER to -1' {
-        Mock Get-CrUserModalsRaw { return , @([long]0, [long]4294967295, [long]0, [long]0, [long]4294967295, [long]0, [long]0) }
-        $m = Get-CrUserModals
-        $m['MaxPasswordAgeSeconds'] | Should Be -1
-        $m['LockoutDurationSeconds'] | Should Be -1
-        $m['LockoutThreshold'] | Should Be 0
+    Context 'maps TIMEQ_FOREVER to -1' {
+        It 'maps TIMEQ_FOREVER to -1' {
+            Mock Get-CrUserModalsRaw { return , @([long]0, [long]4294967295, [long]0, [long]0, [long]4294967295, [long]0, [long]0) }
+            $m = Get-CrUserModals
+            $m['MaxPasswordAgeSeconds'] | Should Be -1
+            $m['LockoutDurationSeconds'] | Should Be -1
+            $m['LockoutThreshold'] | Should Be 0
+        }
     }
 
-    It 'throws on an unexpected number of values' {
-        Mock Get-CrUserModalsRaw { return , @([long]1, [long]2) }
-        { Get-CrUserModals } | Should Throw
+    Context 'throws on an unexpected number of values' {
+        It 'throws on an unexpected number of values' {
+            Mock Get-CrUserModalsRaw { return , @([long]1, [long]2) }
+            { Get-CrUserModals } | Should Throw
+        }
     }
 }
 

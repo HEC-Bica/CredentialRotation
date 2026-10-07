@@ -613,6 +613,7 @@ The auto-logon slot may contain two accounts (`PUB-User`, `WinAutoUser`), each w
 - **PS 2.0:** lint for syntax; semantics via tests on a real PS 2.0 engine once a host exists (O3), meanwhile `/PS2` audits on the test sites. `Add-Type` compiles C# 2.0 by default on PS 2.0; C# 3.0 needs `-Language CSharpVersion3`. `System.Core` is loaded explicitly.
 - **PS 2.0 on the test machines:** SHA-256 CSP, Task Scheduler COM, COMAdmin COM, IIS MWA and SqlClient load on both sites. Whether `Add-Type` compiles is still unknown: all four inventories ran with script v1.0, whose bug drops that result (fixed since v1.1).
 - **Windows Embedded:** possible write filters (D19); ADSI `Members()` doesn't return local members (§7.2).
+- **PS 2.0 engine on a machine with WMF 5.1 / Windows 10 (`/PS2` test runs):** `powershell.exe.config` contains a .NET 4 `<uri>` section that CLR 2.0 doesn't know. Every component that reads the configuration then fails; SqlClient does so when it starts ("Unknown configuration section 'uri'", seen on `SM-QS-K1`). The tool reports this and blocks the SQL slots. Real runs use PS 5.1 wherever it's installed, so this affects only `/PS2` test runs; SQL under PS 2.0 must therefore be tested on a Windows 7 with PS 2.0 only (O1), and the `/PS2` apply on test site 102575 (M2) doesn't cover SQL.
 
 ## 11. Testing
 

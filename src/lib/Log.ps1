@@ -30,11 +30,22 @@ function Initialize-CrLog {
 
 $script:CrTrustedSids = @('S-1-5-32-544', 'S-1-5-18', 'S-1-3-0')
 
+# Get-Acl/Set-Acl have no -LiteralPath in PS 2.0; the .NET methods take the path literally.
+function Get-CrDirectoryAcl {
+    param([string]$Path)
+    return [System.IO.Directory]::GetAccessControl($Path)
+}
+
+function Set-CrDirectoryAcl {
+    param([string]$Path, $Acl)
+    [System.IO.Directory]::SetAccessControl($Path, $Acl)
+}
+
 function Test-CrFolderSecure {
     param([string]$Path)
     try {
-        $acl = Get-Acl -LiteralPath $Path
-        $owner = (New-Object System.Security.Principal.NTAccount($acl.Owner)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+        $acl = Get-CrDirectoryAcl -Path $Path
+        $owner = $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value
         if (@('S-1-5-32-544', 'S-1-5-18') -notcontains $owner) { return $false }
         $writeRights = [System.Security.AccessControl.FileSystemRights]'Write, Modify, FullControl, ChangePermissions, TakeOwnership, Delete, CreateFiles, AppendData'
         foreach ($rule in @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
@@ -52,9 +63,9 @@ function Set-CrFolderAcl {
     param([string]$Path)
     $sddl = 'O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)'
     try {
-        $acl = Get-Acl -LiteralPath $Path
+        $acl = Get-CrDirectoryAcl -Path $Path
         $acl.SetSecurityDescriptorSddlForm($sddl)
-        Set-Acl -LiteralPath $Path -AclObject $acl
+        Set-CrDirectoryAcl -Path $Path -Acl $acl
     } catch {
         # Fallback when WRITE_OWNER is missing: take ownership for Administrators, then retry.
         # Local 'Continue': under 'Stop' a stderr line from takeown would abort the run.
@@ -63,9 +74,9 @@ function Set-CrFolderAcl {
         [void](& $takeown /F $Path /A 2>&1)
         if ($LASTEXITCODE -ne 0) { throw ('takeown failed with exit code ' + $LASTEXITCODE + ' for ' + $Path) }
         $ErrorActionPreference = 'Stop'
-        $acl = Get-Acl -LiteralPath $Path
+        $acl = Get-CrDirectoryAcl -Path $Path
         $acl.SetSecurityDescriptorSddlForm($sddl)
-        Set-Acl -LiteralPath $Path -AclObject $acl
+        Set-CrDirectoryAcl -Path $Path -Acl $acl
     }
 }
 
@@ -88,8 +99,9 @@ function Export-CrFindingsCsv {
         }
     })
     if ($rows.Count -eq 0) { return }
+    # Export-Csv has no -LiteralPath in PS 2.0; the log path contains no wildcard characters.
     $rows | Select-Object Severity, Area, Slot, Account, Message, Detail |
-        Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
+        Export-Csv -Path $Path -NoTypeInformation -Encoding UTF8
 }
 
 # Console report grouped by severity, most important first.

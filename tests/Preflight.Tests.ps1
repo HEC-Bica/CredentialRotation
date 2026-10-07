@@ -126,39 +126,49 @@ Describe 'Get-CrComputerInfo' {
         $c['SystemDrive'] | Should Be 'C:'
         $c['IsSm'] | Should Be $true
     }
-    It 'matches the SM pattern case-insensitively' {
-        Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_ComputerSystem' } {
-            return New-Object PSObject -Property @{ Name = 'sm-sitea'; PartOfDomain = $false }
+    Context 'matches the SM pattern case-insensitively' {
+        It 'matches the SM pattern case-insensitively' {
+            Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_ComputerSystem' } {
+                return New-Object PSObject -Property @{ Name = 'sm-sitea'; PartOfDomain = $false }
+            }
+            (Get-CrComputerInfo -Config $TestConfig)['IsSm'] | Should Be $true
         }
-        (Get-CrComputerInfo -Config $TestConfig)['IsSm'] | Should Be $true
     }
-    It 'is not SM for other names' {
-        Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_ComputerSystem' } {
-            return New-Object PSObject -Property @{ Name = 'IPT01-SITEA'; PartOfDomain = $true }
+    Context 'is not SM for other names' {
+        It 'is not SM for other names' {
+            Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_ComputerSystem' } {
+                return New-Object PSObject -Property @{ Name = 'IPT01-SITEA'; PartOfDomain = $true }
+            }
+            $c = Get-CrComputerInfo -Config $TestConfig
+            $c['IsSm'] | Should Be $false
+            $c['PartOfDomain'] | Should Be $true
         }
-        $c = Get-CrComputerInfo -Config $TestConfig
-        $c['IsSm'] | Should Be $false
-        $c['PartOfDomain'] | Should Be $true
     }
     It 'uses the configured RestrictedComputerPattern' {
         $cfg = @{ Accounts = @(@{ Id = 'AutoLogon'; Kind = 'Windows'; AutoLogon = @{ RestrictedComputerPattern = 'SITEA$' } }) }
         (Get-CrComputerInfo -Config $cfg)['IsSm'] | Should Be $true
     }
-    It 'reads a 32-bit OS' {
-        Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_OperatingSystem' } {
-            return New-Object PSObject -Property @{ Version = '10.0.17763'; Caption = 'Windows 10'; OSArchitecture = '32-Bit'; SystemDrive = 'C:' }
+    Context 'reads a 32-bit OS' {
+        It 'reads a 32-bit OS' {
+            Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_OperatingSystem' } {
+                return New-Object PSObject -Property @{ Version = '10.0.17763'; Caption = 'Windows 10'; OSArchitecture = '32-Bit'; SystemDrive = 'C:' }
+            }
+            (Get-CrComputerInfo -Config $TestConfig)['Is64BitOs'] | Should Be $false
         }
-        (Get-CrComputerInfo -Config $TestConfig)['Is64BitOs'] | Should Be $false
     }
-    It 'keeps going when the machine SID is not available' {
-        Mock Get-CrMachineSid { throw 'native not ready' }
-        $c = Get-CrComputerInfo -Config $TestConfig
-        $c['MachineSid'] | Should BeNullOrEmpty
-        $c['Error'] | Should BeNullOrEmpty
+    Context 'keeps going when the machine SID is not available' {
+        It 'keeps going when the machine SID is not available' {
+            Mock Get-CrMachineSid { throw 'native not ready' }
+            $c = Get-CrComputerInfo -Config $TestConfig
+            $c['MachineSid'] | Should BeNullOrEmpty
+            $c['Error'] | Should BeNullOrEmpty
+        }
     }
-    It 'sets Error when WMI fails' {
-        Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_OperatingSystem' } { throw 'WMI broken' }
-        (Get-CrComputerInfo -Config $TestConfig)['Error'] | Should Match 'WMI broken'
+    Context 'sets Error when WMI fails' {
+        It 'sets Error when WMI fails' {
+            Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_OperatingSystem' } { throw 'WMI broken' }
+            (Get-CrComputerInfo -Config $TestConfig)['Error'] | Should Match 'WMI broken'
+        }
     }
 }
 
@@ -181,64 +191,80 @@ Describe 'Get-CrPasswordPolicy' {
         $p['ComplexityEnabled'] | Should Be $true
         $p['ForceGuest'] | Should Be $false
     }
-    It 'reads complexity off' {
-        Mock Get-CrSeceditSystemAccess { return @{ PasswordComplexity = '0' } }
-        (Get-CrPasswordPolicy)['ComplexityEnabled'] | Should Be $false
+    Context 'reads complexity off' {
+        It 'reads complexity off' {
+            Mock Get-CrSeceditSystemAccess { return @{ PasswordComplexity = '0' } }
+            (Get-CrPasswordPolicy)['ComplexityEnabled'] | Should Be $false
+        }
     }
-    It 'leaves complexity unknown when secedit has no value or fails' {
-        Mock Get-CrSeceditSystemAccess { return @{ } }
-        $p = Get-CrPasswordPolicy
-        $p['ComplexityEnabled'] | Should BeNullOrEmpty
-        $p['ComplexityError'] | Should Not BeNullOrEmpty
-        Mock Get-CrSeceditSystemAccess { throw 'secedit failed' }
-        $p = Get-CrPasswordPolicy
-        $p['ComplexityEnabled'] | Should BeNullOrEmpty
-        $p['ComplexityError'] | Should Match 'secedit failed'
+    Context 'leaves complexity unknown when secedit has no value or fails' {
+        It 'leaves complexity unknown when secedit has no value or fails' {
+            Mock Get-CrSeceditSystemAccess { return @{ } }
+            $p = Get-CrPasswordPolicy
+            $p['ComplexityEnabled'] | Should BeNullOrEmpty
+            $p['ComplexityError'] | Should Not BeNullOrEmpty
+            Mock Get-CrSeceditSystemAccess { throw 'secedit failed' }
+            $p = Get-CrPasswordPolicy
+            $p['ComplexityEnabled'] | Should BeNullOrEmpty
+            $p['ComplexityError'] | Should Match 'secedit failed'
+        }
     }
-    It 'maps an unlimited maximum age to -1' {
-        Mock Get-CrUserModals { return @{ MinPasswordLength = 0; MaxPasswordAgeSeconds = [uint32]4294967295; MinPasswordAgeSeconds = 0
-                                          PasswordHistoryLength = 0; LockoutDurationSeconds = 1800; LockoutObservationSeconds = 1800; LockoutThreshold = 0 } }
-        (Get-CrPasswordPolicy)['MaxPasswordAgeSeconds'] | Should Be -1
+    Context 'maps an unlimited maximum age to -1' {
+        It 'maps an unlimited maximum age to -1' {
+            Mock Get-CrUserModals { return @{ MinPasswordLength = 0; MaxPasswordAgeSeconds = [uint32]4294967295; MinPasswordAgeSeconds = 0
+                                              PasswordHistoryLength = 0; LockoutDurationSeconds = 1800; LockoutObservationSeconds = 1800; LockoutThreshold = 0 } }
+            (Get-CrPasswordPolicy)['MaxPasswordAgeSeconds'] | Should Be -1
+        }
     }
-    It 'reports ForceGuest = 1 and a missing value as off' {
-        Mock Get-CrRegistryValue -ParameterFilter { $Name -eq 'forceguest' } { return @{ Exists = $true; Value = 1; Kind = 'DWord' } }
-        (Get-CrPasswordPolicy)['ForceGuest'] | Should Be $true
-        Mock Get-CrRegistryValue -ParameterFilter { $Name -eq 'forceguest' } { return @{ Exists = $false; Value = $null; Kind = $null } }
-        (Get-CrPasswordPolicy)['ForceGuest'] | Should Be $false
+    Context 'reports ForceGuest = 1 and a missing value as off' {
+        It 'reports ForceGuest = 1 and a missing value as off' {
+            Mock Get-CrRegistryValue -ParameterFilter { $Name -eq 'forceguest' } { return @{ Exists = $true; Value = 1; Kind = 'DWord' } }
+            (Get-CrPasswordPolicy)['ForceGuest'] | Should Be $true
+            Mock Get-CrRegistryValue -ParameterFilter { $Name -eq 'forceguest' } { return @{ Exists = $false; Value = $null; Kind = $null } }
+            (Get-CrPasswordPolicy)['ForceGuest'] | Should Be $false
+        }
     }
-    It 'sets Error when NetUserModalsGet fails' {
-        Mock Get-CrUserModals { throw 'access denied' }
-        $p = Get-CrPasswordPolicy
-        $p['Error'] | Should Match 'access denied'
-        $p['ComplexityEnabled'] | Should Be $true
+    Context 'sets Error when NetUserModalsGet fails' {
+        It 'sets Error when NetUserModalsGet fails' {
+            Mock Get-CrUserModals { throw 'access denied' }
+            $p = Get-CrPasswordPolicy
+            $p['Error'] | Should Match 'access denied'
+            $p['ComplexityEnabled'] | Should Be $true
+        }
     }
 }
 
 Describe 'Get-CrSeceditSystemAccess' {
-    It 'parses [System Access] and deletes the temporary file' {
-        Mock Invoke-CrSeceditExport {
-            Set-Content -LiteralPath $Path -Value @('[Unicode]', 'Unicode=yes', '[System Access]', 'MinimumPasswordLength = 8',
-                                                   'PasswordComplexity = 1', '[Event Audit]', 'AuditSystemEvents = 0')
-            return 0
+    Context 'parses [System Access] and deletes the temporary file' {
+        It 'parses [System Access] and deletes the temporary file' {
+            Mock Invoke-CrSeceditExport {
+                Set-Content -LiteralPath $Path -Value @('[Unicode]', 'Unicode=yes', '[System Access]', 'MinimumPasswordLength = 8',
+                                                       'PasswordComplexity = 1', '[Event Audit]', 'AuditSystemEvents = 0')
+                return 0
+            }
+            $sa = Get-CrSeceditSystemAccess
+            $sa['PasswordComplexity'] | Should Be '1'
+            $sa['MinimumPasswordLength'] | Should Be '8'
+            $sa.ContainsKey('AuditSystemEvents') | Should Be $false
+            $sa.ContainsKey('Unicode') | Should Be $false
+            Assert-MockCalled Invoke-CrSeceditExport -Times 1 -Exactly -Scope It -ParameterFilter { -not (Test-Path -LiteralPath $Path) }
         }
-        $sa = Get-CrSeceditSystemAccess
-        $sa['PasswordComplexity'] | Should Be '1'
-        $sa['MinimumPasswordLength'] | Should Be '8'
-        $sa.ContainsKey('AuditSystemEvents') | Should Be $false
-        $sa.ContainsKey('Unicode') | Should Be $false
-        Assert-MockCalled Invoke-CrSeceditExport -Times 1 -Exactly -Scope It -ParameterFilter { -not (Test-Path -LiteralPath $Path) }
     }
-    It 'deletes the temporary file when the export fails' {
-        Mock Invoke-CrSeceditExport {
-            Set-Content -LiteralPath $Path -Value @('[System Access]')
-            throw 'secedit crashed'
+    Context 'deletes the temporary file when the export fails' {
+        It 'deletes the temporary file when the export fails' {
+            Mock Invoke-CrSeceditExport {
+                Set-Content -LiteralPath $Path -Value @('[System Access]')
+                throw 'secedit crashed'
+            }
+            { Get-CrSeceditSystemAccess } | Should Throw
+            Assert-MockCalled Invoke-CrSeceditExport -Times 1 -Exactly -Scope It -ParameterFilter { -not (Test-Path -LiteralPath $Path) }
         }
-        { Get-CrSeceditSystemAccess } | Should Throw
-        Assert-MockCalled Invoke-CrSeceditExport -Times 1 -Exactly -Scope It -ParameterFilter { -not (Test-Path -LiteralPath $Path) }
     }
-    It 'throws when secedit writes no file' {
-        Mock Invoke-CrSeceditExport { return 5 }
-        { Get-CrSeceditSystemAccess } | Should Throw
+    Context 'throws when secedit writes no file' {
+        It 'throws when secedit writes no file' {
+            Mock Invoke-CrSeceditExport { return 5 }
+            { Get-CrSeceditSystemAccess } | Should Throw
+        }
     }
 }
 
@@ -296,14 +322,16 @@ Describe 'Get-CrWriteFilterState' {
     Mock Get-CrPreflightWmi { throw 'not available' }
     Mock Get-CrEwfProtectedVolumeKeys { 'Volume0' }
 
-    It 'treats an EWF driver without a configured protected volume as not protecting' {
-        Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
-        Mock Get-CrEwfProtectedVolumeKeys { }
-        $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
-        $ewf.Count | Should Be 1
-        $ewf[0]['StateKnown'] | Should Be $true
-        $ewf[0]['CurrentEnabled'] | Should Be $false
-        Assert-MockCalled Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' } -Times 0 -Exactly -Scope It
+    Context 'treats an EWF driver without a configured protected volume as not protecting' {
+        It 'treats an EWF driver without a configured protected volume as not protecting' {
+            Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
+            Mock Get-CrEwfProtectedVolumeKeys { }
+            $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
+            $ewf.Count | Should Be 1
+            $ewf[0]['StateKnown'] | Should Be $true
+            $ewf[0]['CurrentEnabled'] | Should Be $false
+            Assert-MockCalled Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' } -Times 0 -Exactly -Scope It
+        }
     }
     It 'reports all three filters as not installed' {
         $wf = Get-CrWriteFilterState
@@ -312,71 +340,83 @@ Describe 'Get-CrWriteFilterState' {
         foreach ($f in @($wf['Filters'])) { $f['DriverInstalled'] | Should Be $false }
         Assert-MockCalled Invoke-CrSystemTool -Times 0 -Exactly -Scope It
     }
-    It 'parses EWF per volume and skips volumes without configuration' {
-        Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
-        Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_LogicalDisk' } {
-            return @((New-Object PSObject -Property @{ DeviceID = 'C:' }), (New-Object PSObject -Property @{ DeviceID = 'Z:' }))
+    Context 'parses EWF per volume and skips volumes without configuration' {
+        It 'parses EWF per volume and skips volumes without configuration' {
+            Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
+            Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_LogicalDisk' } {
+                return @((New-Object PSObject -Property @{ DeviceID = 'C:' }), (New-Object PSObject -Property @{ DeviceID = 'Z:' }))
+            }
+            Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' } {
+                return @{ Present = $true; Output = @('Failed getting protected volume configuration with error 1.'); ExitCode = 1 }
+            }
+            Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' -and $Arguments[0] -eq 'C:' } {
+                return @{ Present = $true; Output = (Get-TestEwfLines -BootCommand 'COMMIT'); ExitCode = 0 }
+            }
+            $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
+            $ewf.Count | Should Be 1
+            $ewf[0]['StateKnown'] | Should Be $true
+            $ewf[0]['CurrentEnabled'] | Should Be $true
+            $ewf[0]['CommitPending'] | Should Be $true
+            ($ewf[0]['ProtectedVolumes'] -join ',') | Should Be 'C:'
         }
-        Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' } {
-            return @{ Present = $true; Output = @('Failed getting protected volume configuration with error 1.'); ExitCode = 1 }
-        }
-        Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' -and $Arguments[0] -eq 'C:' } {
-            return @{ Present = $true; Output = (Get-TestEwfLines -BootCommand 'COMMIT'); ExitCode = 0 }
-        }
-        $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
-        $ewf.Count | Should Be 1
-        $ewf[0]['StateKnown'] | Should Be $true
-        $ewf[0]['CurrentEnabled'] | Should Be $true
-        $ewf[0]['CommitPending'] | Should Be $true
-        ($ewf[0]['ProtectedVolumes'] -join ',') | Should Be 'C:'
     }
-    It 'marks EWF unknown when ewfmgr is missing' {
-        Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
-        $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
-        $ewf.Count | Should Be 1
-        $ewf[0]['DriverInstalled'] | Should Be $true
-        $ewf[0]['StateKnown'] | Should Be $false
-    }
-    It 'marks EWF unknown when no output can be parsed' {
-        Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
-        Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' } { return @{ Present = $true; Output = @('unexpected'); ExitCode = 0 } }
-        $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
-        $ewf[0]['StateKnown'] | Should Be $false
-    }
-    It 'parses FBWF and marks unmappable device paths unknown' {
-        Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'fbwf' } { return @{ Installed = $true; Start = 1 } }
-        Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'fbwfmgr.exe' } { return @{ Present = $true; Output = (Get-TestFbwfLines); ExitCode = 0 } }
-        $fb = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'FBWF' })[0]
-        $fb['StateKnown'] | Should Be $true
-        $fb['CurrentEnabled'] | Should Be $true
-        ($fb['ProtectedVolumes'] -join ',') | Should Be 'C:'
-        Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'fbwfmgr.exe' } {
-            return @{ Present = $true; Output = (Get-TestFbwfLines -Volume '\Device\HarddiskVolume2'); ExitCode = 0 }
+    Context 'marks EWF unknown when ewfmgr is missing' {
+        It 'marks EWF unknown when ewfmgr is missing' {
+            Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
+            $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
+            $ewf.Count | Should Be 1
+            $ewf[0]['DriverInstalled'] | Should Be $true
+            $ewf[0]['StateKnown'] | Should Be $false
         }
-        $fb = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'FBWF' })[0]
-        $fb['StateKnown'] | Should Be $false
     }
-    It 'reads UWF from WMI (current-session protected volumes only)' {
-        Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'uwfvol' } { return @{ Installed = $true; Start = 0 } }
-        Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'UWF_Filter' } {
-            return New-Object PSObject -Property @{ CurrentEnabled = $true; NextEnabled = $false }
+    Context 'marks EWF unknown when no output can be parsed' {
+        It 'marks EWF unknown when no output can be parsed' {
+            Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'ewf' } { return @{ Installed = $true; Start = 0 } }
+            Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'ewfmgr.exe' } { return @{ Present = $true; Output = @('unexpected'); ExitCode = 0 } }
+            $ewf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'EWF' })
+            $ewf[0]['StateKnown'] | Should Be $false
         }
-        Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'UWF_Volume' } {
-            return @((New-Object PSObject -Property @{ CurrentSession = $true; DriveLetter = 'C:'; Protected = $true }),
-                     (New-Object PSObject -Property @{ CurrentSession = $false; DriveLetter = 'D:'; Protected = $true }),
-                     (New-Object PSObject -Property @{ CurrentSession = $true; DriveLetter = 'E:'; Protected = $false }))
-        }
-        $uwf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'UWF' })[0]
-        $uwf['StateKnown'] | Should Be $true
-        $uwf['CurrentEnabled'] | Should Be $true
-        $uwf['NextEnabled'] | Should Be $false
-        ($uwf['ProtectedVolumes'] -join ',') | Should Be 'C:'
     }
-    It 'marks UWF unknown when WMI is not available' {
-        Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'uwfvol' } { return @{ Installed = $true; Start = 0 } }
-        $uwf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'UWF' })[0]
-        $uwf['DriverInstalled'] | Should Be $true
-        $uwf['StateKnown'] | Should Be $false
+    Context 'parses FBWF and marks unmappable device paths unknown' {
+        It 'parses FBWF and marks unmappable device paths unknown' {
+            Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'fbwf' } { return @{ Installed = $true; Start = 1 } }
+            Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'fbwfmgr.exe' } { return @{ Present = $true; Output = (Get-TestFbwfLines); ExitCode = 0 } }
+            $fb = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'FBWF' })[0]
+            $fb['StateKnown'] | Should Be $true
+            $fb['CurrentEnabled'] | Should Be $true
+            ($fb['ProtectedVolumes'] -join ',') | Should Be 'C:'
+            Mock Invoke-CrSystemTool -ParameterFilter { $Name -eq 'fbwfmgr.exe' } {
+                return @{ Present = $true; Output = (Get-TestFbwfLines -Volume '\Device\HarddiskVolume2'); ExitCode = 0 }
+            }
+            $fb = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'FBWF' })[0]
+            $fb['StateKnown'] | Should Be $false
+        }
+    }
+    Context 'reads UWF from WMI (current-session protected volumes only)' {
+        It 'reads UWF from WMI (current-session protected volumes only)' {
+            Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'uwfvol' } { return @{ Installed = $true; Start = 0 } }
+            Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'UWF_Filter' } {
+                return New-Object PSObject -Property @{ CurrentEnabled = $true; NextEnabled = $false }
+            }
+            Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'UWF_Volume' } {
+                return @((New-Object PSObject -Property @{ CurrentSession = $true; DriveLetter = 'C:'; Protected = $true }),
+                         (New-Object PSObject -Property @{ CurrentSession = $false; DriveLetter = 'D:'; Protected = $true }),
+                         (New-Object PSObject -Property @{ CurrentSession = $true; DriveLetter = 'E:'; Protected = $false }))
+            }
+            $uwf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'UWF' })[0]
+            $uwf['StateKnown'] | Should Be $true
+            $uwf['CurrentEnabled'] | Should Be $true
+            $uwf['NextEnabled'] | Should Be $false
+            ($uwf['ProtectedVolumes'] -join ',') | Should Be 'C:'
+        }
+    }
+    Context 'marks UWF unknown when WMI is not available' {
+        It 'marks UWF unknown when WMI is not available' {
+            Mock Get-CrFilterDriverInfo -ParameterFilter { $Service -eq 'uwfvol' } { return @{ Installed = $true; Start = 0 } }
+            $uwf = @(@((Get-CrWriteFilterState)['Filters']) | Where-Object { $_['Type'] -eq 'UWF' })[0]
+            $uwf['DriverInstalled'] | Should Be $true
+            $uwf['StateKnown'] | Should Be $false
+        }
     }
 }
 
@@ -461,11 +501,13 @@ Describe 'Invoke-CrPreflight' {
             (Test-AnyFinding $r 'Blocked' '.') | Should Be $true
         }
     }
-    It 'blocks when the native helpers did not compile' {
-        Mock Test-CrNativeReady { return $false }
-        $r = Invoke-CrPreflight -State (New-TestPreflightState) -Config $TestConfig
-        $r['MachineBlocked'] | Should Be $true
-        (Test-AnyFinding $r 'Blocked' 'Add-Type') | Should Be $true
+    Context 'blocks when the native helpers did not compile' {
+        It 'blocks when the native helpers did not compile' {
+            Mock Test-CrNativeReady { return $false }
+            $r = Invoke-CrPreflight -State (New-TestPreflightState) -Config $TestConfig
+            $r['MachineBlocked'] | Should Be $true
+            (Test-AnyFinding $r 'Blocked' 'Add-Type') | Should Be $true
+        }
     }
     It 'blocks when the computer information failed' {
         $s = New-TestPreflightState; $s['Computer'] = @{ Error = 'WMI broken' }

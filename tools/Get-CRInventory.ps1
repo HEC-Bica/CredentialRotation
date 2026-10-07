@@ -34,7 +34,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$scriptVersion = '1.3'
+$scriptVersion = '1.4'
 $scriptPath    = $MyInvocation.MyCommand.Path
 $computerName  = $env:COMPUTERNAME
 $startedAt     = Get-Date
@@ -202,7 +202,8 @@ function Get-ExecutablePath {
 
 function Get-RegValues {
     param([string]$Path)
-    try { return Get-ItemProperty -LiteralPath $Path } catch { return $null }
+    # -ErrorAction Stop: sections that set 'Continue' would otherwise print an error for a missing key
+    try { return Get-ItemProperty -LiteralPath $Path -ErrorAction Stop } catch { return $null }
 }
 
 function Get-AccountClassification {
@@ -304,6 +305,14 @@ Invoke-Section 'System' {
     @{
         ComputerName      = $computerName
         IsSmMachine       = [bool]($computerName -match $smComputerPattern)
+        # .NET 4-only elements here break the PS 2.0 engine's configuration reads (e.g. SqlClient)
+        PowerShellExeConfig = $(
+            $cfgPath = Join-Path $env:windir 'System32\WindowsPowerShell\v1.0\powershell.exe.config'
+            if (Test-Path -LiteralPath $cfgPath) {
+                $cfgText = [System.IO.File]::ReadAllText($cfgPath)
+                @{ Present = $true; HasUriSchemeSettings = [bool]($cfgText -match 'schemeSettings')
+                   HasAppContextSwitchOverrides = [bool]($cfgText -match 'AppContextSwitchOverrides') }
+            } else { @{ Present = $false } })
         OsCaption         = $os.Caption
         OsVersion         = $os.Version
         OsBuild           = $os.BuildNumber
@@ -365,6 +374,8 @@ try { $null = New-Object -ComObject COMAdmin.COMAdminCatalog; $r.ComAdminCom = '
 $mwa = Join-Path $env:windir 'System32\inetsrv\Microsoft.Web.Administration.dll'
 if (Test-Path $mwa) { try { [void][Reflection.Assembly]::LoadFrom($mwa); $r.IisMwa = 'OK' } catch { $r.IisMwa = $_.Exception.Message } } else { $r.IisMwa = 'not installed' }
 try { $null = [System.Data.SqlClient.SqlConnection]; $r.SqlClient = 'OK' } catch { $r.SqlClient = $_.Exception.Message }
+# Creating the object runs the type initializer, which reads powershell.exe.config (failed on Windows 10 under PS 2.0)
+try { $c = New-Object System.Data.SqlClient.SqlConnection; $c.Dispose(); $r.SqlConnectionCreate = 'OK' } catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; $r.SqlConnectionCreate = $e.Message }
 # Group members of Administrators: ADSI (fails on Windows Embedded Standard 7 under PS 5.1) vs netapi32
 $adm = $null
 try { $adm = (New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')).Translate([System.Security.Principal.NTAccount]).Value.Split('\')[1] } catch { }

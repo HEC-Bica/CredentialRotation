@@ -25,7 +25,7 @@ function Get-CrPathAllowSids {
     param([string]$Path)
     $expanded = [Environment]::ExpandEnvironmentVariables($Path)
     if (-not (Test-Path -LiteralPath $expanded)) { return , @() }
-    $acl = Get-Acl -LiteralPath $expanded
+    $acl = Get-CrDirectoryAcl -Path $expanded
     $sids = New-Object System.Collections.ArrayList
     foreach ($rule in @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]))) {
         if ($rule.AccessControlType -eq 'Allow') { [void]$sids.Add($rule.IdentityReference.Value) }

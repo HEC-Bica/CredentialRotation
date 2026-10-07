@@ -25,8 +25,18 @@ param(
     [switch]$Apply,
     [string[]]$Only,
     [string]$ConfigPath,
-    [string]$LogPath
+    [string]$LogPath,
+    # Collects stray words (e.g. "echo %ERRORLEVEL%" typed on the same line). Because this is the only
+    # parameter with a Position, the others can only be given by name.
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
+    [string[]]$UnexpectedArguments
 )
+
+if ($UnexpectedArguments) {
+    Write-Host ('Unexpected arguments: {0}' -f ($UnexpectedArguments -join ' '))
+    Write-Host 'Parameters must be named, e.g. -Only BiCAAdmin. Run "echo %ERRORLEVEL%" as a separate command.'
+    exit 2
+}
 
 $ErrorActionPreference = 'Stop'
 $script:CrToolVersion = '0.1.0'

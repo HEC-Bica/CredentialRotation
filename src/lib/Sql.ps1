@@ -148,7 +148,7 @@ function Invoke-CrSqlQuerySafe {
     try {
         return , (ConvertTo-CrArray (Invoke-CrSqlQuery -Connection $Connection -Name $Name))
     } catch {
-        [void]$Errors.Add(($Name + ': ' + $_.Exception.Message))
+        [void]$Errors.Add(($Name + ': ' + (Get-CrInnermostMessage $_)))
         return $null
     }
 }
@@ -202,7 +202,7 @@ function Get-CrSqlState {
     try {
         $svc = Get-CrSqlServiceWmi
     } catch {
-        [void]$errors.Add(('Service: ' + $_.Exception.Message))
+        [void]$errors.Add(('Service: ' + (Get-CrInnermostMessage $_)))
     }
     if ($null -ne $svc) {
         $result['ServiceState'] = [string]$svc.State
@@ -296,7 +296,13 @@ function Get-CrSqlState {
         } catch {
             $label = 'Connect: '
             if ($result['Connected']) { $label = 'Read: ' }
-            [void]$errors.Add(($label + $_.Exception.Message))
+            $msg = Get-CrInnermostMessage $_
+            # PS 2.0 (CLR 2) can't parse .NET 4 elements in powershell.exe.config (e.g. <uri><schemeSettings>),
+            # and SqlClient reads the configuration when it starts. Seen on Windows 10 with /PS2.
+            if ($PSVersionTable.PSVersion.Major -eq 2 -and $_.Exception.Message -match 'SqlConnection') {
+                $msg = $msg + ' (PowerShell 2.0 could not read this machine''s powershell.exe.config; SQL works when the tool runs on PowerShell 5.1)'
+            }
+            [void]$errors.Add(($label + $msg))
         } finally {
             Close-CrSqlConnection -Connection $cn
         }

@@ -36,7 +36,9 @@ function Import-CrConfig {
     $directory = Split-Path -Parent $full
     $fileName = Split-Path -Leaf $full
     # Import-LocalizedData falls back to the base directory when there is no en-US subfolder (PLAN section 5).
-    $data = Import-LocalizedData -BaseDirectory $directory -FileName $fileName -UICulture en-US -ErrorAction Stop
+    # -BindingVariable is mandatory in PS 2.0 (found by the first /PS2 audit; without it PS 2.0 prompts).
+    $data = $null
+    Import-LocalizedData -BindingVariable data -BaseDirectory $directory -FileName $fileName -UICulture en-US -ErrorAction Stop
     if (-not ($data -is [hashtable])) { throw ('Config file {0} does not contain a hashtable.' -f $full) }
     return $data
 }

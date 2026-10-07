@@ -497,72 +497,86 @@ Describe 'Get-CrAutoLogonState' {
     Mock Get-CrAutoLogonKeyValues { return $null }
     Mock Get-CrSysinternalsAutologonSids { return , @() }
 
-    It 'reads a REG_SZ auto-logon and the value presence flags' {
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
-            New-TestKeyValues @{ AutoAdminLogon = '1'; DefaultUserName = 'PUB-User'; DefaultDomainName = 'IPT01-SITEA'
-                                 AutoLogonSID = 'S-1-5-21-1000-2000-3000-1010'; Shell = 'explorer.exe'
-                                 Userinit = 'C:\Windows\system32\userinit.exe,' }
+    Context 'reads a REG_SZ auto-logon and the value presence flags' {
+        It 'reads a REG_SZ auto-logon and the value presence flags' {
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
+                New-TestKeyValues @{ AutoAdminLogon = '1'; DefaultUserName = 'PUB-User'; DefaultDomainName = 'IPT01-SITEA'
+                                     AutoLogonSID = 'S-1-5-21-1000-2000-3000-1010'; Shell = 'explorer.exe'
+                                     Userinit = 'C:\Windows\system32\userinit.exe,' }
+            }
+            $st = Get-CrAutoLogonState
+            $st['Error'] | Should BeNullOrEmpty
+            $st['AutoAdminLogon'] | Should Be '1'
+            $st['AutoAdminLogonKind'] | Should Be 'String'
+            $st['DefaultUserName'] | Should Be 'PUB-User'
+            $st['DefaultPasswordPresent'] | Should Be $false
+            $st['AutoLogonCountPresent'] | Should Be $false
+            $st['AutoLogonSidValue'] | Should Be 'S-1-5-21-1000-2000-3000-1010'
+            @($st['OtherMechanisms']).Count | Should Be 0
         }
-        $st = Get-CrAutoLogonState
-        $st['Error'] | Should BeNullOrEmpty
-        $st['AutoAdminLogon'] | Should Be '1'
-        $st['AutoAdminLogonKind'] | Should Be 'String'
-        $st['DefaultUserName'] | Should Be 'PUB-User'
-        $st['DefaultPasswordPresent'] | Should Be $false
-        $st['AutoLogonCountPresent'] | Should Be $false
-        $st['AutoLogonSidValue'] | Should Be 'S-1-5-21-1000-2000-3000-1010'
-        @($st['OtherMechanisms']).Count | Should Be 0
     }
-    It 'reads a REG_DWORD AutoAdminLogon with its kind' {
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } { New-TestKeyValues @{ AutoAdminLogon = 1 } }
-        $st = Get-CrAutoLogonState
-        $st['AutoAdminLogon'] | Should Be '1'
-        $st['AutoAdminLogonKind'] | Should Be 'DWord'
-    }
-    It 'records only the presence of DefaultPassword and AutoLogonCount' {
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
-            New-TestKeyValues @{ AutoAdminLogon = '1'; DefaultPassword = 'not-a-real-secret'; AutoLogonCount = 3 }
+    Context 'reads a REG_DWORD AutoAdminLogon with its kind' {
+        It 'reads a REG_DWORD AutoAdminLogon with its kind' {
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } { New-TestKeyValues @{ AutoAdminLogon = 1 } }
+            $st = Get-CrAutoLogonState
+            $st['AutoAdminLogon'] | Should Be '1'
+            $st['AutoAdminLogonKind'] | Should Be 'DWord'
         }
-        $st = Get-CrAutoLogonState
-        $st['DefaultPasswordPresent'] | Should Be $true
-        $st['AutoLogonCountPresent'] | Should Be $true
-        $st.ContainsKey('DefaultPassword') | Should Be $false
-        foreach ($k in @($st.Keys)) { ([string]$st[$k]) -match 'not-a-real-secret' | Should Be $false }
     }
-    It 'reports a shell replacement without its arguments' {
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
-            New-TestKeyValues @{ AutoAdminLogon = '1'; Shell = 'C:\POS\possh.exe /token:abc' }
+    Context 'records only the presence of DefaultPassword and AutoLogonCount' {
+        It 'records only the presence of DefaultPassword and AutoLogonCount' {
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
+                New-TestKeyValues @{ AutoAdminLogon = '1'; DefaultPassword = 'not-a-real-secret'; AutoLogonCount = 3 }
+            }
+            $st = Get-CrAutoLogonState
+            $st['DefaultPasswordPresent'] | Should Be $true
+            $st['AutoLogonCountPresent'] | Should Be $true
+            $st.ContainsKey('DefaultPassword') | Should Be $false
+            foreach ($k in @($st.Keys)) { ([string]$st[$k]) -match 'not-a-real-secret' | Should Be $false }
         }
-        $st = Get-CrAutoLogonState
-        @($st['OtherMechanisms']).Count | Should Be 1
-        @($st['OtherMechanisms'])[0] | Should Match 'possh\.exe'
-        @($st['OtherMechanisms'])[0] -match 'token' | Should Be $false
     }
-    It 'reports additional Userinit programs' {
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
-            New-TestKeyValues @{ AutoAdminLogon = '1'; Userinit = 'C:\Windows\system32\userinit.exe,"C:\Tools\logon helper.exe" -x,' }
+    Context 'reports a shell replacement without its arguments' {
+        It 'reports a shell replacement without its arguments' {
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
+                New-TestKeyValues @{ AutoAdminLogon = '1'; Shell = 'C:\POS\possh.exe /token:abc' }
+            }
+            $st = Get-CrAutoLogonState
+            @($st['OtherMechanisms']).Count | Should Be 1
+            @($st['OtherMechanisms'])[0] | Should Match 'possh\.exe'
+            @($st['OtherMechanisms'])[0] -match 'token' | Should Be $false
         }
-        $st = Get-CrAutoLogonState
-        @($st['OtherMechanisms']).Count | Should Be 1
-        @($st['OtherMechanisms'])[0] | Should Match 'logon helper\.exe'
     }
-    It 'reports Sysinternals Autologon traces' {
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } { New-TestKeyValues @{ AutoAdminLogon = '0' } }
-        Mock Get-CrSysinternalsAutologonSids { return , @('S-1-5-21-1000-2000-3000-1001') }
-        $st = Get-CrAutoLogonState
-        @($st['OtherMechanisms']).Count | Should Be 1
-        @($st['OtherMechanisms'])[0] | Should Match 'Sysinternals'
+    Context 'reports additional Userinit programs' {
+        It 'reports additional Userinit programs' {
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
+                New-TestKeyValues @{ AutoAdminLogon = '1'; Userinit = 'C:\Windows\system32\userinit.exe,"C:\Tools\logon helper.exe" -x,' }
+            }
+            $st = Get-CrAutoLogonState
+            @($st['OtherMechanisms']).Count | Should Be 1
+            @($st['OtherMechanisms'])[0] | Should Match 'logon helper\.exe'
+        }
     }
-    It 'reads legal-notice settings from the policy key' {
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
-            New-TestKeyValues @{ AutoAdminLogon = '1'; LegalNoticeCaption = ''; LegalNoticeText = '' }
+    Context 'reports Sysinternals Autologon traces' {
+        It 'reports Sysinternals Autologon traces' {
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } { New-TestKeyValues @{ AutoAdminLogon = '0' } }
+            Mock Get-CrSysinternalsAutologonSids { return , @('S-1-5-21-1000-2000-3000-1001') }
+            $st = Get-CrAutoLogonState
+            @($st['OtherMechanisms']).Count | Should Be 1
+            @($st['OtherMechanisms'])[0] | Should Match 'Sysinternals'
         }
-        Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Policies\System' } {
-            New-TestKeyValues @{ legalnoticecaption = ''; legalnoticetext = 'Authorized use only' }
+    }
+    Context 'reads legal-notice settings from the policy key' {
+        It 'reads legal-notice settings from the policy key' {
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } {
+                New-TestKeyValues @{ AutoAdminLogon = '1'; LegalNoticeCaption = ''; LegalNoticeText = '' }
+            }
+            Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Policies\System' } {
+                New-TestKeyValues @{ legalnoticecaption = ''; legalnoticetext = 'Authorized use only' }
+            }
+            $st = Get-CrAutoLogonState
+            $st['LegalNoticeTextSet'] | Should Be $true
+            $st['LegalNoticeCaptionSet'] | Should Be $false
         }
-        $st = Get-CrAutoLogonState
-        $st['LegalNoticeTextSet'] | Should Be $true
-        $st['LegalNoticeCaptionSet'] | Should Be $false
     }
     It 'returns an Error when the Winlogon key cannot be opened' {
         $st = Get-CrAutoLogonState

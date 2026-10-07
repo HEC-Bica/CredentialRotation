@@ -92,9 +92,12 @@ function Invoke-CrPs2Lint {
         'get-content'   = @('raw', 'stream')
         'set-content'   = @('nonewline', 'stream')
         'add-content'   = @('nonewline', 'stream')
-        'out-file'      = @('nonewline')
+        'out-file'      = @('nonewline', 'literalpath')
         'out-string'    = @('nonewline')
-        'export-csv'    = @('append', 'includetypeinformation')
+        'export-csv'    = @('append', 'includetypeinformation', 'literalpath')
+        # -LiteralPath was added in PS 3.0 here; found by the first /PS2 audit on a test site
+        'get-acl'       = @('literalpath')
+        'set-acl'       = @('literalpath')
         'add-member'    = @('notepropertyname', 'notepropertyvalue', 'notepropertymembers', 'typename')
         'import-module' = @('requiredversion', 'maximumversion', 'minimumversion')
         'test-path'     = @('newerthan', 'olderthan')
@@ -333,6 +336,15 @@ function Invoke-CrPs2Lint {
 
         if ($cmd -eq 'invoke-expression') {
             & $add $node.Extent 'D4-InvokeExpression' 'Invoke-Expression is forbidden (D4)'
+        }
+        # PS 2.0: -BindingVariable is mandatory; without it the cmdlet prompts (found by a /PS2 audit).
+        if ($cmd -eq 'import-localizeddata') {
+            $hasBinding = @($node.CommandElements | Where-Object {
+                $_ -is [System.Management.Automation.Language.CommandParameterAst] -and 'bindingvariable'.StartsWith($_.ParameterName.ToLowerInvariant())
+            }).Count -gt 0
+            if (-not $hasBinding) {
+                & $add $node.Extent 'Ps2-Parameter' 'Import-LocalizedData needs -BindingVariable in PS 2.0'
+            }
         }
         # ConvertTo-CrArray returns ", @(...)": wrapping it in @() nests the array, piping it sends the
         # whole array as one object. Assign it to a variable first.
