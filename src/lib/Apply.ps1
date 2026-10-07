@@ -1522,12 +1522,32 @@ function Invoke-CrApplyAutoLogonStep {
     return $out
 }
 
+# The SID of the account auto-logon still runs as after the auto-logon step, or $null: auto-logon is on and the step
+# neither switched nor turned it off (not run, left unchanged, no change, standardized or failed). That account is
+# not disabled: auto-logon as it would break (coordinator rule for D18/D22).
+function Get-CrApplyAutoLogonKeptSid {
+    param($State, $AutoLogonResult)
+    $al = $State['AutoLogon']
+    if (-not ($al -is [hashtable]) -or $al['Error']) { return $null }
+    $aal = ''
+    if ($null -ne $al['AutoAdminLogon']) { $aal = ([string]$al['AutoAdminLogon']).Trim() }
+    if ($aal -ne '1' -or -not $al['DefaultUserName']) { return $null }
+    if ($AutoLogonResult -is [hashtable] -and $AutoLogonResult['Ran'] -and $AutoLogonResult['Success'] -and
+        (@('Switch', 'TurnOff') -contains [string]$AutoLogonResult['Action'])) { return $null }
+    $u = Find-CrApplyUserByName -State $State -Name ([string]$al['DefaultUserName'])
+    if ($u) { return [string]$u['Sid'] }
+    return $null
+}
+
 # Why a planned disable can't run now, or $null. Replaced accounts need an enabled, verified replacement (D22);
 # moved dependents must all have moved (D24); the Administrators rail applies.
 function Get-CrApplyDisableBlocker {
     param($Context, $Item, [bool]$RunningCounts = $true)
     if ($Item['Blocked']) { return [string]$Item['Blocked'] }
     if ($Item['MoveFailed']) { return 'not every dependent could be moved' }
+    if ($Context['AutoLogonKeepSid'] -and [string]$Item['Sid'] -eq [string]$Context['AutoLogonKeepSid']) {
+        return ('auto-logon as {0} breaks when {0} is disabled, and the auto-logon was not switched or turned off in this run' -f $Item['Name'])
+    }
     if ($Item['Kind'] -eq 'Replaced') {
         $e = $Item['ReplacementEntry']
         $sid = $Context['EntrySids'][[string]$e['Id']]
@@ -1749,6 +1769,7 @@ function Invoke-CrApply {
     Invoke-CrApplyRemovals -Context $ctx -Slots $slots
     Invoke-CrApplyMoves -Context $ctx -DisablePlan $disablePlan
     $result['AutoLogon'] = Invoke-CrApplyAutoLogonStep -Context $ctx -Only $Only -Choice $AutoLogonChoice -Prompt $AutoLogonPrompt
+    $ctx['AutoLogonKeepSid'] = Get-CrApplyAutoLogonKeptSid -State $State -AutoLogonResult $result['AutoLogon']
     Invoke-CrApplyDisables -Context $ctx -DisablePlan $disablePlan
     $fixes = @()
     if (-not (Test-CrApplyOnlyGiven $Only)) {
@@ -2069,6 +2090,13 @@ function Write-CrApplySummary {
         if ($AutoLogonDecision['TargetName']) { $line = $line + ' -> ' + $AutoLogonDecision['TargetName'] }
         if ($AutoLogonDecision['CurrentName']) { $line = $line + ' (current: ' + $AutoLogonDecision['CurrentName'] + ')' }
         Write-Host $line
+        if (@('Switch', 'TurnOff') -notcontains [string]$AutoLogonDecision['Action'] -and $AutoLogonDecision['CurrentSid']) {
+            foreach ($i in $items) {
+                if ([string]$i['Sid'] -eq [string]$AutoLogonDecision['CurrentSid'] -and $i['Planned']) {
+                    Write-Host ('  HIGH IMPACT: auto-logon as {0} breaks when {0} is disabled; unless the auto-logon step switches or turns it off, {0} stays enabled.' -f $i['Name'])
+                }
+            }
+        }
     } else {
         Write-Host 'Auto-logon step: not run in this selection.'
     }

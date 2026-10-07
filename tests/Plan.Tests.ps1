@@ -31,7 +31,7 @@ Describe 'New-CrPlan on an SM-like machine (v10 account model)' {
             $plan['Drift'] | Should Be $true
         }
         It 'creates SOP-Admin and PUB-User (D21)' {
-            $sop = Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Create SOP-Admin'
+            $sop = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Create SOP-Admin')
             $sop.Count | Should Be 1
             $sop[0]['Slot'] | Should Be 'SOPAdmin'
             @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'PUB-User' 'Create PUB-User').Count | Should Be 1
@@ -56,12 +56,12 @@ Describe 'New-CrPlan on an SM-like machine (v10 account model)' {
             @(Get-CrTestFindings $plan $null 'Flags' 'BiCA Admin').Count | Should Be 0
         }
         It 'disables the running account last and says so (D25)' {
-            $f = Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'BiCA Remote' 'The running account BiCA Remote is disabled at the end; log on as SOP-Admin next time*'
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'BiCA Remote' 'The running account BiCA Remote is disabled at the end; log on as SOP-Admin next time*')
             $f.Count | Should Be 1
-            (Get-CrTestFindings $plan 'Drift' 'Accounts' 'BiCA Remote' 'Disable*')[0]['Detail'] | Should Match 'last step \(D25\)'
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'BiCA Remote' 'Disable*')[0]['Detail'] | Should Match 'last step \(D25\)'
         }
         It 'moves the password-stored task of WinAutoUser to PUB-User (D24)' {
-            $f = Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'WinAutoUser' 'Move scheduled task \KioskTask from WinAutoUser to PUB-User (D24)'
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'WinAutoUser' 'Move scheduled task \KioskTask from WinAutoUser to PUB-User (D24)')
             $f.Count | Should Be 1
             $f[0]['Slot'] | Should Be 'PubUser'
         }
@@ -70,21 +70,21 @@ Describe 'New-CrPlan on an SM-like machine (v10 account model)' {
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Account not found (nothing to disable)*').Count | Should Be 1
         }
         It 'puts the dependents of SP Admin to the operator (D24, O5)' {
-            $f = Get-CrTestFindings $plan 'Ambiguous' 'Tasks' 'SP Admin' 'Operator decides: move scheduled task \SpMaintenance from SP Admin to ApplicationUser or keep SP Admin enabled*'
+            $f = @(Get-CrTestFindings $plan 'Ambiguous' 'Tasks' 'SP Admin' 'Operator decides: move scheduled task \SpMaintenance from SP Admin to ApplicationUser or keep SP Admin enabled*')
             $f.Count | Should Be 1
             @(Get-CrTestFindings $plan 'HighImpact' $null 'SP Admin' 'Move*').Count | Should Be 0
         }
         It 'puts every other enabled account to the operator (D23)' {
-            $all = Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*'
+            $all = @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*')
             $all.Count | Should Be 2
-            $admin = Get-CrTestFindings $plan 'Ambiguous' 'Accounts' 'OtherAdmin' 'Operator decides: disable or keep OtherAdmin (D23)'
+            $admin = @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' 'OtherAdmin' 'Operator decides: disable or keep OtherAdmin (D23)')
             $admin.Count | Should Be 1
             $admin[0]['Detail'] | Should Match 'Administrators'
             @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' 'myftpuser').Count | Should Be 1
         }
         It 'changes ApplicationUser with its old password and probes only that account' {
             @(Get-CrTestFindings $plan 'Info' 'Password' 'ApplicationUser' 'Password change with the old password*').Count | Should Be 1
-            $probes = Get-CrTestFindings $plan 'Info' 'Probe'
+            $probes = @(Get-CrTestFindings $plan 'Info' 'Probe')
             $probes.Count | Should Be 1
             $probes[0]['Account'] | Should Be 'ApplicationUser'
         }
@@ -99,7 +99,7 @@ Describe 'New-CrPlan on an SM-like machine (v10 account model)' {
             @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' $null 'Turn auto-logon off*').Count | Should Be 1
         }
         It 'lists LOGINS follow-ups for SOP-Admin, ApplicationUser and the SQL logins' {
-            $sop = Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'SOP-Admin'
+            $sop = @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'SOP-Admin')
             $sop.Count | Should Be 1
             $sop[0]['Detail'] | Should Match 'BiCA Admin, BiCA Remote'
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'ApplicationUser').Count | Should Be 1
@@ -137,7 +137,7 @@ Describe 'New-CrPlan on an IPT01-like machine (v10 account model)' {
         @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin' 'Add to Administrators').Count | Should Be 0
     }
     It 'disables the enabled built-in Administrator (replaced by ApplicationUser)' {
-        $f = Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (replaced by ApplicationUser)'
+        $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (replaced by ApplicationUser)')
         $f.Count | Should Be 1
         $f[0]['Slot'] | Should Be 'AppUser'
     }
@@ -210,7 +210,7 @@ Describe 'New-CrPlan account state findings' {
         Set-CrTestRight -State $state -Right 'SeDenyBatchLogonRight' -Sids @($sid)
         Set-CrTestRight -State $state -Right 'SeDenyServiceLogonRight' -Sids @($sid)
         $plan = New-CrTestPlan -State $state
-        $f = Get-CrTestFindings $plan 'Info' 'Probe' 'ApplicationUser'
+        $f = @(Get-CrTestFindings $plan 'Info' 'Probe' 'ApplicationUser')
         $f.Count | Should Be 1
         $f[0]['Message'] | Should Match 'cannot be verified by a test logon'
         $f[0]['Detail'] | Should Not Match 'Network is used'
