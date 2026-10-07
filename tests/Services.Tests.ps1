@@ -3,6 +3,9 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $here '..\src\lib\Compat.ps1')
 . (Join-Path $here '..\src\lib\Services.ps1')
 
+# Stub for the Native.ps1 write wrapper (another module); mocked below.
+function Set-CrServiceLogonPassword { param([string]$ServiceName, [string]$Account, $Secret) }
+
 function Get-TestServiceSid {
     param([string]$Name)
     switch ($Name.ToLowerInvariant()) {
@@ -138,5 +141,201 @@ Describe 'Get-CrServices' {
             ($r -is [array]) | Should Be $true
             @($r).Count | Should Be 0
         }
+    }
+}
+
+function New-TestServiceState {
+    return @{
+        Services = @(
+            @{ Name = 'MSSQLSERVER'; StartName = '.\ApplicationUser'; StartNameSid = 'S-1-5-21-1000-2000-3000-1005'; State = 'Running' },
+            @{ Name = 'TestRetailService'; StartName = 'SM-TEST01\applicationuser'; StartNameSid = 'S-1-5-21-1000-2000-3000-1005'; State = 'Running' },
+            @{ Name = 'Spooler'; StartName = 'LocalSystem'; StartNameSid = 'S-1-5-18'; State = 'Running' },
+            @{ Name = 'OtherSvc'; StartName = '.\TestOperator'; StartNameSid = 'S-1-5-21-1000-2000-3000-1002'; State = 'Stopped' },
+            @{ Name = 'Unresolved'; StartName = '.\Gone'; StartNameSid = $null; State = 'Stopped' }
+        )
+    }
+}
+
+Describe 'Update-CrServiceCredentials' {
+    $secret = ConvertTo-SecureString 'Dummy-1a' -AsPlainText -Force
+
+    Context 'two services of the account' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+        Mock Start-Service { }
+        Mock Stop-Service { }
+        Mock Restart-Service { }
+        $r = Update-CrServiceCredentials -State (New-TestServiceState) -Sid 'S-1-5-21-1000-2000-3000-1005' -Secret $secret
+
+        It 'returns one result per matching service' {
+            ($r -is [array]) | Should Be $true
+            (@($r | ForEach-Object { $_['Name'] }) -join ',') | Should Be 'MSSQLSERVER,TestRetailService'
+            @($r | Where-Object { $_['Success'] }).Count | Should Be 2
+        }
+        It 'touches only the services of the SID' {
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 2 -Exactly
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 0 -Exactly -ParameterFilter { @('Spooler', 'OtherSvc', 'Unresolved') -contains $ServiceName }
+        }
+        It 'passes the existing StartName text unchanged' {
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 1 -Exactly -ParameterFilter { $ServiceName -eq 'MSSQLSERVER' -and $Account -ceq '.\ApplicationUser' }
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 1 -Exactly -ParameterFilter { $ServiceName -eq 'TestRetailService' -and $Account -ceq 'SM-TEST01\applicationuser' }
+        }
+        It 'passes the SecureString, not plaintext' {
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 2 -Exactly -ParameterFilter { $Secret -is [System.Security.SecureString] }
+        }
+        It 'never starts, stops or restarts a service (D17)' {
+            Assert-MockCalled Start-Service -Times 0 -Exactly
+            Assert-MockCalled Stop-Service -Times 0 -Exactly
+            Assert-MockCalled Restart-Service -Times 0 -Exactly
+        }
+        It 'has the result keys' {
+            ((@($r[0].Keys) | Sort-Object) -join ',') | Should Be 'Error,FromAccount,Name,Success,ToAccount,Win32Error'
+        }
+    }
+
+    Context 'one service fails' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+        Mock Set-CrServiceLogonPassword -ParameterFilter { $ServiceName -eq 'MSSQLSERVER' } { @{ Success = $false; Win32Error = 5 } }
+        $r = Update-CrServiceCredentials -State (New-TestServiceState) -Sid 'S-1-5-21-1000-2000-3000-1005' -Secret $secret
+
+        It 'reports the failure per service and continues' {
+            $sql = @($r | Where-Object { $_['Name'] -eq 'MSSQLSERVER' })[0]
+            $sql['Success'] | Should Be $false
+            $sql['Win32Error'] | Should Be 5
+            $retail = @($r | Where-Object { $_['Name'] -eq 'TestRetailService' })[0]
+            $retail['Success'] | Should Be $true
+        }
+    }
+
+    Context 'wrapper throws' {
+        Mock Set-CrServiceLogonPassword { throw 'Native helpers are not available: test' }
+        $r = Update-CrServiceCredentials -State (New-TestServiceState) -Sid 'S-1-5-21-1000-2000-3000-1005' -Secret $secret
+
+        It 'records the message for every service' {
+            @($r).Count | Should Be 2
+            foreach ($e in $r) {
+                $e['Success'] | Should Be $false
+                $e['Error'] | Should Match 'Native helpers are not available'
+            }
+        }
+    }
+
+    Context 'no service of the account' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+        $r = Update-CrServiceCredentials -State (New-TestServiceState) -Sid 'S-1-5-21-1000-2000-3000-1099' -Secret $secret
+
+        It 'returns an empty array and calls nothing' {
+            ($r -is [array]) | Should Be $true
+            @($r).Count | Should Be 0
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 0 -Exactly
+        }
+    }
+
+    Context 'services could not be read' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+        $r = Update-CrServiceCredentials -State @{ Services = @{ Error = 'WMI failed' } } -Sid 'S-1-5-21-1000-2000-3000-1005' -Secret $secret
+
+        It 'returns a single failed entry' {
+            @($r).Count | Should Be 1
+            $r[0]['Success'] | Should Be $false
+            $r[0]['Error'] | Should Match 'WMI failed'
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 0 -Exactly
+        }
+    }
+}
+
+Describe 'Move-CrServiceAccount' {
+    $fromSid = 'S-1-5-21-1000-2000-3000-1005'
+    $secret = ConvertTo-SecureString 'Dummy-2b' -AsPlainText -Force
+
+    Context 'services of the old account' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+        Mock Start-Service { }
+        Mock Stop-Service { }
+        Mock Restart-Service { }
+        $r = Move-CrServiceAccount -State (New-TestServiceState) -FromSid $fromSid -ToAccount '.\CrTestNewUser' -Secret $secret
+
+        It 'returns one successful result per service of FromSid' {
+            ($r -is [array]) | Should Be $true
+            (@($r | ForEach-Object { $_['Name'] }) -join ',') | Should Be 'MSSQLSERVER,TestRetailService'
+            @($r | Where-Object { $_['Success'] }).Count | Should Be 2
+            ((@($r[0].Keys) | Sort-Object) -join ',') | Should Be 'Error,FromAccount,Name,Success,ToAccount,Win32Error'
+        }
+        It 'moves only the services of FromSid' {
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 2 -Exactly
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 0 -Exactly -ParameterFilter { @('Spooler', 'OtherSvc', 'Unresolved') -contains $ServiceName }
+        }
+        It 'passes the new account for every service' {
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 2 -Exactly -ParameterFilter { $Account -ceq '.\CrTestNewUser' }
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 1 -Exactly -ParameterFilter { $ServiceName -eq 'TestRetailService' -and $Account -ceq '.\CrTestNewUser' }
+        }
+        It 'passes the SecureString, not plaintext' {
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 2 -Exactly -ParameterFilter { $Secret -is [System.Security.SecureString] }
+        }
+        It 'reports the old and the new account' {
+            $retail = @($r | Where-Object { $_['Name'] -eq 'TestRetailService' })[0]
+            $retail['FromAccount'] | Should Be 'SM-TEST01\applicationuser'
+            $retail['ToAccount'] | Should Be '.\CrTestNewUser'
+        }
+        It 'never starts, stops or restarts a service (D17)' {
+            Assert-MockCalled Start-Service -Times 0 -Exactly
+            Assert-MockCalled Stop-Service -Times 0 -Exactly
+            Assert-MockCalled Restart-Service -Times 0 -Exactly
+        }
+    }
+
+    Context 'one service fails' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+        Mock Set-CrServiceLogonPassword -ParameterFilter { $ServiceName -eq 'TestRetailService' } { @{ Success = $false; Win32Error = 1057 } }
+        $r = Move-CrServiceAccount -State (New-TestServiceState) -FromSid $fromSid -ToAccount '.\CrTestNewUser' -Secret $secret
+
+        It 'reports the failure per service and continues' {
+            $retail = @($r | Where-Object { $_['Name'] -eq 'TestRetailService' })[0]
+            $retail['Success'] | Should Be $false
+            $retail['Win32Error'] | Should Be 1057
+            (@($r | Where-Object { $_['Name'] -eq 'MSSQLSERVER' })[0])['Success'] | Should Be $true
+        }
+    }
+
+    Context 'wrapper throws' {
+        Mock Set-CrServiceLogonPassword { throw 'Native helpers are not available: test' }
+        $r = Move-CrServiceAccount -State (New-TestServiceState) -FromSid $fromSid -ToAccount '.\CrTestNewUser' -Secret $secret
+
+        It 'records the message for every service' {
+            @($r).Count | Should Be 2
+            foreach ($e in $r) {
+                $e['Success'] | Should Be $false
+                $e['Error'] | Should Match 'Native helpers are not available'
+            }
+        }
+    }
+
+    Context 'services could not be read' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+        $r = Move-CrServiceAccount -State @{ Services = @{ Error = 'WMI failed' } } -FromSid $fromSid -ToAccount '.\CrTestNewUser' -Secret $secret
+
+        It 'returns a single failed entry' {
+            @($r).Count | Should Be 1
+            $r[0]['Success'] | Should Be $false
+            $r[0]['Error'] | Should Match 'WMI failed'
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 0 -Exactly
+        }
+    }
+
+    Context 'missing arguments' {
+        Mock Set-CrServiceLogonPassword { @{ Success = $true; Win32Error = 0 } }
+
+        It 'throws without a target account, FromSid or password and touches nothing' {
+            { Move-CrServiceAccount -State (New-TestServiceState) -FromSid $fromSid -ToAccount '' -Secret $secret } | Should Throw
+            { Move-CrServiceAccount -State (New-TestServiceState) -FromSid '' -ToAccount '.\CrTestNewUser' -Secret $secret } | Should Throw
+            { Move-CrServiceAccount -State (New-TestServiceState) -FromSid $fromSid -ToAccount '.\CrTestNewUser' -Secret $null } | Should Throw
+            Assert-MockCalled Set-CrServiceLogonPassword -Times 0 -Exactly
+        }
+    }
+}
+
+Describe 'Services.ps1 secret handling (D4)' {
+    It 'never converts a secret to plaintext' {
+        $text = [System.IO.File]::ReadAllText((Join-Path $here '..\src\lib\Services.ps1'))
+        $text | Should Not Match '\$plain|PtrToStringBSTR|SecureStringToBSTR|ConvertFrom-SecureString|GetNetworkCredential'
     }
 }

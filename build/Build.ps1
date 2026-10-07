@@ -30,9 +30,9 @@ $ErrorActionPreference = 'Stop'
 
 # Lib load order (docs/dev/CONTRACTS.md "Layout and ownership"). Every file must exist.
 $libOrder = @(
-    'Compat.ps1', 'Log.ps1', 'Config.ps1', 'Native.ps1', 'Accounts.ps1', 'Groups.ps1', 'Rights.ps1',
-    'Principals.ps1', 'Services.ps1', 'Tasks.ps1', 'ComPlus.ps1', 'IisReport.ps1', 'Sql.ps1',
-    'AutoLogon.ps1', 'Preflight.ps1', 'Plan.ps1'
+    'Compat.ps1', 'Log.ps1', 'Config.ps1', 'Native.ps1', 'Adapters.ps1', 'Journal.ps1', 'Secrets.ps1',
+    'Accounts.ps1', 'Groups.ps1', 'Rights.ps1', 'Principals.ps1', 'Services.ps1', 'Tasks.ps1', 'ComPlus.ps1',
+    'IisReport.ps1', 'Sql.ps1', 'AutoLogon.ps1', 'Preflight.ps1', 'Plan.ps1', 'Apply.ps1'
 )
 $importStartMarker = '# <CR-LIB-IMPORT>'
 $importEndMarker = '# </CR-LIB-IMPORT>'

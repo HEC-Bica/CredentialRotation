@@ -7,3 +7,6 @@ tools/CR-Inventory_*.json
 # Test-site output (account and machine names)
 logs/
 ConsoleOutput*.txt
+
+# Office lock files
+~$*

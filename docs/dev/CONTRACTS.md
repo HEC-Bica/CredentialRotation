@@ -1,4 +1,4 @@
-# Module contracts (M1: read-only audit)
+# Module contracts (M1 audit, M2/M3 apply)
 
 Developer reference for `src/`. The design is in `docs/PLAN.md`; this file fixes the interfaces so modules can be built in parallel. Change a contract only together with every caller.
 
@@ -24,7 +24,7 @@ build/Test-Ps2Syntax.ps1, build/Build.ps1
 tests/Invoke-Tests.ps1, tests/*.Tests.ps1, tests/Fixtures.ps1
 ```
 
-Lib files are dot-sourced by the entry point in this order: Compat, Log, Config, Native, Accounts, Groups, Rights, Principals, Services, Tasks, ComPlus, IisReport, Sql, AutoLogon, Preflight, Plan. A lib file only defines functions (and, for Native, types); it runs nothing at load time except `Add-Type` guarded by a type check.
+Lib files are dot-sourced by the entry point in this order: Compat, Log, Config, Native, Adapters, Journal, Secrets, Accounts, Groups, Rights, Principals, Services, Tasks, ComPlus, IisReport, Sql, AutoLogon, Preflight, Plan, Apply. (M2 added Adapters, Journal, Secrets, Apply.) A lib file only defines functions (and, for Native, types); it runs nothing at load time except `Add-Type` guarded by a type check.
 
 ## Shared helpers (Compat.ps1)
 
@@ -160,3 +160,146 @@ Parameters: `-Apply` (switch; refused in M1 with exit 2), `-Only <string[]>` (sl
 ## Verification on the dev machine
 
 AppLocker blocks `.ps1` files under `C:\Repos`, and the user decided: **write code and tests, but don't run them here**. Do not work around AppLocker (no `Invoke-Expression`/`[scriptblock]::Create` of repo files, no copying them to allowed folders). Allowed checks: parsing with `[System.Management.Automation.Language.Parser]::ParseFile` in an inline `powershell.exe -Command`, reading, and compiling C# snippets with `Add-Type` inline. Tests run later on an allowed host.
+
+# M2/M3: apply (`-Apply`)
+
+PLAN §6 steps 6–11, §7.1–7.5, §7.7, §7.10, §8, D4, D9, D11, D12, D16, D18, D20. SQL rotation is M5: in this version SQL slots are never prompted and are reported as "SQL rotation not available in this version".
+
+## Secret handling (D4) — applies to every M2 file
+
+- A secret is a `[System.Security.SecureString]`. Parameters holding one are named `-Secret`, `-OldSecret` or `-NewSecret`.
+- Native wrappers turn a SecureString into a BSTR with `[Runtime.InteropServices.Marshal]::SecureStringToBSTR`, pass the `IntPtr` to C#, and call `ZeroFreeBSTR` in `finally`. The C# methods take `IntPtr` (a BSTR is a valid null-terminated `LPWSTR`). No plaintext ever becomes a managed string there.
+- Only `src/lib/Adapters.ps1` converts a secret to a managed string (Task Scheduler and COM+ need one). Variables holding it are named `$plain*` and set to `$null` right after use.
+- Never log, print, export or compare secrets in PowerShell; never put them in hashtables that are logged; never pass them to external programs. Log messages must not reference variables named `*secret*` / `*password*` (lint rule `D4-SecretOutput`).
+- Results report success and Win32 error codes only, never secret material. A complexity check result says *that* a name token was found, never *which* one.
+
+## Native.ps1 additions (C# 2.0, write APIs)
+
+All wrappers compile through `Initialize-CrNative`. Each returns `@{ Success = $bool; Win32Error = <int> }` unless noted, and throws only when the native helpers aren't ready.
+
+| Wrapper | Native |
+|---|---|
+| `Test-CrSecretEqual -A <SecureString> -B <SecureString>` → bool | byte-wise BSTR compare in C# (length first) |
+| `Get-CrSecretLength -Secret` → int | `SysStringLen` / BSTR length prefix |
+| `Test-CrSecretComplexity -Secret -MinLength <int> -RequireComplexity <bool> -Tokens <string[]>` → `@{ Ok; TooShort; Categories; MissingCategories; ContainsNameToken }` | D15 emulation over the BSTR: 5 categories (upper, lower, digit, non-alphanumeric, other letters via `char.IsLetter` without case), at least 3 when required; `ContainsNameToken` = any token of 3+ chars occurs case-insensitively (`char.ToUpperInvariant`). Tokens are computed in PowerShell by `Get-CrNameTokens` (below). |
+| `Test-CrLocalPasswordPolicy -UserName -Secret` → `@{ Ok; Status; Win32Error }` | `NetValidatePasswordPolicy(NULL, NULL, NetValidatePasswordChange, NET_VALIDATE_PASSWORD_CHANGE_INPUT_ARG{ ClearPassword = BSTR, UserAccountName, PasswordMatch = TRUE }, …)`; `NetValidatePasswordPolicyFree` |
+| `Invoke-CrLogonTest -UserName -Secret -LogonType <'Network'\|'Interactive'\|'Batch'\|'Service'>` | `LogonUserW(user, ".", BSTR, 3\|2\|4\|5, LOGON32_PROVIDER_DEFAULT)`; the token is closed immediately; `Win32Error` = `GetLastError` on failure (1326 wrong password, 1385 logon type not granted, 1909 locked, 1331 disabled, 1330 expired) |
+| `Get-CrUserInfo -UserName` → `@{ Success; Win32Error; Flags; BadPasswordCount; PasswordAgeSeconds }` | `NetUserGetInfo` level 3 (never reads a password) |
+| `Set-CrUserFlags -UserName -Flags <int>` | `NetUserSetInfo` level 1008 |
+| `Invoke-CrNetPasswordChange -UserName -OldSecret -NewSecret` | `NetUserChangePassword(<computer name>, user, old BSTR, new BSTR)` — a *change* (keeps DPAPI, D9); 86 = wrong old password, 2245 = policy/history/min age |
+| `Invoke-CrNetPasswordReset -UserName -NewSecret` | `NetUserSetInfo` level 1003 (reset, DPAPI warning is the caller's job) |
+| `Add-CrLocalGroupMemberSid -GroupName -MemberSid` / `Remove-CrLocalGroupMemberSid -GroupName -MemberSid` | `NetLocalGroupAddMembers` / `NetLocalGroupDelMembers` level 0 (SID); 1378 (already a member) / 1377 (not a member) count as success |
+| `Grant-CrAccountRight -Sid -Right` | `LsaAddAccountRights` (adds only; never removes rights, PLAN §7.3) |
+| `Set-CrLsaSecret -Name -Secret` / `Remove-CrLsaSecret -Name` | `LsaStorePrivateData` with the BSTR as `LSA_UNICODE_STRING.Buffer` (Length = chars × 2) / with `NULL`; `STATUS_OBJECT_NAME_NOT_FOUND` on delete = success. Never `LsaRetrievePrivateData`. |
+| `Set-CrServiceLogonPassword -ServiceName -Account -Secret` | `OpenSCManagerW` + `OpenServiceW(SERVICE_CHANGE_CONFIG)` + `ChangeServiceConfigW(SERVICE_NO_CHANGE ×3, NULL…, lpServiceStartName = Account, lpPassword = BSTR, NULL)` |
+
+## Adapters.ps1 (the only plaintext boundary)
+
+| Function | Does |
+|---|---|
+| `Invoke-CrTaskRegistrationAdapter -Folder <COM ITaskFolder> -TaskName -Definition <COM> -UserId -Secret -LogonType <int> -Sddl` → `@{ Success; Error }` | `RegisterTaskDefinition(TaskName, Definition, 4 /*TASK_UPDATE*/, UserId, $plainPassword, LogonType, Sddl)` |
+| `Set-CrComPlusPasswordAdapter -Application <COM catalog object> -Secret` → `@{ Success; Error }` | `Application.Value('Password') = $plainPassword` (the caller calls `SaveChanges`) |
+
+## Journal.ps1 (run journal, PLAN §7.10)
+
+Stored as `<log root>\journal.clixml` (`Export-Clixml -Path` / `Import-Clixml -Path`), rewritten after every step.
+`@{ Runs = @( @{ RunId; Started; Finished = $bool; Accounts = @{ <SID> = @(<step names>) } } ) }`. Step names: `PreSteps`, `CcpCleared`, `CcpRestored`, `Unlocked`, `Secret`, `Dependents`, `Grants`, `Verified`, `AutoLogon`, and (v10) `Created`, `Enabled`, `Disabled`, `DependentsMoved`.
+
+| Function | Returns |
+|---|---|
+| `Open-CrJournal -Root -Trusted <bool>` | journal hashtable; empty when the file is missing, unreadable or `-Trusted:$false` (Log.ps1 `JournalTrusted`) |
+| `Start-CrJournalRun -Journal -RunId` / `Add-CrJournalStep -Journal -RunId -Sid -Step` / `Complete-CrJournalRun -Journal -RunId` | saves after each call |
+| `Test-CrJournalStepInUnfinishedRun -Journal -Sid -Step [-ExceptRunId]` → bool | true if any *unfinished* run other than the current one recorded the step |
+
+## Secrets.ps1 (prompting and probe, PLAN §6 steps 6–7)
+
+| Function | Returns |
+|---|---|
+| `Read-CrSecureHost -Prompt` → SecureString | `Read-Host -AsSecureString` (separate for mocking) |
+| `Get-CrNameTokens -Names <string[]>` → string[] | split on `, . - _ #`, space, tab; tokens of 3+ chars (D15) |
+| `Test-CrSiteRules -Secret -Config -Names <string[]>` → `@{ Ok; Reasons = @() }` | `SitePasswordRules` (MinLength, RequireComplexity) via `Test-CrSecretComplexity` |
+| `Read-CrSlotSecrets -Config -Resolved -State -Only` → hashtable slot → `@{ Slot; Skipped; NewSecret; Accounts = @(@{ Sid; Name; OldSecret; Reapply }) }` | new password twice (`Test-CrSecretEqual`), checks (site rules, local policy per account, slot `MaxLength`), old password per account with "same as previous? (Y/N)", empty new password → confirm skip; `Reapply` = new equals old (D20). Rotate-mode Windows slots only, in `Order`, honouring `-Only` and blocked slots. |
+| `Invoke-CrCredentialProbe -State -Account <resolved account> -OldSecret -NewSecret -Journal -RunId` → `@{ Sid; Name; Outcome; LogonType; Fallback; Win32Error; Attempts }` | Outcome: `Old`, `New`, `Reapply`, `BothFailed`, `Unverifiable`, `Locked` (no attempt), `BudgetExceeded`, `Disabled`. D12: before each attempt re-read `Get-CrUserInfo`; attempt only if threshold is 0 or `threshold - BadPasswordCount >= 2`. D16 type via `Select-CrProbeLogonType`. Error 1385 (logon type not granted) proves nothing about the password: outcome `Unverifiable`; the apply then uses the change path, where `NetUserChangePassword` itself validates the old password (one more budgeted attempt). Further mappings: 1327 (account restriction) → `Unverifiable`; 1330/1907 (expired / must change) → the password is valid; 1909 → `Locked`; 1331 → `Disabled`; `Get-CrUserInfo` failing → `Unverifiable` without an attempt; an unknown lockout threshold counts as 3. `Read-CrSlotSecrets` takes `-BlockedSlots` (Preflight's map) and returns per slot also `Label`, `Reason`, `Findings`. Order: new first if `Test-CrJournalStepInUnfinishedRun … -Step Secret`, else old first; the second test only if the first failed. |
+| `Confirm-CrYes -Prompt` → bool | exact `YES` (case-sensitive) |
+
+## Write side of existing modules
+
+| Module | Function | Contract |
+|---|---|---|
+| Accounts.ps1 | `Invoke-CrPasswordRotation -User -OldSecret -NewSecret -Path <'Change'\|'Reset'> -Journal -RunId` → `@{ Success; Win32Error; Message }` | pre-steps: unlock if locked (journal `Unlocked`), clear CCP if set (journal `CcpCleared`); then `Invoke-CrNetPasswordChange` or `-Reset`; then restore CCP (journal `CcpRestored`) even on failure; journal `Secret` on success |
+| Accounts.ps1 | `Set-CrAccountFlags -User -Role` → `@{ Changed; Success; Win32Error }` | reads `Get-CrUserInfo`, sets 0x10000 (PNE) / 0x40 (CCP) as the role asks, clears 0x20 when `PasswordRequired`; writes only when different |
+| Accounts.ps1 | `Unlock-CrAccount -UserName` | clears 0x10 via `Set-CrUserFlags` |
+| Groups.ps1 | `Invoke-CrGroupMembershipChange -State -MemberSid -AddGroupSids -RemoveGroupSids` → array of `@{ GroupSid; GroupName; Action; Success; Win32Error }` | group name from `$State.Groups` by SID |
+| Rights.ps1 | `Grant-CrDependentRights -Sid -Rights <string[]>` → array of results | only `SeServiceLogonRight` / `SeBatchLogonRight` |
+| Services.ps1 | `Update-CrServiceCredentials -State -Sid -Secret` → array of `@{ Name; Success; Win32Error }` | every service whose `StartNameSid` = Sid; keeps the existing StartName text; never starts/stops (D17) |
+| Tasks.ps1 | `Update-CrTaskCredentials -State -Sid -Secret` → array of `@{ Path; Success; Error }` | password-stored tasks (LogonType 1/6) of the Sid; keeps UserId, LogonType and the task SDDL (`GetSecurityDescriptor(0xF)`); calls the adapter |
+| ComPlus.ps1 | `Update-CrComPlusCredentials -State -Sid -Secret` → array of `@{ Name; Success; Error }` | server applications with `IdentitySid` = Sid; adapter + `SaveChanges`; no shutdown/start (D17) |
+| AutoLogon.ps1 | `Invoke-CrAutoLogonAction -Decision -State -Secret` → `@{ Success; Steps = @(); Error }` | PLAN §7.5 "Actions" in the crash-safe order; registry through mockable `Set-CrWinlogonValue -Name -Value -Kind` / `Remove-CrWinlogonValue -Name`; LSA through `Set-CrLsaSecret` / `Remove-CrLsaSecret`; `-Secret` is the target account's (new) secret, `$null` for TurnOff |
+
+## Apply.ps1 and the entry point
+
+- `Invoke-CrApply -State -Config -Resolved -Preflight -Plan -SlotSecrets -Probes -Journal -RunId -Only -RunningSid` → `@{ Findings = ArrayList; Slots = @(@{ Slot; Status ('Done'|'Failed'|'Skipped'|'Blocked'|'NotApplicable'); Pending = @(); Errors = @() }); ExitCode }`.
+  Slots in ascending `Order`; per slot the steps of PLAN §8 (pre-steps, secret — skipped for `New`/`Reapply`, dependents, grants incl. flags and adds, verify with `Invoke-CrLogonTest` using the probe's logon type). Then the enforcement phase: removals (with rails), the auto-logon step (`Get-CrAutoLogonDecision` with the accounts actually verified, then `Invoke-CrAutoLogonAction`), check-mode fixes. A failing slot stops at that step and is reported with what is done/pending; other slots continue. Exit code: 1 if any slot failed, 4 if follow-ups (LOGINS for accounts whose password changed, IIS), else 0.
+- Entry point with `-Apply`: audit as before → stop with 2 if `MachineBlocked` → `Read-CrSlotSecrets` → probes → print the plan, the probe outcomes and the high-impact items → `Confirm-CrYes` (else exit 3) → `Invoke-CrApply` → report + CSV → re-audit summary (drift left) → exit code. All secrets are disposed (`.Dispose()`) at the end.
+
+# v10: account model (D21–D25) — supersedes the M2 parts above where they conflict
+
+PLAN v10: §1, §1.1, D9, D18, D20–D25, §5 config example, §6 steps 6–7, §8 slot order and enforcement phase.
+
+## Config (Config.ps1, config/CredentialRotation.psd1)
+
+- New role `Operator` (Administrators, Remote Desktop Users, `Name:Offer Remote Assistance Helpers?`). `RotateOnly` and the `BiCAAdmin`/`BiCARemote`/`AppUserBuiltinAdmin`/`AutoLogon` slots are gone; slots are `SOPAdmin`, `AppUser`, `PubUser` + the 3 SQL slots.
+- New account keys: `Create` (bool), `Replaces` (string[]: account names or `RID-500`), `PasswordMode` (`'Set'` default | `'Change'`), `SqlSysadminLogin` (bool, used in M5). `Mode` values: `'Check'` | `'Disable'` (a `Disable` entry has `Name`/`Names`, no Role/Credential). `Candidates` stays supported but the default config doesn't use it.
+- New top-level key `OtherEnabledAccounts = 'Ask'` (only value).
+- The `PubUser` entry keeps the `AutoLogon` block and `AutoLogonUser = @( @{ Name = 'PUB-User'; RequireEnabled = $true } )`.
+- Validation adds: `Replaces` entries are names or `RID-500`; a name may be replaced by one entry only; a `Disable` entry has no Role/Credential; `PasswordMode` only on Windows entries with a Credential.
+
+## Resolution (Principals.ps1)
+
+Resolved entries gain:
+- `Create` = `$true` when the entry has `Create` and its account doesn't exist (then `Accounts` holds one placeholder `@{ Name; Sid = $null; User = $null; ToCreate = $true }`, `NotApplicable = $false`, `Missing` empty)
+- `PasswordMode`
+- `Replaced = @(@{ Name; Sid; User; Enabled })` — existing accounts named in `Replaces` (RID-500 via the machine SID); a replaced account that is already disabled is listed with `Enabled = $false`
+- For `Mode = 'Disable'` entries: `Mode = 'Disable'`, `Accounts` = the existing ones
+- `Get-CrOtherEnabledAccounts -State -Resolved` → array of State users that are enabled and not selected by any entry (managed, replaced, disable, check), excluding the running account? No — the running account is always `BiCA Remote` (replaced). Built-in disabled accounts never appear (they're disabled).
+
+## Audit findings (Plan.ps1)
+
+`New-CrPlan` adds: `Drift` "Create <name>" for `Create`; `Drift` "Disable <name> (replaced by X)" per enabled replaced account and per enabled `Disable` account; `HighImpact` "Move <service/task/COM+> from <old> to <new>" per dependent of an account to be disabled (D24) and `Ambiguous` for dependents of accounts without a replacement (`SP Admin`/`SYS Admin`, O5); `Ambiguous` "Operator decides: disable or keep <name>" per other enabled account (D23); `HighImpact` "the running account <name> is disabled at the end; log on as SOP-Admin next time" when the running account is replaced (D25). No probe-type finding for set accounts.
+
+## Native.ps1
+
+- `New-CrLocalUser -UserName -Secret -Comment` → `@{ Success; Win32Error }`: `NetUserAdd` level 1 (`USER_PRIV_USER`, flags `UF_SCRIPT | UF_DONT_EXPIRE_PASSWD | UF_PASSWD_CANT_CHANGE`), password as BSTR. 2224 (exists) = failure with that code.
+- Disable/enable = `Set-CrUserFlags` with `0x2` (`UF_ACCOUNTDISABLE`) set/cleared.
+
+## Accounts.ps1
+
+- `New-CrManagedAccount -Name -Secret -Comment` → result (calls `New-CrLocalUser`; journal step `Created` for the new SID).
+- `Invoke-CrPasswordSet -User -NewSecret -Journal -RunId` → `@{ Success; Win32Error; Message }`: unlock if locked, `Invoke-CrNetPasswordReset`, journal `Secret`. (`Invoke-CrPasswordRotation` remains for `PasswordMode = 'Change'`.)
+- `Disable-CrAccount -User -Journal -RunId` / `Enable-CrAccount -User` → result (flags `0x2`; journal `Disabled`). A managed target account that exists but is disabled is enabled in its grants step.
+
+## Dependents (Services.ps1, Tasks.ps1, ComPlus.ps1, Adapters.ps1)
+
+- `Move-CrServiceAccount -State -FromSid -ToAccount '.\<name>' -Secret` → per-service results (`ChangeServiceConfigW` with the new account and password; never start/stop).
+- `Move-CrTaskAccount -State -FromSid -ToUserId '<COMPUTER>\<name>' -Secret` → per-task results (LogonType and SDDL kept; adapter with the new UserId).
+- `Move-CrComPlusIdentity -State -FromSid -ToIdentity '<name>' -Secret` → per-app results. `Set-CrComPlusPasswordAdapter` gains an optional `-Identity` (sets `Identity` before `Password`).
+- Tasks: if `RegisterTaskDefinition` fails with an SDDL that contains a SACL, retry once with the `0x7` SDDL (owner, group, DACL) and report the dropped SACL.
+
+## Secrets.ps1
+
+- `Read-CrSlotSecrets`: new password twice per slot; old password **only** for accounts with `PasswordMode = 'Change'` that exist; created accounts and set accounts get no old-password prompt. `Reapply` only for Change accounts (Set accounts: setting the same value is harmless). Names for D15 tokens include the account name even when it will be created.
+- `Read-CrOtherAccountDecisions -Accounts` → hashtable SID → `'Disable'|'Keep'` (D23; asked before the password prompts).
+- `Invoke-CrCredentialProbe` is only called for Change accounts.
+
+## AutoLogon.ps1
+
+- The selected/usable target is `PUB-User` only (the config's `AutoLogonUser` list); `WinAutoUser` is "any other account" (it's disabled by D22). SM: any other account → TurnOff; other machines → Switch to `PUB-User` (which may have been created in this run: usable if verified). Ambiguous rules unchanged.
+
+## Apply.ps1 / entry point
+
+- Entry `-Apply` order: audit → print the enabled local accounts (D21) with what happens to each → `Read-CrOtherAccountDecisions` → `Read-CrSlotSecrets` → probe (Change accounts only) → summary → YES → `Invoke-CrApply`.
+- Per slot: create (if `Create`) → set or change → enable if disabled → grants (flags, groups) → dependents (own) → verify (`Invoke-CrLogonTest`, D16 type).
+- Enforcement per PLAN §8: removals → dependent moves (D24; only to a verified replacement) → auto-logon step → disabling (replaced + `Disable` entries + operator-chosen others; never the running account; an account keeps enabled if one of its dependents couldn't be moved) → check-mode fixes → **running account last (D25)** when SOP-Admin is enabled, in Administrators + Remote Desktop Users and verified.
+- Follow-ups: LOGINS for accounts whose password changed or was created; IIS as before; "log on as SOP-Admin next time".
+
+- **ForceGuest (D16):** when `State.Policy.ForceGuest` is `True`, `Select-CrProbeLogonType` must not choose `Network` (Windows may map a local network logon to Guest, which would accept any password); it uses the next allowed type, or `Unverifiable` if none.

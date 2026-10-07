@@ -3,6 +3,9 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $here '..\src\lib\Rights.ps1')
 . (Join-Path $here 'Fixtures.ps1')
 
+# Stub for the Native.ps1 write wrapper (CONTRACTS); it throws, so a missing mock never changes real rights.
+function Grant-CrAccountRight { param([string]$Sid, [string]$Right) throw 'Grant-CrAccountRight is not mocked' }
+
 # Get-CrTokenSids returns a comma-wrapped array: assign directly, never wrap the call in @().
 
 Describe 'Get-CrTokenSids' {
@@ -194,6 +197,78 @@ Describe 'Select-CrProbeLogonType (D16)' {
     }
 }
 
+Describe 'Select-CrProbeLogonType with ForceGuest (D16)' {
+
+    It 'skips Network and uses Interactive when network logons are mapped to Guest' {
+        $ipt = New-CrTestState -Profile 'IPT01'
+        $ipt.Policy.ForceGuest = $true
+        $sid = Get-CrTestUserSid $ipt 'PUB-User'
+        (Get-CrEffectiveLogonRights -UserSid $sid -State $ipt).Network | Should Be $true
+        $p = Select-CrProbeLogonType -UserSid $sid -State $ipt
+        $p.LogonType | Should Be 'Interactive'
+        $p.Fallback | Should Be $false
+    }
+
+    It 'uses the next allowed type (Batch, then Service) for an account denied local logon' {
+        $ipt = New-CrTestState -Profile 'IPT01'
+        $ipt.Policy.ForceGuest = $true
+        $sid = Get-CrTestUserSid $ipt 'ApplicationUser'
+        (Select-CrProbeLogonType -UserSid $sid -State $ipt).LogonType | Should Be 'Batch'
+        Add-CrTestRight -State $ipt -Right 'SeDenyBatchLogonRight' -Sids @($sid)
+        $p = Select-CrProbeLogonType -UserSid $sid -State $ipt
+        $p.LogonType | Should Be 'Service'
+        $p.Fallback | Should Be $false
+    }
+
+    It 'returns no logon type with Fallback when only Network is allowed' {
+        $sm = New-CrTestState -Profile 'SM'
+        $sm.Policy.ForceGuest = $true
+        $sid = Get-CrTestUserSid $sm 'WinAutoUser'
+        $effective = Get-CrEffectiveLogonRights -UserSid $sid -State $sm
+        $effective.Network | Should Be $true
+        $effective.Interactive | Should Be $false
+        $effective.Batch | Should Be $false
+        $effective.Service | Should Be $false
+        $p = Select-CrProbeLogonType -UserSid $sid -State $sm
+        ($null -eq $p.LogonType) | Should Be $true
+        $p.Fallback | Should Be $true
+    }
+
+    It 'returns no logon type with Fallback when nothing is allowed' {
+        $sm = New-CrTestState -Profile 'SM'
+        $sm.Policy.ForceGuest = $true
+        $sid = Get-CrTestUserSid $sm 'WinAutoUser'
+        Add-CrTestRight -State $sm -Right 'SeDenyNetworkLogonRight' -Sids @($sid)
+        $p = Select-CrProbeLogonType -UserSid $sid -State $sm
+        ($null -eq $p.LogonType) | Should Be $true
+        $p.Fallback | Should Be $true
+    }
+
+    It 'keeps Network when ForceGuest is off or unknown' {
+        foreach ($value in @($false, $null)) {
+            $sm = New-CrTestState -Profile 'SM'
+            $sm.Policy.ForceGuest = $value
+            $p = Select-CrProbeLogonType -UserSid (Get-CrTestUserSid $sm 'WinAutoUser') -State $sm
+            $p.LogonType | Should Be 'Network'
+            $p.Fallback | Should Be $false
+        }
+    }
+
+    It 'ignores a failed Policy part' {
+        $s = New-CrTestState -Profile 'SM' -Parts @{ Policy = @{ Error = 'secedit failed' } }
+        (Select-CrProbeLogonType -UserSid (Get-CrTestUserSid $s 'BiCA Remote') -State $s).LogonType | Should Be 'Network'
+    }
+
+    Context 'never asks for a Network logon under ForceGuest even when it is the only grant' {
+        It 'returns no logon type for the mocked rights' {
+            Mock Get-CrEffectiveLogonRights { @{ Network = $true; Interactive = $false; RemoteInteractive = $true; Batch = $false; Service = $false } }
+            $p = Select-CrProbeLogonType -UserSid 'S-1-5-21-1000-2000-3000-1999' -State @{ Policy = @{ ForceGuest = $true } }
+            ($null -eq $p.LogonType) | Should Be $true
+            $p.Fallback | Should Be $true
+        }
+    }
+}
+
 Describe 'Test-CrIsAdmin' {
     $sm = New-CrTestState -Profile 'SM'
 
@@ -221,5 +296,88 @@ Describe 'Test-CrIsAdmin' {
     It 'is false when the Groups part failed' {
         $s = New-CrTestState -Profile 'SM' -Parts @{ Groups = @{ Error = 'netapi32 failed' } }
         Test-CrIsAdmin -UserSid (Get-CrTestUserSid $s 'BiCA Admin') -State $s | Should Be $false
+    }
+}
+
+Describe 'Grant-CrDependentRights' {
+    $tcSid = 'S-1-5-21-1000-2000-3000-1001'
+
+    Context 'grants the service and batch logon rights' {
+        It 'calls Grant-CrAccountRight once per right and returns one result each' {
+            Mock Grant-CrAccountRight { return @{ Success = $true; Win32Error = 0 } }
+            $r = Grant-CrDependentRights -Sid $tcSid -Rights @('SeServiceLogonRight', 'SeBatchLogonRight')
+            ($r -is [array]) | Should Be $true
+            $r.Count | Should Be 2
+            $r[0]['Right'] | Should Be 'SeServiceLogonRight'
+            $r[0]['Success'] | Should Be $true
+            $r[1]['Right'] | Should Be 'SeBatchLogonRight'
+            Assert-MockCalled Grant-CrAccountRight -Times 1 -Exactly -ParameterFilter { $Sid -eq 'S-1-5-21-1000-2000-3000-1001' -and $Right -eq 'SeServiceLogonRight' }
+            Assert-MockCalled Grant-CrAccountRight -Times 1 -Exactly -ParameterFilter { $Right -eq 'SeBatchLogonRight' }
+            Assert-MockCalled Grant-CrAccountRight -Times 2 -Exactly
+        }
+    }
+
+    Context 'any other right' {
+        It 'throws before granting anything' {
+            Mock Grant-CrAccountRight { return @{ Success = $true; Win32Error = 0 } }
+            { Grant-CrDependentRights -Sid $tcSid -Rights @('SeServiceLogonRight', 'SeInteractiveLogonRight') } | Should Throw 'SeInteractiveLogonRight'
+            { Grant-CrDependentRights -Sid $tcSid -Rights @('SeDenyServiceLogonRight') } | Should Throw
+            { Grant-CrDependentRights -Sid $tcSid -Rights @('SeDebugPrivilege') } | Should Throw
+            { Grant-CrDependentRights -Sid $tcSid -Rights @('SeNetworkLogonRight') } | Should Throw
+            Assert-MockCalled Grant-CrAccountRight -Times 0 -Exactly
+        }
+    }
+
+    Context 'duplicates and case' {
+        It 'grants each right once under its canonical name' {
+            Mock Grant-CrAccountRight { return @{ Success = $true; Win32Error = 0 } }
+            $r = Grant-CrDependentRights -Sid $tcSid -Rights @('seservicelogonright', 'SeServiceLogonRight')
+            $r.Count | Should Be 1
+            $r[0]['Right'] | Should Be 'SeServiceLogonRight'
+            Assert-MockCalled Grant-CrAccountRight -Times 1 -Exactly -ParameterFilter { $Right -ceq 'SeServiceLogonRight' }
+        }
+    }
+
+    Context 'a failing grant' {
+        It 'reports it and still grants the other right' {
+            Mock Grant-CrAccountRight {
+                if ($Right -eq 'SeServiceLogonRight') { return @{ Success = $false; Win32Error = 5 } }
+                return @{ Success = $true; Win32Error = 0 }
+            }
+            $r = Grant-CrDependentRights -Sid $tcSid -Rights @('SeServiceLogonRight', 'SeBatchLogonRight')
+            $r.Count | Should Be 2
+            $r[0]['Success'] | Should Be $false
+            $r[0]['Win32Error'] | Should Be 5
+            $r[0]['Message'] | Should Match 'error 5'
+            $r[1]['Success'] | Should Be $true
+        }
+    }
+
+    Context 'a wrapper that throws' {
+        It 'becomes a failed result' {
+            Mock Grant-CrAccountRight { throw 'The native helpers are not ready.' }
+            $r = Grant-CrDependentRights -Sid $tcSid -Rights 'SeBatchLogonRight'
+            $r.Count | Should Be 1
+            $r[0]['Success'] | Should Be $false
+            $r[0]['Message'] | Should Match 'not ready'
+        }
+    }
+
+    Context 'no rights' {
+        It 'returns an empty array' {
+            Mock Grant-CrAccountRight { return @{ Success = $true; Win32Error = 0 } }
+            $r = Grant-CrDependentRights -Sid $tcSid -Rights @()
+            ($r -is [array]) | Should Be $true
+            $r.Count | Should Be 0
+            $r2 = Grant-CrDependentRights -Sid $tcSid -Rights $null
+            $r2.Count | Should Be 0
+            Assert-MockCalled Grant-CrAccountRight -Times 0 -Exactly
+        }
+    }
+
+    Context 'argument checks' {
+        It 'throws without a SID' {
+            { Grant-CrDependentRights -Sid '' -Rights @('SeBatchLogonRight') } | Should Throw
+        }
     }
 }

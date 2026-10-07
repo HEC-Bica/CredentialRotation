@@ -82,28 +82,53 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\temp\CredentialRotati
 - the `.log` and `.csv` files from `%ProgramData%\CredentialRotation\logs\`
 - the inventory JSON (it contains account names and SIDs; never commit it)
 
-### Step 2: re-apply the current passwords (planned, needs M2/M3)
+### Step 2: re-apply the current passwords (`-Apply`, version 0.2.0)
 
-A safe first write test, done before any real rotation.
+A safe first write test, done before any real rotation. Password history would reject simply setting the same password again (history 5 on site 102575, 24 on `IPT01-QS-K1`), so the tool has a **re-apply mode** (D20): when the new password you type equals the account's current password, it
+- does not change the Windows password (no history rejection, DPAPI data untouched)
+- still rewrites services, scheduled tasks, COM+ identities and the auto-logon secret with that password (no restarts)
+- enforces groups, flags and logon rights, and runs every verification
+- lists no `LOGINS` follow-up for that account
 
-Simply setting the same password again would fail on most machines: password history rejects a reused password (history 5 on site 102575, 24 on `IPT01-QS-K1`). SQL Server may reject it too, because the SQL logins check the password policy.
+SQL slots are never prompted in this version ("SQL rotation not available in this version").
 
-The proposal for M2 is a **re-apply mode**: if the new password entered equals the old one, the tool
-- does not change the Windows password
-- still rewrites services, scheduled tasks, COM+ identities and the auto-logon secret with the same password
-- enforces groups and flags and runs all verifications
-- skips the SQL password change
+Run it first on test site 102575 with `/PS2`, logged on as `BiCA Remote`, in an elevated command prompt. Start with a single slot, then the whole machine:
 
-This tests almost the whole write path without any risk of locking an account out, and the `LOGINS` registry entries stay valid. Run it first on test site 102575 with `/PS2`.
+```
+C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 -Apply -Only BiCAAdmin
+echo %ERRORLEVEL%
+C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 -Apply
+echo %ERRORLEVEL%
+```
 
-### Step 3: rotate to new credentials (needs M2/M3)
+The tool runs the audit first, then per slot asks for the **new password twice** and the **current password of each account** (with a "same as previous? Y/N" shortcut). For a re-apply, type the current password as the new password. Never put a password on the command line. An empty new password skips the slot after a Y/N question.
 
-Planned order:
-1. Fix what the audit runs turn up.
-2. Build M2 and M3.
-3. Re-apply test (step 2) on test site 102575 with `/PS2`.
-4. First real rotation on test site 102575.
-5. Then test site QS-K1.
+It then tests the passwords (at most one failed logon per account, within the lockout budget) and asks for a decision where it can't decide alone: an account whose passwords both fail (enter again / reset with loss of DPAPI data / skip), an exhausted lockout budget (wait / reset / skip), a disabled account or a too young password (reset / skip), and an ambiguous auto-logon (turn off / leave unchanged / standardize the current account).
+
+Before anything is changed it prints the **APPLY PLAN**: per slot the accounts, the probe result and the path (`Change`, `Reset`, `Re-apply`, `Already on the new password`, `Skip`), the auto-logon step and all high-impact and ambiguous items. **Typing `YES`** (upper case) confirms, for the slots shown: the password changes or re-applies, the updates of services, scheduled tasks and COM+ identities, flags, group additions and logon rights, then the group removals of completed slots, the auto-logon step and, without `-Only`, the check-mode fixes (`WinUser1-3`, FTP users). Anything else, or Ctrl+C, aborts without changes.
+
+After the apply it prints the slot results (done / error / pending steps), the **FOLLOW-UP REQUIRED** list and a re-audit with the number of drift items left. The results also go to `%ProgramData%\CredentialRotation\logs\` (`..._apply.csv`).
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Applied, nothing outstanding (the normal result of a re-apply) |
+| 4 | Applied, follow-up required: `LOGINS` entries or IIS identities to update (the normal result of a rotation) |
+| 1 | Partial failure: a slot stopped at a step or an account was skipped; the report lists what is done and pending. Re-run with the same passwords to complete it |
+| 2 | Preflight failed, nothing changed (e.g. not elevated, a write filter protects `C:`) |
+| 3 | Aborted: not confirmed with `YES`, Ctrl+C, or an unexpected error (please send the output) |
+
+**Send back** the console output, the exit codes and the `.log`/`.csv` files, as in step 1.
+
+### Step 3: rotate to new credentials (`-Apply`)
+
+Same command and prompts as step 2, but with the **new site password** for each slot, which must never have been used before (password history). Order:
+1. Re-apply test (step 2) on test site 102575 with `/PS2`.
+2. First real rotation on test site 102575, slot by slot with `-Only` (e.g. `-Only BiCAAdmin`, then `-Only AppUserApplication`, `-Only AutoLogon`, and `-Only BiCARemote` last), then a full run without `-Only` for the check-mode fixes.
+3. Then test site QS-K1.
+
+`-Only` takes slot names (`BiCAAdmin`, `AppUserApplication`, `AppUserBuiltinAdmin`, `AutoLogon`, `BiCARemote`), several separated by commas. The auto-logon step runs when the `AutoLogon` slot or the slot of the current auto-logon account is selected; check-mode accounts are only fixed without `-Only`. `BiCA Remote` is your own account: after its rotation, update saved RDP credentials.
+
+If a run is interrupted or a slot fails, re-run with the same passwords: the run journal makes the probe test the new password first, accounts already on it are not changed again (D11), and the pending steps are completed.
 
 After a real rotation, the entries in `HKLM\SOFTWARE\BICA\SYSTEM\LOGINS` must be updated manually; the tool lists them as **FOLLOW-UP REQUIRED** (exit code 4).
 

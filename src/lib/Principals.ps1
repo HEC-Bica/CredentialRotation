@@ -1,5 +1,5 @@
 # Principals.ps1 - selection rules, account resolution, SID overlap, group references
-# (docs/PLAN.md sections 1.1 and 5, D5, D13; docs/dev/CONTRACTS.md)
+# (docs/PLAN.md sections 1.1 and 5, D5, D13, D21-D23; docs/dev/CONTRACTS.md)
 
 # Returns the entries of an array part of $State; a failed part (@{ Error = ... }) or $null gives an empty array.
 function Get-CrPrincipalPartList {
@@ -62,8 +62,15 @@ function New-CrResolvedEntry {
     if ($Entry['Kind']) { $kind = [string]$Entry['Kind'] }
     $mode = 'Rotate'
     if ([string]$Entry['Mode'] -eq 'Check') { $mode = 'Check' }
+    if ([string]$Entry['Mode'] -eq 'Disable') { $mode = 'Disable' }
     $autoLogonUser = $null
     if ($Entry.ContainsKey('AutoLogonUser') -and $null -ne $Entry['AutoLogonUser']) { $autoLogonUser = ConvertTo-CrArray $Entry['AutoLogonUser'] }
+    # D9 (v10): Windows passwords are set unless the entry asks for a change
+    $passwordMode = $null
+    if ($kind -eq 'Windows' -and $mode -eq 'Rotate') {
+        $passwordMode = 'Set'
+        if ([string]$Entry['PasswordMode'] -eq 'Change') { $passwordMode = 'Change' }
+    }
     return @{
         Id            = [string]$Entry['Id']
         Kind          = $kind
@@ -76,11 +83,39 @@ function New-CrResolvedEntry {
         Missing       = @()
         Candidate     = $null
         NotApplicable = $true
+        Create        = $false
+        PasswordMode  = $passwordMode
+        Replaced      = @()
         AutoLogon     = $Entry['AutoLogon']
         AutoLogonUser = $autoLogonUser
         Config        = $Entry
         Error         = $null
     }
+}
+
+# Replaced accounts of an entry (D22): existing accounts named in Replaces; 'RID-500' via the machine SID.
+# Returns @(@{ Name; Sid; User; Enabled }) (comma-returned).
+function Get-CrReplacedAccounts {
+    param($Entry, $Users, [string]$MachineSid)
+    $result = New-Object System.Collections.ArrayList
+    if (-not $Entry.ContainsKey('Replaces')) { return , $result.ToArray() }
+    $seen = New-Object System.Collections.ArrayList
+    foreach ($item in (ConvertTo-CrArray $Entry['Replaces'])) {
+        $reference = ([string]$item).Trim()
+        if (-not $reference) { continue }
+        $user = $null
+        if ($reference -match '^RID-\d+$') {
+            $user = Find-CrUserBySidReference -Users $Users -Reference $reference -MachineSid $MachineSid
+        } else {
+            $user = Find-CrUserByName -Users $Users -Name $reference
+        }
+        if (-not $user) { continue }
+        $sid = [string]$user['Sid']
+        if ($seen -contains $sid) { continue }
+        [void]$seen.Add($sid)
+        [void]$result.Add(@{ Name = [string]$user['Name']; Sid = $sid; User = $user; Enabled = (-not $user['Disabled']) })
+    }
+    return , $result.ToArray()
 }
 
 function Get-CrConfigRoleOrNull {
@@ -90,12 +125,17 @@ function Get-CrConfigRoleOrNull {
     return $null
 }
 
-# Names that an entry selects explicitly (Name, Names, candidate names, auto-logon user names).
+# Names that an entry selects explicitly (Name, Names, Replaces, candidate names, auto-logon user names).
 function Get-CrExplicitNames {
     param($Entry)
     $names = New-Object System.Collections.ArrayList
     if ($Entry['Name']) { [void]$names.Add([string]$Entry['Name']) }
     if ($Entry.ContainsKey('Names')) { foreach ($n in (ConvertTo-CrArray $Entry['Names'])) { [void]$names.Add([string]$n) } }
+    if ($Entry.ContainsKey('Replaces')) {
+        foreach ($n in (ConvertTo-CrArray $Entry['Replaces'])) {
+            if ($n -and ([string]$n -notmatch '^RID-\d+$')) { [void]$names.Add([string]$n) }
+        }
+    }
     if ($Entry.ContainsKey('Candidates')) {
         foreach ($c in (ConvertTo-CrArray $Entry['Candidates'])) {
             if (($c -is [hashtable]) -and $c['Name']) { [void]$names.Add([string]$c['Name']) }
@@ -202,6 +242,16 @@ function Resolve-CrAccounts {
             }
             if ($entry['Role']) { $r.RoleName = [string]$entry['Role'] }
             $r.Slot = $entry['Credential']
+            # D21: a managed account that doesn't exist is created. Only when the user list was read:
+            # otherwise "missing" isn't known (the entry carries the Users error instead).
+            if (($entry['Create'] -eq $true) -and ($r.Mode -eq 'Rotate') -and -not $usersError -and $missing.Count -gt 0) {
+                foreach ($m in $missing) { [void]$accounts.Add(@{ Name = [string]$m; Sid = $null; User = $null; ToCreate = $true }) }
+                $missing.Clear()
+                $r.Create = $true
+            }
+        }
+        if ($r.Kind -eq 'Windows' -and $r.Mode -eq 'Rotate') {
+            $r.Replaced = Get-CrReplacedAccounts -Entry $entry -Users $users -MachineSid $machineSid
         }
 
         $r.Accounts = $accounts.ToArray()
@@ -221,7 +271,8 @@ function Resolve-CrAccounts {
             if ($j -eq $i -or [string]$entries[$j]['Kind'] -eq 'SqlLogin') { continue }
             foreach ($n in (Get-CrExplicitNames $entries[$j])) { [void]$excludedNames.Add($n) }
             if (($null -ne $resolved[$j]) -and -not $entries[$j].ContainsKey('NamePattern')) {
-                foreach ($a in $resolved[$j].Accounts) { [void]$excludedSids.Add([string]$a['Sid']) }
+                foreach ($a in (ConvertTo-CrArray $resolved[$j].Accounts)) { if ($a['Sid']) { [void]$excludedSids.Add([string]$a['Sid']) } }
+                foreach ($a in (ConvertTo-CrArray $resolved[$j].Replaced)) { if ($a['Sid']) { [void]$excludedSids.Add([string]$a['Sid']) } }
             }
         }
 
@@ -249,6 +300,8 @@ function Resolve-CrAccounts {
 }
 
 # D13: a SID claimed by two entries is an ambiguity. Returns an array of findings (comma-returned).
+# Every selection counts as a claim: the accounts of managed, Check and Disable entries, and the accounts
+# named in Replaces (claimed as '<Id> (replaces)', so an entry replacing its own account is reported too).
 function Find-CrSidOverlap {
     param($Resolved)
     $findings = New-Object System.Collections.ArrayList
@@ -256,17 +309,23 @@ function Find-CrSidOverlap {
     $claims = @{}
     foreach ($r in (ConvertTo-CrArray $Resolved)) {
         if (-not ($r -is [hashtable])) { continue }
-        foreach ($a in (ConvertTo-CrArray $r['Accounts'])) {
-            if (-not $a['Sid']) { continue }
-            $key = ('{0}|{1}' -f $r['Kind'], $a['Sid']).ToUpperInvariant()
-            if (-not $claims.ContainsKey($key)) {
-                $claims[$key] = @{ Name = [string]$a['Name']; Sid = [string]$a['Sid']; Ids = (New-Object System.Collections.ArrayList); Slots = (New-Object System.Collections.ArrayList) }
-                [void]$order.Add($key)
-            }
-            $claim = $claims[$key]
-            if ($claim.Ids -notcontains [string]$r['Id']) {
-                [void]$claim.Ids.Add([string]$r['Id'])
-                [void]$claim.Slots.Add(('{0} (slot {1})' -f $r['Id'], $r['Slot']))
+        $sets = @(
+            @{ Label = [string]$r['Id']; Accounts = (ConvertTo-CrArray $r['Accounts']) },
+            @{ Label = ('{0} (replaces)' -f $r['Id']); Accounts = (ConvertTo-CrArray $r['Replaced']) }
+        )
+        foreach ($set in $sets) {
+            foreach ($a in $set['Accounts']) {
+                if (-not $a['Sid']) { continue }
+                $key = ('{0}|{1}' -f $r['Kind'], $a['Sid']).ToUpperInvariant()
+                if (-not $claims.ContainsKey($key)) {
+                    $claims[$key] = @{ Name = [string]$a['Name']; Sid = [string]$a['Sid']; Ids = (New-Object System.Collections.ArrayList); Slots = (New-Object System.Collections.ArrayList) }
+                    [void]$order.Add($key)
+                }
+                $claim = $claims[$key]
+                if ($claim.Ids -notcontains $set['Label']) {
+                    [void]$claim.Ids.Add($set['Label'])
+                    [void]$claim.Slots.Add(('{0} (slot {1})' -f $set['Label'], $r['Slot']))
+                }
             }
         }
     }
@@ -277,6 +336,27 @@ function Find-CrSidOverlap {
         [void]$findings.Add((New-CrFinding -Severity 'Ambiguous' -Area 'Principals' -Account $claim.Name -Message $message -Detail ($claim.Slots.ToArray() -join '; ')))
     }
     return , $findings.ToArray()
+}
+
+# D23: the enabled local accounts that no entry selects (managed, replaced, Disable, Check).
+# Disabled accounts (Guest, DefaultAccount, ...) never appear. Returns $State.Users entries (comma-returned).
+function Get-CrOtherEnabledAccounts {
+    param($State, $Resolved)
+    $result = New-Object System.Collections.ArrayList
+    $users = Get-CrPrincipalPartList $State['Users']
+    $selected = New-Object System.Collections.ArrayList
+    foreach ($r in (ConvertTo-CrArray $Resolved)) {
+        if (-not ($r -is [hashtable]) -or $r['Kind'] -ne 'Windows') { continue }
+        foreach ($a in (ConvertTo-CrArray $r['Accounts'])) { if ($a['Sid']) { [void]$selected.Add(([string]$a['Sid']).ToUpperInvariant()) } }
+        foreach ($a in (ConvertTo-CrArray $r['Replaced'])) { if ($a['Sid']) { [void]$selected.Add(([string]$a['Sid']).ToUpperInvariant()) } }
+    }
+    foreach ($user in $users) {
+        if (-not ($user -is [hashtable]) -or -not $user['Sid']) { continue }
+        if ($user['Disabled']) { continue }
+        if ($selected -contains ([string]$user['Sid']).ToUpperInvariant()) { continue }
+        [void]$result.Add($user)
+    }
+    return , $result.ToArray()
 }
 
 # Resolves a group reference: 'S-1-...' (taken as is), 'RID-<n>' (machine SID + RID), 'Name:x' (must exist),

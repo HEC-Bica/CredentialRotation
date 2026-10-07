@@ -95,3 +95,67 @@ function Get-CrServices {
     }
     return , $list.ToArray()
 }
+
+# --- write side (M2/M3, v10) ---
+
+# Sets the logon account and password of every service whose StartNameSid is Sid ($State.Services).
+# Account = $null keeps each service's StartName text (password update); otherwise every matching
+# service gets Account (move, D24). Never starts, stops or restarts a service (D17).
+# Returns an array of @{ Name; Success; Win32Error; Error; FromAccount; ToAccount }.
+function Invoke-CrServiceLogonChange {
+    param($State, [string]$Sid, [string]$Account, [System.Security.SecureString]$Secret)
+    $results = New-Object System.Collections.ArrayList
+    $part = $State['Services']
+    if ($part -is [hashtable]) {
+        [void]$results.Add(@{ Name = $null; Success = $false; Win32Error = $null; Error = ('Services could not be read: ' + [string]$part['Error']); FromAccount = $null; ToAccount = $Account })
+        return , $results.ToArray()
+    }
+    $services = ConvertTo-CrArray $part
+    foreach ($s in $services) {
+        if ($null -eq $s) { continue }
+        if ($s['StartNameSid'] -ne $Sid) { continue }
+        $name = [string]$s['Name']
+        $from = [string]$s['StartName']
+        $to = $Account
+        if (-not $to) { $to = $from }
+        $entry = @{ Name = $name; Success = $false; Win32Error = $null; Error = $null; FromAccount = $from; ToAccount = $to }
+        try {
+            $r = Set-CrServiceLogonPassword -ServiceName $name -Account $to -Secret $Secret
+            $entry['Success'] = [bool]$r['Success']
+            $entry['Win32Error'] = $r['Win32Error']
+        } catch {
+            $ex = $_.Exception
+            while ($ex.InnerException) { $ex = $ex.InnerException }
+            $entry['Error'] = $ex.Message
+        }
+        [void]$results.Add($entry)
+    }
+    return , $results.ToArray()
+}
+
+# Updates the stored logon password of every service whose StartNameSid is Sid ($State.Services).
+# The existing StartName text is passed unchanged. Services are never started, stopped or restarted
+# (D17): the new password takes effect at the next start ("SCM updated - restart pending").
+# Returns an array of @{ Name; Success; Win32Error; Error; FromAccount; ToAccount }, one entry per
+# service; one failure doesn't stop the others. Error is $null, or the message when the wrapper threw.
+# If $State.Services failed to load, the only entry has Name = $null and Success = $false.
+function Update-CrServiceCredentials {
+    param($State, [string]$Sid, [System.Security.SecureString]$Secret)
+    if (-not $Sid) { throw 'Update-CrServiceCredentials: Sid is required' }
+    if ($null -eq $Secret) { throw 'Update-CrServiceCredentials: no new password given' }
+    return , (Invoke-CrServiceLogonChange -State $State -Sid $Sid -Account $null -Secret $Secret)
+}
+
+# Moves every service whose StartNameSid is FromSid to ToAccount ('.\<name>') with that account's
+# password (D24): ChangeServiceConfigW with the new StartName and password. Services are never
+# started, stopped or restarted (D17). The caller grants SeServiceLogonRight to the new account.
+# Returns an array of @{ Name; Success; Win32Error; Error; FromAccount; ToAccount }, one per service;
+# one failure doesn't stop the others. If $State.Services failed to load, the only entry has
+# Name = $null and Success = $false.
+function Move-CrServiceAccount {
+    param($State, [string]$FromSid, [string]$ToAccount, [System.Security.SecureString]$Secret)
+    if (-not $FromSid) { throw 'Move-CrServiceAccount: FromSid is required' }
+    if (-not $ToAccount) { throw 'Move-CrServiceAccount: ToAccount is required' }
+    if ($null -eq $Secret) { throw 'Move-CrServiceAccount: no password of the new account given' }
+    return , (Invoke-CrServiceLogonChange -State $State -Sid $FromSid -Account $ToAccount -Secret $Secret)
+}

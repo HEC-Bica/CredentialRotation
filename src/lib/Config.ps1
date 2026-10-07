@@ -3,7 +3,9 @@
 # The allowed keys and values. Everything not listed here is a validation error.
 function Get-CrConfigSchema {
     return @{
-        TopKeys              = @('SchemaVersion', 'SitePasswordRules', 'Roles', 'Credentials', 'Accounts')
+        TopKeys              = @('SchemaVersion', 'SitePasswordRules', 'Roles', 'Credentials', 'Accounts', 'OtherEnabledAccounts')
+        RequiredTopKeys      = @('SchemaVersion', 'SitePasswordRules', 'Roles', 'Credentials', 'Accounts')
+        OtherEnabledValues   = @('Ask')
         SitePasswordRuleKeys = @('MinLength', 'RequireComplexity')
         RoleKeys             = @('Groups', 'ExclusiveGroups', 'AllowedExtraGroups', 'PasswordNeverExpires',
                                  'CannotChangePassword', 'PasswordRequired', 'IfGroupMissing')
@@ -12,15 +14,23 @@ function Get-CrConfigSchema {
         CredentialKeys       = @('Slot', 'Order', 'Label', 'MaxLength')
         AccountKeys          = @('Id', 'Kind', 'Name', 'Names', 'NamePattern', 'Candidates', 'Role', 'Credential', 'Mode',
                                  'LoginsEntry', 'Services', 'ScheduledTasks', 'ComPlus', 'IisReport',
-                                 'AutoLogonUser', 'AutoLogon', 'ServerRoles')
+                                 'AutoLogonUser', 'AutoLogon', 'ServerRoles',
+                                 'Create', 'Replaces', 'PasswordMode', 'SqlSysadminLogin')
         WindowsOnlyKeys      = @('Names', 'NamePattern', 'Candidates', 'Role', 'Mode', 'Services', 'ScheduledTasks',
-                                 'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon')
+                                 'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon',
+                                 'Create', 'Replaces', 'PasswordMode', 'SqlSysadminLogin')
         SqlOnlyKeys          = @('ServerRoles')
         SelectionKeys        = @('Name', 'Names', 'NamePattern', 'Candidates')
         DependentKeys        = @('Services', 'ScheduledTasks', 'ComPlus', 'IisReport')
         DependentValues      = @('Auto')
         Kinds                = @('Windows', 'SqlLogin')
-        ModeValues           = @('Check')
+        ModeValues           = @('Check', 'Disable')
+        PasswordModeValues   = @('Set', 'Change')
+        # v10 keys of managed (rotated) entries; not valid on Check or Disable entries
+        ManagedOnlyKeys      = @('Create', 'Replaces', 'PasswordMode', 'SqlSysadminLogin')
+        # A Disable entry only selects accounts by Name/Names (D22)
+        DisableForbiddenKeys = @('NamePattern', 'Candidates', 'Role', 'Credential', 'LoginsEntry', 'Services', 'ScheduledTasks',
+                                 'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon')
         CandidateKeys        = @('Name', 'Sid', 'Role', 'Credential')
         AutoLogonKeys        = @('Mode', 'RestrictedComputerPattern')
         AutoLogonModes       = @('IfAlreadyOn')
@@ -232,8 +242,64 @@ function Test-CrConfigCredentials {
     return , $slots.ToArray()
 }
 
+# v10 keys of managed entries (CONTRACTS "v10: account model"): Create, Replaces, PasswordMode, SqlSysadminLogin.
+# $ReplacedBy maps upper-cased replaced names to the entry that replaces them (a name may be replaced once).
+function Test-CrConfigManagedKeys {
+    param($Schema, $Account, [string]$Where, [bool]$IsRotate, $ReplacedBy, $Errors)
+    if (-not $IsRotate) {
+        foreach ($key in $Schema.ManagedOnlyKeys) {
+            if ($Account.ContainsKey($key)) {
+                [void]$Errors.Add(('{0}: key ''{1}'' is not valid for Mode ''{2}''.' -f $Where, $key, $Account['Mode']))
+            }
+        }
+        return
+    }
+    Test-CrConfigBool -Table $Account -Key 'Create' -Where $Where -Errors $Errors
+    Test-CrConfigBool -Table $Account -Key 'SqlSysadminLogin' -Where $Where -Errors $Errors
+    $singleName = ($Account.ContainsKey('Name') -and -not $Account.ContainsKey('Names') -and
+                   -not $Account.ContainsKey('NamePattern') -and -not $Account.ContainsKey('Candidates'))
+    if (($Account['Create'] -eq $true) -and -not $singleName) {
+        [void]$Errors.Add(('{0}: Create requires a single Name.' -f $Where))
+    }
+    if ($Account.ContainsKey('PasswordMode')) {
+        if ($Schema.PasswordModeValues -notcontains [string]$Account['PasswordMode']) {
+            [void]$Errors.Add(('{0}: PasswordMode must be one of: {1}.' -f $Where, ($Schema.PasswordModeValues -join ', ')))
+        }
+        if (-not $Account.ContainsKey('Credential')) {
+            [void]$Errors.Add(('{0}: PasswordMode is only valid on Windows entries with a Credential.' -f $Where))
+        }
+    }
+    if ($Account.ContainsKey('Replaces')) {
+        if (-not $singleName) { [void]$Errors.Add(('{0}: Replaces requires a single Name (the replacement account).' -f $Where)) }
+        $list = ConvertTo-CrArray $Account['Replaces']
+        if ($list.Count -eq 0) { [void]$Errors.Add(('{0}: Replaces is empty.' -f $Where)) }
+        foreach ($item in $list) {
+            if (-not (Test-CrConfigString $item)) {
+                [void]$Errors.Add(('{0}: every entry of Replaces must be a non-empty string.' -f $Where))
+                continue
+            }
+            $text = ([string]$item).Trim()
+            if (($text -match '^RID-') -and $text -ne 'RID-500') {
+                [void]$Errors.Add(('{0}: Replaces ''{1}'': only RID-500 is supported as a RID reference.' -f $Where, $text))
+                continue
+            }
+            if ($text -match '^S-1-') {
+                [void]$Errors.Add(('{0}: Replaces ''{1}'': use an account name or RID-500, not a SID.' -f $Where, $text))
+                continue
+            }
+            $key = $text.ToUpperInvariant()
+            if ($ReplacedBy.ContainsKey($key)) {
+                [void]$Errors.Add(('{0}: Replaces ''{1}'' is already replaced by {2}.' -f $Where, $text, $ReplacedBy[$key]))
+            } else {
+                $ReplacedBy[$key] = $Where
+            }
+        }
+    }
+}
+
 function Test-CrConfigAccount {
-    param($Config, $Schema, $Account, [string]$Where, $Slots, $Errors)
+    param($Config, $Schema, $Account, [string]$Where, $Slots, $Errors, $ReplacedBy)
+    if ($null -eq $ReplacedBy) { $ReplacedBy = @{} }
     Test-CrConfigKeys -Table $Account -Allowed $Schema.AccountKeys -Where $Where -Errors $Errors
 
     $kind = $Account['Kind']
@@ -249,11 +315,23 @@ function Test-CrConfigAccount {
     }
 
     $isCheck = $false
+    $isDisable = $false
     if ($Account.ContainsKey('Mode')) {
         if ($Schema.ModeValues -notcontains [string]$Account['Mode']) {
-            [void]$Errors.Add(('{0}: Mode ''{1}'' is not valid (only ''Check''; omit Mode to rotate).' -f $Where, $Account['Mode']))
+            [void]$Errors.Add(('{0}: Mode ''{1}'' is not valid (only ''Check'' or ''Disable''; omit Mode to rotate).' -f $Where, $Account['Mode']))
+        } elseif ([string]$Account['Mode'] -eq 'Disable') {
+            $isDisable = $true
         } else {
             $isCheck = $true
+        }
+    }
+    if ($isWindowsKind) {
+        Test-CrConfigManagedKeys -Schema $Schema -Account $Account -Where $Where -IsRotate (-not $isCheck -and -not $isDisable) `
+            -ReplacedBy $ReplacedBy -Errors $Errors
+    }
+    if ($isDisable) {
+        foreach ($key in $Schema.DisableForbiddenKeys) {
+            if ($Account.ContainsKey($key)) { [void]$Errors.Add(('{0}: key ''{1}'' is not valid for Mode ''Disable''.' -f $Where, $key)) }
         }
     }
 
@@ -319,7 +397,7 @@ function Test-CrConfigAccount {
                 Test-CrConfigSlotRef -SlotName $candidate['Credential'] -Slots $Slots -Where $cWhere -Errors $Errors
             }
         }
-    } else {
+    } elseif (-not $isDisable) {
         if ($isWindowsKind) {
             Test-CrConfigRoleRef -Config $Config -RoleName $Account['Role'] -Where $Where -Errors $Errors
         }
@@ -398,8 +476,12 @@ function Test-CrConfig {
     }
     $schema = Get-CrConfigSchema
     Test-CrConfigKeys -Table $Config -Allowed $schema.TopKeys -Where 'Config' -Errors $errors
-    foreach ($key in $schema.TopKeys) {
+    foreach ($key in $schema.RequiredTopKeys) {
         if (-not $Config.ContainsKey($key)) { [void]$errors.Add(('Config: missing key ''{0}''.' -f $key)) }
+    }
+    # D23: optional, 'Ask' is the only value (and the behaviour when the key is absent)
+    if ($Config.ContainsKey('OtherEnabledAccounts') -and ($schema.OtherEnabledValues -notcontains [string]$Config['OtherEnabledAccounts'])) {
+        [void]$errors.Add(('Config: OtherEnabledAccounts ''{0}'' is not valid (only: {1}).' -f $Config['OtherEnabledAccounts'], ($schema.OtherEnabledValues -join ', ')))
     }
 
     if ($Config.ContainsKey('SchemaVersion') -and -not ((Test-CrConfigIsInteger $Config['SchemaVersion']) -and $Config['SchemaVersion'] -eq 1)) {
@@ -424,6 +506,7 @@ function Test-CrConfig {
 
     if ($Config.ContainsKey('Accounts')) {
         $ids = @{}
+        $replacedBy = @{}
         $autoLogonEntries = 0
         $index = 0
         foreach ($account in (ConvertTo-CrArray $Config['Accounts'])) {
@@ -444,7 +527,7 @@ function Test-CrConfig {
                 }
             }
             if ($account.ContainsKey('AutoLogon')) { $autoLogonEntries++ }
-            Test-CrConfigAccount -Config $Config -Schema $schema -Account $account -Where $where -Slots $slots -Errors $errors
+            Test-CrConfigAccount -Config $Config -Schema $schema -Account $account -Where $where -Slots $slots -Errors $errors -ReplacedBy $replacedBy
         }
         if ($autoLogonEntries -gt 1) { [void]$errors.Add('Accounts: only one entry may have an AutoLogon block.') }
     }

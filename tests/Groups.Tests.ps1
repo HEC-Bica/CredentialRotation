@@ -4,6 +4,11 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $here '..\src\lib\Native.ps1')
 . (Join-Path $here '..\src\lib\Groups.ps1')
 
+# Stubs for the Native.ps1 write wrappers (CONTRACTS), defined after Native.ps1 so a missing mock can never change
+# a real group; mocked below.
+function Add-CrLocalGroupMemberSid { param([string]$GroupName, [string]$MemberSid) throw 'Add-CrLocalGroupMemberSid is not mocked' }
+function Remove-CrLocalGroupMemberSid { param([string]$GroupName, [string]$MemberSid) throw 'Remove-CrLocalGroupMemberSid is not mocked' }
+
 Describe 'Get-CrLocalGroups' {
     Mock Resolve-CrNameToSid {
         switch ($Name) {
@@ -102,6 +107,110 @@ Describe 'Get-CrLocalGroups' {
         It 'throws when the groups cannot be enumerated' {
             Mock Get-CrLocalGroupNames { throw 'NetLocalGroupEnum failed: Access is denied (error 5)' }
             { Get-CrLocalGroups } | Should Throw 'NetLocalGroupEnum failed'
+        }
+    }
+}
+
+Describe 'Invoke-CrGroupMembershipChange' {
+    $tcMember = 'S-1-5-21-1000-2000-3000-1001'
+    $tcState = @{
+        Groups = @(
+            @{ Name = 'TestAdmins'; Sid = 'S-1-5-32-544'; MemberSids = @(); Error = $null },
+            @{ Name = 'TestUsers'; Sid = 'S-1-5-32-545'; MemberSids = @(); Error = $null },
+            @{ Name = 'TestRemote'; Sid = 'S-1-5-32-555'; MemberSids = @(); Error = $null },
+            @{ Name = 'TestCustom'; Sid = 'S-1-5-21-1000-2000-3000-1101'; MemberSids = @(); Error = $null }
+        )
+    }
+
+    Context 'adds and removes by SID, with the group name from $State.Groups' {
+        It 'adds first, then removes, one result per group' {
+            $tcCalls = New-Object System.Collections.ArrayList
+            Mock Add-CrLocalGroupMemberSid { [void]$tcCalls.Add('Add:' + $GroupName + ':' + $MemberSid); return @{ Success = $true; Win32Error = 0 } }
+            Mock Remove-CrLocalGroupMemberSid { [void]$tcCalls.Add('Remove:' + $GroupName + ':' + $MemberSid); return @{ Success = $true; Win32Error = 0 } }
+            $r = Invoke-CrGroupMembershipChange -State $tcState -MemberSid $tcMember `
+                -RemoveGroupSids @('S-1-5-32-555', 'S-1-5-21-1000-2000-3000-1101') -AddGroupSids @('S-1-5-32-545')
+            ($r -is [array]) | Should Be $true
+            $r.Count | Should Be 3
+            ($tcCalls -join ',') | Should Be ('Add:TestUsers:{0},Remove:TestRemote:{0},Remove:TestCustom:{0}' -f $tcMember)
+            $r[0]['GroupSid'] | Should Be 'S-1-5-32-545'
+            $r[0]['GroupName'] | Should Be 'TestUsers'
+            $r[0]['Action'] | Should Be 'Add'
+            $r[0]['Success'] | Should Be $true
+            $r[0]['Win32Error'] | Should Be 0
+            $r[1]['Action'] | Should Be 'Remove'
+            $r[1]['GroupName'] | Should Be 'TestRemote'
+            $r[2]['GroupName'] | Should Be 'TestCustom'
+            foreach ($x in $r) { foreach ($k in 'GroupSid', 'GroupName', 'Action', 'Success', 'Win32Error') { $x.ContainsKey($k) | Should Be $true } }
+        }
+    }
+
+    Context 'one failure does not stop the others' {
+        It 'reports the failing group and still changes the rest' {
+            Mock Add-CrLocalGroupMemberSid { return @{ Success = $true; Win32Error = 0 } }
+            Mock Remove-CrLocalGroupMemberSid {
+                if ($GroupName -eq 'TestRemote') { return @{ Success = $false; Win32Error = 5 } }
+                return @{ Success = $true; Win32Error = 0 }
+            }
+            $r = Invoke-CrGroupMembershipChange -State $tcState -MemberSid $tcMember -AddGroupSids @('S-1-5-32-544') `
+                -RemoveGroupSids @('S-1-5-32-555', 'S-1-5-32-545')
+            $r.Count | Should Be 3
+            $r[0]['Success'] | Should Be $true
+            $r[1]['Success'] | Should Be $false
+            $r[1]['Win32Error'] | Should Be 5
+            $r[1]['Message'] | Should Match 'TestRemote'
+            $r[2]['Success'] | Should Be $true
+            Assert-MockCalled Remove-CrLocalGroupMemberSid -Times 2 -Exactly
+        }
+    }
+
+    Context 'a wrapper that throws' {
+        It 'becomes a failed result and the next group still runs' {
+            Mock Add-CrLocalGroupMemberSid {
+                if ($GroupName -eq 'TestAdmins') { throw 'The native helpers are not ready.' }
+                return @{ Success = $true; Win32Error = 0 }
+            }
+            $r = Invoke-CrGroupMembershipChange -State $tcState -MemberSid $tcMember -AddGroupSids @('S-1-5-32-544', 'S-1-5-32-545')
+            $r.Count | Should Be 2
+            $r[0]['Success'] | Should Be $false
+            $r[0]['Message'] | Should Match 'not ready'
+            $r[1]['Success'] | Should Be $true
+        }
+    }
+
+    Context 'a group SID that is not in $State.Groups' {
+        It 'fails that group without calling the wrapper' {
+            Mock Add-CrLocalGroupMemberSid { return @{ Success = $true; Win32Error = 0 } }
+            $r = Invoke-CrGroupMembershipChange -State $tcState -MemberSid $tcMember -AddGroupSids @('S-1-5-21-1000-2000-3000-1199', 'S-1-5-32-545')
+            $r.Count | Should Be 2
+            $r[0]['Success'] | Should Be $false
+            ($null -eq $r[0]['GroupName']) | Should Be $true
+            $r[0]['Message'] | Should Match 'not found'
+            $r[1]['Success'] | Should Be $true
+            Assert-MockCalled Add-CrLocalGroupMemberSid -Times 1 -Exactly -ParameterFilter { $GroupName -eq 'TestUsers' }
+            Assert-MockCalled Add-CrLocalGroupMemberSid -Times 1 -Exactly
+        }
+    }
+
+    Context 'nothing to change' {
+        It 'returns an empty array and calls nothing' {
+            Mock Add-CrLocalGroupMemberSid { return @{ Success = $true; Win32Error = 0 } }
+            Mock Remove-CrLocalGroupMemberSid { return @{ Success = $true; Win32Error = 0 } }
+            $r = Invoke-CrGroupMembershipChange -State $tcState -MemberSid $tcMember -AddGroupSids $null -RemoveGroupSids @()
+            ($null -eq $r) | Should Be $false
+            ($r -is [array]) | Should Be $true
+            $r.Count | Should Be 0
+            Assert-MockCalled Add-CrLocalGroupMemberSid -Times 0 -Exactly
+            Assert-MockCalled Remove-CrLocalGroupMemberSid -Times 0 -Exactly
+        }
+    }
+
+    Context 'a single group SID as a scalar' {
+        It 'is handled like a one-element list' {
+            Mock Remove-CrLocalGroupMemberSid { return @{ Success = $true; Win32Error = 0 } }
+            $r = Invoke-CrGroupMembershipChange -State $tcState -MemberSid $tcMember -RemoveGroupSids 'S-1-5-32-544'
+            $r.Count | Should Be 1
+            $r[0]['GroupName'] | Should Be 'TestAdmins'
+            $r[0]['Action'] | Should Be 'Remove'
         }
     }
 }

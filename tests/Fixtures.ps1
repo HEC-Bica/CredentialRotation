@@ -6,14 +6,19 @@
 #   Helpers: Get-CrTestUser, Get-CrTestUserSid, Get-CrTestGroup, Add-CrTestUser, Remove-CrTestUser,
 #            Add-CrTestGroup, Add-CrTestGroupMember, Remove-CrTestGroupMember, Set-CrTestRight, Add-CrTestRight
 #
-# Profiles:
-#   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): built-in Administrator renamed 'LocalAdm'; BiCA Admin,
-#         BiCA Remote (Administrators + Remote Desktop Users), ApplicationUser (runs SQL Server, app services, tasks,
-#         COM+), WinAutoUser (no PUB-User), WinUser1-3 (WinUser3 disabled; WinUser1 in RDU + hw_fn_*; WinUser2 in
-#         Power Users), FTP users TEST_FTP + ftpClient in CardCenters + Users, myftpuser (not an FTP user), OtherAdmin;
-#         groups CardCenters, hw_fn_usbstor, hw_fn_cdrom, Offer Remote Assistance Helpers (BiCA Admin, BiCA Remote).
-#   IPT01 (IPT01-like, SQL Express): 'Administrator', BiCA Admin, BiCA Remote (Administrators + RDU), ApplicationUser
-#         (runs SQL Server), PUB-User and WinAutoUser, OtherAdmin; no CardCenters, no Offer Remote Assistance Helpers.
+# Profiles (v10 account model, PLAN D21-D25):
+#   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no SOP-Admin and no PUB-User (both to be created);
+#         built-in Administrator renamed 'LocalAdm' (disabled); BiCA Admin, BiCA Remote (Administrators + Remote Desktop
+#         Users), WinAutoUser (enabled, password-stored task \KioskTask) - all replaced; ApplicationUser (runs SQL
+#         Server, app services, tasks, COM+); SP Admin (enabled admin, password-stored task \SpMaintenance; retired);
+#         WinUser1-3 (WinUser3 disabled; WinUser1 in RDU + hw_fn_*; WinUser2 in Power Users), FTP users TEST_FTP +
+#         ftpClient in CardCenters + Users; myftpuser (enabled, not an FTP user) and OtherAdmin (enabled admin) are
+#         the two "other enabled accounts" (D23); groups CardCenters, hw_fn_usbstor, hw_fn_cdrom, Offer Remote
+#         Assistance Helpers (BiCA Admin, BiCA Remote).
+#   IPT01 (IPT01-like, SQL Express): built-in 'Administrator' enabled (replaced by ApplicationUser); SOP-Admin exists
+#         (Administrators only); BiCA Admin (runs the service AppHelper), BiCA Remote (Administrators + RDU),
+#         ApplicationUser (runs SQL Server), PUB-User and WinAutoUser; SYS Admin (enabled admin, runs the service
+#         LegacySync; retired); no other enabled accounts; no CardCenters, no Offer Remote Assistance Helpers.
 #   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword; deny rights as on the test sites.
 
 $CrFixturesDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -190,7 +195,7 @@ function New-CrTestState {
     # --- Users ---
     $users = New-Object System.Collections.ArrayList
     if ($isSm) { $adminName = 'LocalAdm' } else { $adminName = 'Administrator' }
-    [void]$users.Add((New-CrTestUser -Name $adminName -Rid 500 -MachineSid $machineSid -Disabled -PasswordNeverExpires -PasswordNotRequired))
+    [void]$users.Add((New-CrTestUser -Name $adminName -Rid 500 -MachineSid $machineSid -Disabled:$isSm -PasswordNeverExpires -PasswordNotRequired))
     [void]$users.Add((New-CrTestUser -Name 'Guest' -Rid 501 -MachineSid $machineSid -Disabled -PasswordNeverExpires -CannotChangePassword -PasswordNotRequired))
     [void]$users.Add((New-CrTestUser -Name 'BiCA Admin' -Rid 1001 -MachineSid $machineSid -PasswordNeverExpires -PasswordNotRequired))
     [void]$users.Add((New-CrTestUser -Name 'BiCA Remote' -Rid 1002 -MachineSid $machineSid -PasswordNeverExpires))
@@ -198,6 +203,7 @@ function New-CrTestState {
     [void]$users.Add((New-CrTestUser -Name 'WinAutoUser' -Rid 1004 -MachineSid $machineSid -PasswordNeverExpires))
     if (-not $isSm) {
         [void]$users.Add((New-CrTestUser -Name 'PUB-User' -Rid 1005 -MachineSid $machineSid -PasswordNeverExpires))
+        [void]$users.Add((New-CrTestUser -Name 'SOP-Admin' -Rid 1006 -MachineSid $machineSid -PasswordNeverExpires -CannotChangePassword))
     }
     if ($isSm) {
         [void]$users.Add((New-CrTestUser -Name 'WinUser1' -Rid 1010 -MachineSid $machineSid -PasswordNeverExpires))
@@ -207,16 +213,21 @@ function New-CrTestState {
         [void]$users.Add((New-CrTestUser -Name 'ftpClient' -Rid 1021 -MachineSid $machineSid))
         [void]$users.Add((New-CrTestUser -Name 'myftpuser' -Rid 1022 -MachineSid $machineSid))
     }
-    [void]$users.Add((New-CrTestUser -Name 'OtherAdmin' -Rid 1030 -MachineSid $machineSid -PasswordNeverExpires))
+    if ($isSm) {
+        [void]$users.Add((New-CrTestUser -Name 'OtherAdmin' -Rid 1030 -MachineSid $machineSid -PasswordNeverExpires))
+        [void]$users.Add((New-CrTestUser -Name 'SP Admin' -Rid 1031 -MachineSid $machineSid -PasswordNeverExpires))
+    } else {
+        [void]$users.Add((New-CrTestUser -Name 'SYS Admin' -Rid 1032 -MachineSid $machineSid -PasswordNeverExpires))
+    }
 
     $admin = & $s 500; $guest = & $s 501; $bicaAdmin = & $s 1001; $bicaRemote = & $s 1002; $appUser = & $s 1003
-    $winAuto = & $s 1004; $pubUser = & $s 1005; $otherAdmin = & $s 1030
+    $winAuto = & $s 1004; $pubUser = & $s 1005; $sopAdmin = & $s 1006; $otherAdmin = & $s 1030; $spAdmin = & $s 1031; $sysAdmin = & $s 1032
     $winUser1 = & $s 1010; $winUser2 = & $s 1011; $winUser3 = & $s 1012; $ftp1 = & $s 1020; $ftp2 = & $s 1021; $myftp = & $s 1022
 
     # --- Groups (members as read by NetLocalGroupGetMembers level 0, D5) ---
     $groups = New-Object System.Collections.ArrayList
     if ($isSm) {
-        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $otherAdmin); Error = $null })
+        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $otherAdmin, $spAdmin); Error = $null })
         [void]$groups.Add(@{ Name = 'Users'; Sid = 'S-1-5-32-545'; MemberSids = @('S-1-5-4', 'S-1-5-11', $winAuto, $winUser1, $winUser2, $winUser3, $ftp1, $ftp2, $myftp); Error = $null })
         [void]$groups.Add(@{ Name = 'Guests'; Sid = 'S-1-5-32-546'; MemberSids = @($guest); Error = $null })
         [void]$groups.Add(@{ Name = 'Power Users'; Sid = 'S-1-5-32-547'; MemberSids = @($winUser2); Error = $null })
@@ -227,7 +238,7 @@ function New-CrTestState {
         [void]$groups.Add(@{ Name = 'hw_fn_usbstor'; Sid = (& $s 1102); MemberSids = @($winUser1); Error = $null })
         [void]$groups.Add(@{ Name = 'hw_fn_cdrom'; Sid = (& $s 1103); MemberSids = @($winUser1); Error = $null })
     } else {
-        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $otherAdmin); Error = $null })
+        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $sopAdmin, $sysAdmin); Error = $null })
         [void]$groups.Add(@{ Name = 'Users'; Sid = 'S-1-5-32-545'; MemberSids = @('S-1-5-4', 'S-1-5-11', $winAuto, $pubUser); Error = $null })
         [void]$groups.Add(@{ Name = 'Guests'; Sid = 'S-1-5-32-546'; MemberSids = @($guest); Error = $null })
         [void]$groups.Add(@{ Name = 'Power Users'; Sid = 'S-1-5-32-547'; MemberSids = @(); Error = $null })
@@ -296,6 +307,9 @@ function New-CrTestState {
     } else {
         [void]$services.Add(@{ Name = 'MSSQLSERVER'; DisplayName = 'SQL Server (MSSQLSERVER)'; StartName = $appStart; StartNameSid = $appUser; StartMode = 'Auto'; State = 'Running'; PathExecutable = $sqlExe; DependentServices = @(); DependsOn = @() })
         [void]$services.Add(@{ Name = 'SQLSERVERAGENT'; DisplayName = 'SQL Server Agent (MSSQLSERVER)'; StartName = 'NT AUTHORITY\NetworkService'; StartNameSid = 'S-1-5-20'; StartMode = 'Disabled'; State = 'Stopped'; PathExecutable = 'C:\Program Files\Microsoft SQL Server\MSSQL10_50.MSSQLSERVER\MSSQL\Binn\SQLAGENT.EXE'; DependentServices = @(); DependsOn = @('MSSQLSERVER') })
+        # Dependents of a replaced account (moved to SOP-Admin, D24) and of a retired one (operator decision, O5)
+        [void]$services.Add(@{ Name = 'AppHelper'; DisplayName = 'App Helper'; StartName = '.\BiCA Admin'; StartNameSid = $bicaAdmin; StartMode = 'Auto'; State = 'Running'; PathExecutable = 'C:\App\Helper.exe'; DependentServices = @(); DependsOn = @() })
+        [void]$services.Add(@{ Name = 'LegacySync'; DisplayName = 'Legacy Sync'; StartName = '.\SYS Admin'; StartNameSid = $sysAdmin; StartMode = 'Manual'; State = 'Stopped'; PathExecutable = 'C:\App\Sync.exe'; DependentServices = @(); DependsOn = @() })
     }
 
     $tasks = @()
@@ -305,7 +319,10 @@ function New-CrTestState {
         $tasks = @(
             @{ Path = '\AppTask1'; UserId = $taskUser; UserSid = $appUser; LogonType = 1; Enabled = $true; Error = $null },
             @{ Path = '\AppTask2'; UserId = $taskUser; UserSid = $appUser; LogonType = 1; Enabled = $true; Error = $null },
-            @{ Path = '\AppServerTask'; UserId = $taskUser; UserSid = $appUser; LogonType = 6; Enabled = $true; Error = $null }
+            @{ Path = '\AppServerTask'; UserId = $taskUser; UserSid = $appUser; LogonType = 6; Enabled = $true; Error = $null },
+            # Dependents of a replaced account (moved to PUB-User, D24) and of a retired one (operator decision, O5)
+            @{ Path = '\KioskTask'; UserId = ('{0}\WinAutoUser' -f $ComputerName); UserSid = $winAuto; LogonType = 1; Enabled = $true; Error = $null },
+            @{ Path = '\SpMaintenance'; UserId = ('{0}\SP Admin' -f $ComputerName); UserSid = $spAdmin; LogonType = 1; Enabled = $true; Error = $null }
         )
         $comPlus = @(
             @{ Name = 'App Manager'; Id = '{00000000-0000-0000-0000-000000000001}'; Activation = 'Server'; Identity = 'ApplicationUser'; IdentitySid = $appUser; IsEnabled = $true; IsSystem = $false }

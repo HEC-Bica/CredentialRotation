@@ -1,5 +1,6 @@
-# AutoLogon.ps1 - Winlogon auto-logon read side and the D18 decision (docs/PLAN.md section 7.5).
-# Read-only: never reads the DefaultPassword value or the LSA secret, only whether the value exists.
+# AutoLogon.ps1 - Winlogon auto-logon read side, the D18 decision and the auto-logon actions (docs/PLAN.md section 7.5,
+# CONTRACTS "v10": PUB-User is the only auto-logon target; WinAutoUser is "any other account").
+# Never reads the DefaultPassword value or the LSA secret (only whether the value exists); the LSA secret is write-only.
 
 #region Registry access (internal, mocked in tests)
 
@@ -37,6 +38,44 @@ function Get-CrSysinternalsAutologonSids {
         if (Test-Path -LiteralPath $path) { [void]$list.Add($name) }
     }
     return , $list.ToArray()
+}
+
+# Write side (M2): the only registry writes of the auto-logon step, both on
+# HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon (64-bit view: the tool runs as a 64-bit process).
+# Both throw on failure. A password is never written to the registry (the LSA secret is used instead, D4).
+function Set-CrWinlogonValue {
+    param(
+        [string]$Name,
+        [string]$Value,
+        [ValidateSet('String', 'DWord')]
+        [string]$Kind
+    )
+    if (-not $Name) { throw 'Set-CrWinlogonValue: -Name is required.' }
+    if ($Name -ieq 'DefaultPassword') { throw 'Set-CrWinlogonValue: DefaultPassword is never written to the registry (D4).' }
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon', $true)
+    if ($null -eq $key) { throw 'The Winlogon key could not be opened for writing.' }
+    try {
+        if ($Kind -eq 'DWord') {
+            $key.SetValue($Name, [int]$Value, [Microsoft.Win32.RegistryValueKind]::DWord)
+        } else {
+            $key.SetValue($Name, [string]$Value, [Microsoft.Win32.RegistryValueKind]::String)
+        }
+    } finally {
+        $key.Close()
+    }
+}
+
+# Deletes a Winlogon value; a value that doesn't exist counts as success. Never reads the value.
+function Remove-CrWinlogonValue {
+    param([string]$Name)
+    if (-not $Name) { throw 'Remove-CrWinlogonValue: -Name is required.' }
+    $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon', $true)
+    if ($null -eq $key) { throw 'The Winlogon key could not be opened for writing.' }
+    try {
+        $key.DeleteValue($Name, $false)
+    } finally {
+        $key.Close()
+    }
 }
 
 #endregion
@@ -146,8 +185,11 @@ function Get-CrAutoLogonSelectionList {
 
 # PLAN section 7.5 usable-target rule: exists, enabled, not locked, interactive logon allowed (D16),
 # not an admin (unless this run removes it from Administrators before the auto-logon step).
+# A disabled managed account that is verified on its new password in this run counts as enabled: its slot enables it
+# in the grants step before the auto-logon step (CONTRACTS "v10", Accounts.ps1), like admin status is judged after
+# this run's removals.
 function Test-CrAutoLogonUsable {
-    param($State, $User, $RemovedAdminSids)
+    param($State, $User, $RemovedAdminSids, $VerifiedSids)
     $reasons = New-Object System.Collections.ArrayList
     $r = @{ Usable = $false; Reasons = $reasons; AdminPending = $false; AdminRemoved = $false }
     if (-not $User) {
@@ -155,7 +197,7 @@ function Test-CrAutoLogonUsable {
         return $r
     }
     $sid = [string]$User['Sid']
-    if ($User['Disabled']) { [void]$reasons.Add('is disabled') }
+    if ($User['Disabled'] -and ((ConvertTo-CrArray $VerifiedSids) -notcontains $sid)) { [void]$reasons.Add('is disabled') }
     if ($User['LockedOut']) { [void]$reasons.Add('is locked out') }
     $rights = Get-CrEffectiveLogonRights -UserSid $sid -State $State
     if (-not ($rights -is [hashtable] -and $rights['Interactive'])) {
@@ -168,6 +210,68 @@ function Test-CrAutoLogonUsable {
             $r['AdminPending'] = $true
             [void]$reasons.Add('is a member of Administrators and this run does not remove it (its slot did not complete)')
         }
+    }
+    $r['Usable'] = ($reasons.Count -eq 0)
+    return $r
+}
+
+# A selection-list account that doesn't exist in $State.Users but is created in this run (CONTRACTS "v10"):
+# its name is in -CreatedTargetNames, or the resolved entry holds a placeholder for it (ToCreate, or Create with an
+# account by that name). Returns @{ Name; Sid (filled in by the caller after creation, else $null); Created = $true }
+# or $null.
+function Get-CrAutoLogonCreatedTarget {
+    param($Entry, [string]$Name, $CreatedTargetNames)
+    if (-not $Name) { return $null }
+    $listed = ((ConvertTo-CrArray $CreatedTargetNames) -contains $Name)
+    $sid = $null
+    $planned = $false
+    foreach ($acc in (ConvertTo-CrArray $Entry['Accounts'])) {
+        if (-not ($acc -is [hashtable]) -or ([string]$acc['Name'] -ine $Name)) { continue }
+        if (($acc['ToCreate'] -eq $true) -or ($Entry['Create'] -eq $true)) { $planned = $true }
+        if ($acc['Sid']) { $sid = [string]$acc['Sid'] }
+    }
+    if (-not ($listed -or $planned)) { return $null }
+    return @{ Name = $Name; Sid = $sid; Created = $true }
+}
+
+# A target counts as verified when its SID (for a created account: once known) is in -VerifiedSids, or when the caller
+# lists its name in -CreatedTargetNames (Plan: planned for creation; Apply: created and verified).
+function Test-CrAutoLogonTargetVerified {
+    param($Target, $VerifiedSids, $CreatedTargetNames)
+    if (-not $Target) { return $false }
+    if ($Target['Sid'] -and ((ConvertTo-CrArray $VerifiedSids) -contains [string]$Target['Sid'])) { return $true }
+    if ($Target['Name'] -and ((ConvertTo-CrArray $CreatedTargetNames) -contains [string]$Target['Name'])) { return $true }
+    return $false
+}
+
+# The usable-target rule for an account created in this run: it is created enabled, unlocked, as a standard user and
+# put into Users (role User), so only the interactive logon right is evaluated, with a stand-in SID added to Users
+# in a copy of the state (the state itself is not changed).
+function Test-CrAutoLogonCreatedUsable {
+    param($State, [string]$Name)
+    $reasons = New-Object System.Collections.ArrayList
+    $r = @{ Usable = $false; Reasons = $reasons; AdminPending = $false; AdminRemoved = $false }
+    $standIn = 'CREATED:' + $Name
+    $copy = @{}
+    foreach ($k in @($State.Keys)) { $copy[$k] = $State[$k] }
+    $groups = New-Object System.Collections.ArrayList
+    foreach ($g in (ConvertTo-CrArray $State['Groups'])) {
+        if (($g -is [hashtable]) -and ([string]$g['Sid'] -eq 'S-1-5-32-545')) {
+            $g2 = @{}
+            foreach ($k in @($g.Keys)) { $g2[$k] = $g[$k] }
+            $members = New-Object System.Collections.ArrayList
+            foreach ($m in (ConvertTo-CrArray $g['MemberSids'])) { [void]$members.Add($m) }
+            [void]$members.Add($standIn)
+            $g2['MemberSids'] = $members.ToArray()
+            [void]$groups.Add($g2)
+        } else {
+            [void]$groups.Add($g)
+        }
+    }
+    $copy['Groups'] = $groups.ToArray()
+    $rights = Get-CrEffectiveLogonRights -UserSid $standIn -State $copy
+    if (-not ($rights -is [hashtable] -and $rights['Interactive'])) {
+        [void]$reasons.Add('would not be allowed interactive logon')
     }
     $r['Usable'] = ($reasons.Count -eq 0)
     return $r
@@ -258,22 +362,31 @@ function Get-CrAutoLogonState {
     return $state
 }
 
-# D18 decision, PLAN section 7.5. Read-only; the apply step (M2) acts on the result.
+# D18 decision, PLAN section 7.5 and CONTRACTS "v10" (AutoLogon.ps1). Read-only; the apply step acts on the result.
+# The selected / kept auto-logon account comes only from the AutoLogonUser list of the entry with the AutoLogon block
+# (the default config: PUB-User). Every other account - WinAutoUser included, it is disabled by D22 - is "any other
+# account": SM machines turn it off, other machines switch it to the selected user.
+# -CreatedTargetNames: names of selection-list accounts created in this run that the caller counts as verified on the
+#   new secret (Plan: planned for creation, like -VerifiedSids lists the accounts the plan would rotate; Apply: created
+#   and verified). Such an account is a usable target although it isn't in $State.Users yet; its TargetSid is the
+#   placeholder's Sid when the caller filled it in, else $null (TargetName is set, TargetCreated = $true).
 function Get-CrAutoLogonDecision {
     param(
         $State,
         $Resolved,
         $Config,
         [string[]]$VerifiedSids,
-        [string[]]$RemovedAdminSids
+        [string[]]$RemovedAdminSids,
+        [string[]]$CreatedTargetNames
     )
     $verified = ConvertTo-CrArray $VerifiedSids
     $removed = ConvertTo-CrArray $RemovedAdminSids
+    $createdNames = ConvertTo-CrArray $CreatedTargetNames
     $reasons = New-Object System.Collections.ArrayList
     $highImpact = New-Object System.Collections.ArrayList
     $options = New-Object System.Collections.ArrayList
     $d = @{
-        Action = 'NoChange'; CurrentSid = $null; CurrentName = $null; TargetSid = $null; TargetName = $null
+        Action = 'NoChange'; CurrentSid = $null; CurrentName = $null; TargetSid = $null; TargetName = $null; TargetCreated = $false
         Reasons = @(); OperatorOptions = @(); HighImpact = @()
     }
 
@@ -368,37 +481,54 @@ function Get-CrAutoLogonDecision {
             [void]$ambiguous.Add(('The auto-logon account "{0}" cannot be resolved to a local account.' -f $defUser))
         }
 
-        # Managed auto-logon accounts and the selected user (first usable of the selection list)
+        # Managed auto-logon accounts = the selection list only (PUB-User); the selected user is its first usable
+        # account, existing or created in this run.
         $selection = Get-CrAutoLogonSelectionList -Entry $entry -Config $Config
         $managedSids = New-Object System.Collections.ArrayList
-        foreach ($acc in (ConvertTo-CrArray $entry['Accounts'])) {
-            if ($acc -is [hashtable] -and $acc['Sid']) { [void]$managedSids.Add([string]$acc['Sid']) }
-        }
+        $selectionNames = New-Object System.Collections.ArrayList
         # Only used on non-SM machines (SM machines keep or turn off, no selection).
         $selected = $null
         $selectionNotes = New-Object System.Collections.ArrayList
         $selectionAmbiguous = New-Object System.Collections.ArrayList
         foreach ($item in $selection) {
             if (-not ($item -is [hashtable]) -or -not $item['Name']) { continue }
-            $u = Find-CrAutoLogonLocalUser -State $State -Name ([string]$item['Name'])
+            $itemName = [string]$item['Name']
+            [void]$selectionNames.Add($itemName)
+            $u = Find-CrAutoLogonLocalUser -State $State -Name $itemName
             if ($u -and ($managedSids -notcontains [string]$u['Sid'])) { [void]$managedSids.Add([string]$u['Sid']) }
             if ($selected -or $isSm) { continue }
-            $usable = Test-CrAutoLogonUsable -State $State -User $u -RemovedAdminSids $removed
-            if ($u -and $item['RequireEnabled'] -and $u['Disabled']) { $usable['Usable'] = $false }
+            if (-not $u) {
+                $createdTarget = Get-CrAutoLogonCreatedTarget -Entry $entry -Name $itemName -CreatedTargetNames $createdNames
+                if ($createdTarget) {
+                    $createdUsable = Test-CrAutoLogonCreatedUsable -State $State -Name $itemName
+                    if ($createdUsable['Usable']) {
+                        $selected = $createdTarget
+                        [void]$selectionNotes.Add(('{0} does not exist yet; it is created in this run.' -f $itemName))
+                    } else {
+                        [void]$selectionNotes.Add(('{0} (created in this run) is not a usable auto-logon target: {1}.' -f $itemName, (@($createdUsable['Reasons']) -join ', ')))
+                    }
+                    continue
+                }
+            }
+            $usable = Test-CrAutoLogonUsable -State $State -User $u -RemovedAdminSids $removed -VerifiedSids $verified
             if ($usable['Usable']) {
                 $selected = $u
             } else {
-                [void]$selectionNotes.Add(('{0} is not a usable auto-logon target: {1}.' -f $item['Name'], (@($usable['Reasons']) -join ', ')))
+                [void]$selectionNotes.Add(('{0} is not a usable auto-logon target: {1}.' -f $itemName, (@($usable['Reasons']) -join ', ')))
                 # A preferred account that is only unusable because it is still an admin (D13: ask, don't skip it)
                 if ($usable['AdminPending'] -and @($usable['Reasons']).Count -eq 1) {
                     [void]$selectionAmbiguous.Add(('{0} is itself an admin and its slot did not complete in this run.' -f $u['Name']))
                 }
             }
         }
+        $targetText = ($selectionNames.ToArray([string])) -join ' / '
+        if (-not $targetText) { $targetText = 'none configured' }
 
         if ($current) {
             $isManaged = ($managedSids -contains [string]$current['Sid'])
-            $currentUsable = Test-CrAutoLogonUsable -State $State -User $current -RemovedAdminSids $removed
+            $currentVerifiedList = @()
+            if ($isManaged) { $currentVerifiedList = $verified }
+            $currentUsable = Test-CrAutoLogonUsable -State $State -User $current -RemovedAdminSids $removed -VerifiedSids $currentVerifiedList
             if ($isManaged -and $currentUsable['AdminPending']) {
                 $msg = ('{0} is itself an admin and its slot did not complete in this run.' -f $current['Name'])
                 if ($ambiguous -notcontains $msg) { [void]$ambiguous.Add($msg) }
@@ -422,7 +552,7 @@ function Get-CrAutoLogonDecision {
                     }
                 } else {
                     $intended = 'TurnOff'
-                    [void]$reasons.Add('SM machine: auto-logon as an admin or any other account is turned off.')
+                    [void]$reasons.Add(('SM machine: auto-logon as any account other than {0} is turned off.' -f $targetText))
                 }
             } else {
                 foreach ($n in $selectionNotes) { [void]$reasons.Add($n) }
@@ -433,8 +563,8 @@ function Get-CrAutoLogonDecision {
                     if ($isManaged -and -not $currentUsable['Usable']) {
                         [void]$ambiguous.Add(('The standardized auto-logon account {0} is not usable: {1}.' -f $current['Name'], (@($currentUsable['Reasons']) -join ', ')))
                     }
-                    [void]$ambiguous.Add('No usable auto-logon target (PUB-User / WinAutoUser) exists for a switch.')
-                } elseif ([string]$selected['Sid'] -eq [string]$current['Sid']) {
+                    [void]$ambiguous.Add(('No usable auto-logon target ({0}) exists for a switch.' -f $targetText))
+                } elseif ($selected['Sid'] -and ([string]$selected['Sid'] -eq [string]$current['Sid'])) {
                     $target = $selected
                     $intended = 'Standardize'
                     [void]$reasons.Add(('{0} is the selected auto-logon user; it is standardized.' -f $selected['Name']))
@@ -448,9 +578,11 @@ function Get-CrAutoLogonDecision {
     }
 
     if ($target) {
-        $d['TargetSid'] = [string]$target['Sid']
+        if ($target['Sid']) { $d['TargetSid'] = [string]$target['Sid'] }
         $d['TargetName'] = [string]$target['Name']
+        $d['TargetCreated'] = ($target['Created'] -eq $true)
     }
+    $targetVerified = Test-CrAutoLogonTargetVerified -Target $target -VerifiedSids $verified -CreatedTargetNames $createdNames
     $currentVerified = [bool]($d['CurrentSid'] -and ($verified -contains $d['CurrentSid']))
 
     if ($ambiguous.Count -gt 0) {
@@ -461,14 +593,14 @@ function Get-CrAutoLogonDecision {
     } elseif ($intended -eq 'TurnOff') {
         $d['Action'] = 'TurnOff'
     } elseif ($intended -eq 'Standardize') {
-        if ($verified -contains $d['TargetSid']) {
+        if ($targetVerified) {
             $d['Action'] = 'Standardize'
         } else {
             $d['Action'] = 'NoChange'
             [void]$reasons.Add(('{0} is not changed in this run: the stored password is still valid, so standardize changes nothing.' -f $d['TargetName']))
         }
     } elseif ($intended -eq 'Switch') {
-        if ($verified -contains $d['TargetSid']) {
+        if ($targetVerified) {
             $d['Action'] = 'Switch'
         } else {
             $d['Action'] = 'Ambiguous'
@@ -517,6 +649,152 @@ function Test-CrAutoLogonStandardized {
     if ($al['DefaultPasswordPresent']) { return $false }
     if ($al['AutoLogonCountPresent']) { return $false }
     return $true
+}
+
+#endregion
+
+#region Actions (M2, PLAN section 7.5 "Actions")
+
+# Internal: the ordered steps of an action. Each step: @{ Step; Op ('SetLsa'|'RemoveLsa'|'SetValue'|'RemoveValue'); Name; Value }.
+function Get-CrAutoLogonActionSteps {
+    param([string]$Action, [string]$TargetName, [string]$ComputerName)
+    $s = New-Object System.Collections.ArrayList
+    if ($Action -eq 'TurnOff') {
+        # 1. off first, so a crash later leaves auto-logon off; 2. every stored password and the count go.
+        # DefaultUserName stays (it is only the last-user display).
+        [void]$s.Add(@{ Step = 'AutoAdminLogonOff'; Op = 'SetValue'; Name = 'AutoAdminLogon'; Value = '0' })
+        [void]$s.Add(@{ Step = 'RemovePlainDefaultPassword'; Op = 'RemoveValue'; Name = 'DefaultPassword' })
+        [void]$s.Add(@{ Step = 'RemoveLsaSecret'; Op = 'RemoveLsa'; Name = 'DefaultPassword' })
+        [void]$s.Add(@{ Step = 'RemoveAutoLogonCount'; Op = 'RemoveValue'; Name = 'AutoLogonCount' })
+        return , $s.ToArray()
+    }
+    # Standardize / Switch: 1. LSA secret; 2. plain-text password and count deleted; 3. user and domain;
+    # 4. AutoAdminLogon = REG_SZ "1" last, so auto-logon is only (re)enabled once everything else is in place.
+    [void]$s.Add(@{ Step = 'StoreLsaSecret'; Op = 'SetLsa'; Name = 'DefaultPassword' })
+    [void]$s.Add(@{ Step = 'RemovePlainDefaultPassword'; Op = 'RemoveValue'; Name = 'DefaultPassword' })
+    [void]$s.Add(@{ Step = 'RemoveAutoLogonCount'; Op = 'RemoveValue'; Name = 'AutoLogonCount' })
+    [void]$s.Add(@{ Step = 'DefaultUserName'; Op = 'SetValue'; Name = 'DefaultUserName'; Value = $TargetName })
+    [void]$s.Add(@{ Step = 'DefaultDomainName'; Op = 'SetValue'; Name = 'DefaultDomainName'; Value = $ComputerName })
+    if ($Action -eq 'Switch') {
+        # PLAN spike item 11 is open (update or delete AutoLogonSID on a switch). Deleting it is the interim choice:
+        # a stale SID of the previous account can't then contradict the new DefaultUserName. Standardize leaves it.
+        [void]$s.Add(@{ Step = 'RemoveAutoLogonSID'; Op = 'RemoveValue'; Name = 'AutoLogonSID' })
+    }
+    [void]$s.Add(@{ Step = 'AutoAdminLogonOn'; Op = 'SetValue'; Name = 'AutoAdminLogon'; Value = '1' })
+    return , $s.ToArray()
+}
+
+# Internal: runs one step; returns $null on success or the error text. Never throws.
+function Invoke-CrAutoLogonStep {
+    param($Step, [System.Security.SecureString]$Secret)
+    try {
+        switch ($Step['Op']) {
+            'SetLsa' {
+                $r = Set-CrLsaSecret -Name $Step['Name'] -Secret $Secret
+                if ($r -and $r['Success']) { return $null }
+                $code = 0
+                if ($r) { $code = [int]$r['Win32Error'] }
+                return ('The LSA secret {0} could not be stored (error {1}).' -f $Step['Name'], $code)
+            }
+            'RemoveLsa' {
+                $r = Remove-CrLsaSecret -Name $Step['Name']
+                if ($r -and $r['Success']) { return $null }
+                $code = 0
+                if ($r) { $code = [int]$r['Win32Error'] }
+                # A secret that doesn't exist (STATUS_OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND) counts as deleted.
+                if ($code -eq 2) { return $null }
+                return ('The LSA secret {0} could not be deleted (error {1}).' -f $Step['Name'], $code)
+            }
+            'SetValue' {
+                $null = Set-CrWinlogonValue -Name $Step['Name'] -Value $Step['Value'] -Kind 'String'
+                return $null
+            }
+            'RemoveValue' {
+                $null = Remove-CrWinlogonValue -Name $Step['Name']
+                return $null
+            }
+        }
+        return ('Unknown auto-logon step operation {0}.' -f $Step['Op'])
+    } catch {
+        return ('{0}: {1}' -f $Step['Step'], $_.Exception.Message)
+    }
+}
+
+# Carries out the D18 decision (PLAN section 7.5 "Actions", crash-safe order):
+#   Standardize / Switch: LSA secret DefaultPassword -> delete plain-text DefaultPassword and AutoLogonCount ->
+#     DefaultUserName = target, DefaultDomainName = computer name (Switch also deletes AutoLogonSID, spike 11 open) ->
+#     AutoAdminLogon = REG_SZ "1"
+#   TurnOff: AutoAdminLogon = REG_SZ "0" -> delete plain-text DefaultPassword, LSA secret DefaultPassword, AutoLogonCount
+#   LeaveOff / NoChange / Ambiguous / LeaveUnchanged: no write
+#   StandardizeCurrent (operator option): Standardize with the decision's current account as the target
+# -Secret is the target account's new secret (SecureString, only passed to Set-CrLsaSecret); $null for TurnOff.
+# Stops at the first failing step. Returns @{ Success; Action; Written; Steps = @(<done>); FailedStep; Pending = @(); Error }.
+function Invoke-CrAutoLogonAction {
+    param($Decision, $State, [System.Security.SecureString]$Secret)
+    $result = @{ Success = $false; Action = $null; Written = $false; Steps = @(); FailedStep = $null; Pending = @(); Error = $null }
+    if (-not ($Decision -is [hashtable])) {
+        $result['Error'] = 'No auto-logon decision.'
+        return $result
+    }
+    $action = [string]$Decision['Action']
+    $result['Action'] = $action
+    if (@('LeaveOff', 'NoChange', 'Ambiguous', 'LeaveUnchanged') -contains $action) {
+        $result['Success'] = $true
+        return $result
+    }
+
+    $stepAction = $action
+    $targetSid = [string]$Decision['TargetSid']
+    $targetName = [string]$Decision['TargetName']
+    if ($action -eq 'StandardizeCurrent') {
+        $stepAction = 'Standardize'
+        $targetSid = [string]$Decision['CurrentSid']
+        $targetName = [string]$Decision['CurrentName']
+    }
+    if (@('Standardize', 'Switch', 'TurnOff') -notcontains $stepAction) {
+        $result['Error'] = ('Unknown auto-logon action "{0}"; nothing was written.' -f $action)
+        return $result
+    }
+
+    if ($stepAction -ne 'TurnOff') {
+        if ($null -eq $Secret) {
+            $result['Error'] = ('{0} needs the new secret of the target account; nothing was written.' -f $action)
+            return $result
+        }
+        # The name as it is now (the SID is authoritative; the decision's name is the fallback).
+        $user = Find-CrAutoLogonUserBySid -State $State -Sid $targetSid
+        if ($user -and $user['Name']) { $targetName = [string]$user['Name'] }
+        if (-not $targetName) {
+            $result['Error'] = ('{0}: the target account is unknown; nothing was written.' -f $action)
+            return $result
+        }
+    }
+    $computerName = Get-CrAutoLogonComputerName -State $State
+
+    $done = New-Object System.Collections.ArrayList
+    $pending = New-Object System.Collections.ArrayList
+    $steps = Get-CrAutoLogonActionSteps -Action $stepAction -TargetName $targetName -ComputerName $computerName
+    $failed = $null
+    foreach ($step in $steps) {
+        if ($failed) {
+            [void]$pending.Add($step['Step'])
+            continue
+        }
+        $err = Invoke-CrAutoLogonStep -Step $step -Secret $Secret
+        if ($err) {
+            $failed = $step['Step']
+            $result['Error'] = $err
+            [void]$pending.Add($step['Step'])
+        } else {
+            [void]$done.Add($step['Step'])
+        }
+    }
+    $result['Steps'] = $done.ToArray()
+    $result['Pending'] = $pending.ToArray()
+    $result['FailedStep'] = $failed
+    $result['Written'] = ($done.Count -gt 0)
+    $result['Success'] = (-not $failed)
+    return $result
 }
 
 #endregion
