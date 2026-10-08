@@ -567,6 +567,11 @@ function Get-CrAutoLogonActionSteps {
     }
     # Standardize / Switch: 1. LSA secret; 2. plain-text password and count deleted; 3. user and domain;
     # 4. AutoAdminLogon = REG_SZ "1" last, so auto-logon is only (re)enabled once everything else is in place.
+    # Switch (v10.4): 0. off first, so a crash during the switch leaves auto-logon off instead of on as the previous
+    # account with a password that doesn't match it.
+    if ($Action -eq 'Switch') {
+        [void]$s.Add(@{ Step = 'AutoAdminLogonOff'; Op = 'SetValue'; Name = 'AutoAdminLogon'; Value = '0' })
+    }
     [void]$s.Add(@{ Step = 'StoreLsaSecret'; Op = 'SetLsa'; Name = 'DefaultPassword' })
     [void]$s.Add(@{ Step = 'RemovePlainDefaultPassword'; Op = 'RemoveValue'; Name = 'DefaultPassword' })
     [void]$s.Add(@{ Step = 'RemoveAutoLogonCount'; Op = 'RemoveValue'; Name = 'AutoLogonCount' })
@@ -618,6 +623,7 @@ function Invoke-CrAutoLogonStep {
 }
 
 # Carries out the D18 decision (PLAN section 7.5 "Actions", crash-safe order):
+#   Switch first sets AutoAdminLogon = REG_SZ "0" (v10.4), then the Standardize steps.
 #   Standardize / Switch: LSA secret DefaultPassword -> delete plain-text DefaultPassword and AutoLogonCount ->
 #     DefaultUserName = target, DefaultDomainName = computer name (Switch also deletes AutoLogonSID, spike 11 open) ->
 #     AutoAdminLogon = REG_SZ "1"

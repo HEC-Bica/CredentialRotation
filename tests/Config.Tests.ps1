@@ -124,6 +124,54 @@ Describe 'Import-CrConfig' {
     }
 }
 
+Describe 'Import-CrConfig: copy in a culture subfolder (PLAN 5, 9)' {
+    # Import-LocalizedData -UICulture en-US would load en-US\<file> or en\<file> instead of the file whose hash is shown.
+    # Every case gets its own folder under TestDrive.
+    function New-TestConfigFolder {
+        param([string]$Name, [string[]]$CopyCultures = @(), [string]$CopyName = 'Site.psd1')
+        $dir = Join-Path $TestDrive $Name
+        [void](New-Item -ItemType Directory -Path $dir -Force)
+        $file = Join-Path $dir 'Site.psd1'
+        Set-Content -LiteralPath $file -Value "@{ SchemaVersion = 1; OtherEnabledAccounts = 'Ask' }" -Encoding UTF8
+        foreach ($culture in $CopyCultures) {
+            $sub = Join-Path $dir $culture
+            [void](New-Item -ItemType Directory -Path $sub -Force)
+            Set-Content -LiteralPath (Join-Path $sub $CopyName) -Value "@{ SchemaVersion = 2; OtherEnabledAccounts = 'Ask' }" -Encoding UTF8
+        }
+        return $file
+    }
+
+    It 'loads a valid config without a culture subfolder' {
+        $file = New-TestConfigFolder -Name 'Plain'
+        $c = Import-CrConfig -Path $file
+        ($c -is [hashtable]) | Should Be $true
+        $c.SchemaVersion | Should Be 1
+    }
+
+    It 'throws when a copy exists in en-US' {
+        $file = New-TestConfigFolder -Name 'EnUs' -CopyCultures @('en-US')
+        { Import-CrConfig -Path $file } | Should Throw 'culture subfolder'
+    }
+
+    It 'throws when a copy exists in en' {
+        $file = New-TestConfigFolder -Name 'En' -CopyCultures @('en')
+        { Import-CrConfig -Path $file } | Should Throw 'culture subfolder'
+    }
+
+    It 'names the copy in the message' {
+        $file = New-TestConfigFolder -Name 'Named' -CopyCultures @('en-US')
+        $message = $null
+        try { [void](Import-CrConfig -Path $file) } catch { $message = $_.Exception.Message }
+        $message | Should Match ([regex]::Escape((Join-Path 'en-US' 'Site.psd1')))
+    }
+
+    It 'loads the config when the culture subfolders hold only other files' {
+        $file = New-TestConfigFolder -Name 'OtherFile' -CopyCultures @('en-US', 'en') -CopyName 'Other.psd1'
+        $c = Import-CrConfig -Path $file
+        $c.SchemaVersion | Should Be 1
+    }
+}
+
 Describe 'Get-CrRole' {
     $c = New-CrTestConfig
 

@@ -95,7 +95,25 @@ function Get-CrNewSecretProblems {
     $site = Test-CrSiteRules -Secret $NewSecret -Config $Config -Names ([string[]]$names.ToArray([string]))
     foreach ($r in (ConvertTo-CrArray $site['Reasons'])) { [void]$problems.Add([string]$r) }
     foreach ($a in $Accounts) {
-        $local = Test-CrLocalPasswordPolicy -UserName ([string]$a['Name']) -Secret $NewSecret
+        # PLAN 6 step 6: only a policy verdict rejects the password. A failed call is a warning: Windows still checks
+        # the policy when the password is set.
+        $local = $null
+        $callError = $null
+        try {
+            $local = Test-CrLocalPasswordPolicy -UserName ([string]$a['Name']) -Secret $NewSecret
+            if (-not ($local -is [hashtable]) -or $null -eq $local['Status']) {
+                $code = 0
+                if ($local -is [hashtable]) { $code = [int]$local['Win32Error'] }
+                $callError = 'error {0}' -f $code
+            }
+        } catch {
+            $callError = $_.Exception.Message
+        }
+        if ($callError) {
+            Write-Host ('Warning: the local password policy could not be pre-checked for {0} ({1}); Windows checks it when the password is set.' -f $a['Name'], $callError)
+            Write-CrLog ('Local policy pre-check failed for {0}: {1}' -f $a['Name'], $callError) 'Warning'
+            continue
+        }
         if ($local['Ok'] -ne $true) {
             [void]$problems.Add(('rejected by the local password policy for {0} (status {1})' -f $a['Name'], $local['Status']))
         }
@@ -395,13 +413,14 @@ function Get-CrProbeLockoutThreshold {
     return -1
 }
 
-# D12: attempt only without lockout (0) or with at least two attempts left below the threshold.
-# An unknown threshold is treated as 3 (conservative: the lowest plausible setting that leaves room for one failure).
+# D12 (strict rule, confirmed 2026-10-08): attempt only without lockout (0) or when two more failures still stay
+# below the threshold, i.e. counter + 2 < threshold (threshold 4: only at counter 0 or 1).
+# An unknown threshold is treated as 3 (conservative: the lowest plausible setting).
 function Test-CrProbeBudget {
     param([int]$Threshold, [int]$BadPasswordCount)
     if ($Threshold -eq 0) { return $true }
     if ($Threshold -lt 0) { $Threshold = 3 }
-    return (($Threshold - $BadPasswordCount) -ge 2)
+    return (($BadPasswordCount + 2) -lt $Threshold)
 }
 
 function Write-CrProbeLog {

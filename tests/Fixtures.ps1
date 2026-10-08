@@ -309,7 +309,7 @@ function New-CrTestState {
     } else {
         [void]$services.Add(@{ Name = 'MSSQLSERVER'; DisplayName = 'SQL Server (MSSQLSERVER)'; StartName = $appStart; StartNameSid = $appUser; StartMode = 'Auto'; State = 'Running'; PathExecutable = $sqlExe; DependentServices = @(); DependsOn = @() })
         [void]$services.Add(@{ Name = 'SQLSERVERAGENT'; DisplayName = 'SQL Server Agent (MSSQLSERVER)'; StartName = 'NT AUTHORITY\NetworkService'; StartNameSid = 'S-1-5-20'; StartMode = 'Disabled'; State = 'Stopped'; PathExecutable = 'C:\Program Files\Microsoft SQL Server\MSSQL10_50.MSSQLSERVER\MSSQL\Binn\SQLAGENT.EXE'; DependentServices = @(); DependsOn = @('MSSQLSERVER') })
-        # Dependents of a managed account (updated in place) and of a retired one (operator decision, O5)
+        # Dependents of a managed account (updated in place) and of a retired one (moved to ApplicationUser, D24, v10.4)
         [void]$services.Add(@{ Name = 'AppHelper'; DisplayName = 'App Helper'; StartName = '.\BiCA Admin'; StartNameSid = $bicaAdmin; StartMode = 'Auto'; State = 'Running'; PathExecutable = 'C:\App\Helper.exe'; DependentServices = @(); DependsOn = @() })
         [void]$services.Add(@{ Name = 'LegacySync'; DisplayName = 'Legacy Sync'; StartName = '.\SYS Admin'; StartNameSid = $sysAdmin; StartMode = 'Manual'; State = 'Stopped'; PathExecutable = 'C:\App\Sync.exe'; DependentServices = @(); DependsOn = @() })
     }
@@ -322,7 +322,8 @@ function New-CrTestState {
             @{ Path = '\AppTask1'; UserId = $taskUser; UserSid = $appUser; LogonType = 1; Enabled = $true; Error = $null },
             @{ Path = '\AppTask2'; UserId = $taskUser; UserSid = $appUser; LogonType = 1; Enabled = $true; Error = $null },
             @{ Path = '\AppServerTask'; UserId = $taskUser; UserSid = $appUser; LogonType = 6; Enabled = $true; Error = $null },
-            # Dependents of a managed auto-logon account (updated in place) and of a retired one (operator decision, O5)
+            # Dependents of a managed auto-logon account (updated in place) and of a retired one (moved to ApplicationUser,
+            # D24, v10.4)
             @{ Path = '\KioskTask'; UserId = ('{0}\WinAutoUser' -f $ComputerName); UserSid = $winAuto; LogonType = 1; Enabled = $true; Error = $null },
             @{ Path = '\SpMaintenance'; UserId = ('{0}\SP Admin' -f $ComputerName); UserSid = $spAdmin; LogonType = 1; Enabled = $true; Error = $null }
         )

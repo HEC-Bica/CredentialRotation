@@ -711,7 +711,7 @@ Describe 'Get-CrAutoLogonDecision on the machine fixtures (PLAN 7.5 test sites)'
             $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
             $d['TargetName'] | Should Be 'WinAutoUser'
         }
-        It 'switches to WinAutoUser when PUB-User does not exist (as on test site 102575)' {
+        It 'switches to WinAutoUser when PUB-User does not exist (a site where PUB-User is absent)' {
             $s = New-CrTestState -Profile IPT01 -OmitUsers 'PUB-User'
             $d = Invoke-TestFixtureDecision $s
             $d['Action'] | Should Be 'Switch'
@@ -936,14 +936,17 @@ Describe 'Invoke-CrAutoLogonAction' {
     }
 
     Context 'Switch' {
-        It 'also deletes AutoLogonSID (spike 11 open) before AutoAdminLogon "1"' {
+        It 'turns auto-logon off first (v10.4) and deletes AutoLogonSID (spike 11 open) before AutoAdminLogon "1"' {
             $tcCalls = New-Object System.Collections.ArrayList
             $d = New-TestActionDecision 'Switch' $SidPub 'PUB-User' $SidBica 'BiCA Admin'
             $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
             $r['Success'] | Should Be $true
-            ($tcCalls -join '|') | Should Be ('LsaSet:DefaultPassword|Remove:DefaultPassword|Remove:AutoLogonCount|' +
+            ($tcCalls -join '|') | Should Be ('Set:AutoAdminLogon=0:String|LsaSet:DefaultPassword|Remove:DefaultPassword|Remove:AutoLogonCount|' +
                 'Set:DefaultUserName=PUB-User:String|Set:DefaultDomainName=IPT01-SITEA:String|Remove:AutoLogonSID|Set:AutoAdminLogon=1:String')
-            @($r['Steps'])[5] | Should Be 'RemoveAutoLogonSID'
+            ($r['Steps'] -join ',') | Should Be ('AutoAdminLogonOff,StoreLsaSecret,RemovePlainDefaultPassword,RemoveAutoLogonCount,' +
+                'DefaultUserName,DefaultDomainName,RemoveAutoLogonSID,AutoAdminLogonOn')
+            @($r['Steps'])[0] | Should Be 'AutoAdminLogonOff'
+            @($r['Steps'])[6] | Should Be 'RemoveAutoLogonSID'
         }
     }
 
@@ -964,6 +967,7 @@ Describe 'Invoke-CrAutoLogonAction' {
             $r['Success'] | Should Be $true
             ($tcCalls -contains 'Set:DefaultUserName=WinAutoUser:String') | Should Be $true
             ($tcCalls -contains 'Remove:AutoLogonSID') | Should Be $true
+            @($tcCalls)[0] | Should Be 'Set:AutoAdminLogon=0:String'
             @($tcCalls)[$tcCalls.Count - 1] | Should Be 'Set:AutoAdminLogon=1:String'
         }
     }
@@ -1053,8 +1057,27 @@ Describe 'Invoke-CrAutoLogonAction' {
         }
     }
 
-    Context 'the LSA secret cannot be stored' {
+    Context 'the LSA secret cannot be stored (Standardize)' {
         It 'writes nothing else' {
+            Mock Set-CrLsaSecret {
+                [void]$tcCalls.Add('LsaSet:' + $Name)
+                return @{ Success = $false; Win32Error = 5 }
+            }
+            $tcCalls = New-Object System.Collections.ArrayList
+            $d = New-TestActionDecision 'Standardize' $SidPub 'PUB-User' $SidPub 'PUB-User'
+            $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
+            $r['Success'] | Should Be $false
+            $r['Written'] | Should Be $false
+            $r['FailedStep'] | Should Be 'StoreLsaSecret'
+            $r['Error'] | Should Match 'error 5'
+            @($r['Steps']).Count | Should Be 0
+            @($r['Pending']).Count | Should Be 6
+            ($tcCalls -join '|') | Should Be 'LsaSet:DefaultPassword'
+        }
+    }
+
+    Context 'the LSA secret cannot be stored (Switch)' {
+        It 'leaves auto-logon off and writes nothing else (v10.4: off first)' {
             Mock Set-CrLsaSecret {
                 [void]$tcCalls.Add('LsaSet:' + $Name)
                 return @{ Success = $false; Win32Error = 5 }
@@ -1063,12 +1086,52 @@ Describe 'Invoke-CrAutoLogonAction' {
             $d = New-TestActionDecision 'Switch' $SidPub 'PUB-User' $SidBica 'BiCA Admin'
             $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
             $r['Success'] | Should Be $false
-            $r['Written'] | Should Be $false
+            $r['Written'] | Should Be $true
             $r['FailedStep'] | Should Be 'StoreLsaSecret'
             $r['Error'] | Should Match 'error 5'
-            @($r['Steps']).Count | Should Be 0
+            ($r['Steps'] -join ',') | Should Be 'AutoAdminLogonOff'
             @($r['Pending']).Count | Should Be 7
-            ($tcCalls -join '|') | Should Be 'LsaSet:DefaultPassword'
+            ($r['Pending'] -join ',') | Should Be 'StoreLsaSecret,RemovePlainDefaultPassword,RemoveAutoLogonCount,DefaultUserName,DefaultDomainName,RemoveAutoLogonSID,AutoAdminLogonOn'
+            ($tcCalls -join '|') | Should Be 'Set:AutoAdminLogon=0:String|LsaSet:DefaultPassword'
+        }
+    }
+
+    Context 'Switch fails mid-way' {
+        It 'stops with auto-logon off: AutoAdminLogon "1" is never written' {
+            Mock Remove-CrWinlogonValue {
+                [void]$tcCalls.Add('Remove:' + $Name)
+                if ($Name -eq 'AutoLogonCount') { throw 'Access is denied' }
+            }
+            $tcCalls = New-Object System.Collections.ArrayList
+            $d = New-TestActionDecision 'Switch' $SidPub 'PUB-User' $SidBica 'BiCA Admin'
+            $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
+            $r['Success'] | Should Be $false
+            $r['Written'] | Should Be $true
+            $r['FailedStep'] | Should Be 'RemoveAutoLogonCount'
+            ($r['Steps'] -join ',') | Should Be 'AutoAdminLogonOff,StoreLsaSecret,RemovePlainDefaultPassword'
+            ($r['Pending'] -join ',') | Should Be 'RemoveAutoLogonCount,DefaultUserName,DefaultDomainName,RemoveAutoLogonSID,AutoAdminLogonOn'
+            ($tcCalls -join '|') | Should Be 'Set:AutoAdminLogon=0:String|LsaSet:DefaultPassword|Remove:DefaultPassword|Remove:AutoLogonCount'
+            ($tcCalls -contains 'Set:AutoAdminLogon=1:String') | Should Be $false
+        }
+    }
+
+    Context 'Switch fails at the first step' {
+        It 'writes nothing else when auto-logon cannot be turned off' {
+            Mock Set-CrWinlogonValue {
+                [void]$tcCalls.Add(('Set:{0}={1}:{2}' -f $Name, $Value, $Kind))
+                throw 'Access is denied'
+            }
+            $tcCalls = New-Object System.Collections.ArrayList
+            $d = New-TestActionDecision 'Switch' $SidPub 'PUB-User' $SidBica 'BiCA Admin'
+            $r = Invoke-CrAutoLogonAction -Decision $d -State $tcState -Secret $tcSecret
+            $r['Success'] | Should Be $false
+            $r['Written'] | Should Be $false
+            $r['FailedStep'] | Should Be 'AutoAdminLogonOff'
+            @($r['Steps']).Count | Should Be 0
+            @($r['Pending']).Count | Should Be 8
+            ($tcCalls -join '|') | Should Be 'Set:AutoAdminLogon=0:String'
+            Assert-MockCalled Set-CrLsaSecret -Times 0 -Exactly
+            Assert-MockCalled Remove-CrWinlogonValue -Times 0 -Exactly
         }
     }
 

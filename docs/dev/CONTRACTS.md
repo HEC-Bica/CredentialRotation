@@ -105,7 +105,7 @@ Login: `@{ Name; Type ('SQL_LOGIN'|'WINDOWS_LOGIN'|'WINDOWS_GROUP'); Sid (Window
 ## Logic functions
 
 ### Config.ps1
-- `Import-CrConfig -Path <psd1>` → hashtable (via `Import-LocalizedData`, PLAN §5). Throws on syntax error.
+- `Import-CrConfig -Path <psd1>` → hashtable (via `Import-LocalizedData`, PLAN §5). Throws on syntax error, and when a copy of the file exists in an `en-US\` or `en\` subfolder next to it (it would be loaded instead of the hashed file, v10.4).
 - `Test-CrConfig -Config <hashtable>` → array of error strings (empty = valid), per PLAN §5 "Validation".
 - `Get-CrRole -Config -Name` → role hashtable.
 
@@ -159,7 +159,7 @@ Login: `@{ Name; Type ('SQL_LOGIN'|'WINDOWS_LOGIN'|'WINDOWS_GROUP'); Sid (Window
 
 ## Entry point (`src/CredentialRotation.ps1`)
 
-Parameters: `-Apply` (switch; refused in M1 with exit 2), `-Only <string[]>` (slot names), `-ConfigPath <string>` (default: `CredentialRotation.psd1` next to the script), `-LogPath <string>` (log root, default `%ProgramData%\CredentialRotation`). Unbundled, it dot-sources `lib\*.ps1` in the order above; the bundle (`build/Build.ps1`) replaces the line `# <CR-LIB-IMPORT>` and the block up to `# </CR-LIB-IMPORT>` with the concatenated lib files. Version: `$script:CrToolVersion`. Exit codes per PLAN §6 step 11 (audit: 0 no drift, 10 drift, 2 preflight failed, 3 aborted).
+Parameters: `-Apply` (switch; refused in M1 with exit 2), `-Only <string[]>` (slot names), `-ConfigPath <string>` (default: `CredentialRotation.psd1` next to the script). There is no log-path parameter (removed in v10.4): logs always go to `%ProgramData%\CredentialRotation`. Unbundled, it dot-sources `lib\*.ps1` in the order above; the bundle (`build/Build.ps1`) replaces the line `# <CR-LIB-IMPORT>` and the block up to `# </CR-LIB-IMPORT>` with the concatenated lib files. Version: `$script:CrToolVersion`. Exit codes per PLAN §6 step 11 (audit: 0 no drift, 10 drift, 2 preflight failed, 3 aborted).
 
 ## Verification on the dev machine
 
@@ -223,7 +223,7 @@ Stored as `<log root>\journal.clixml` (`Export-Clixml -Path` / `Import-Clixml -P
 | `Get-CrNameTokens -Names <string[]>` → string[] | split on `, . - _ #`, space, tab; tokens of 3+ chars (D15) |
 | `Test-CrSiteRules -Secret -Config -Names <string[]>` → `@{ Ok; Reasons = @() }` | `SitePasswordRules` (MinLength, RequireComplexity) via `Test-CrSecretComplexity` |
 | `Read-CrSlotSecrets -Config -Resolved -State -Only` → hashtable slot → `@{ Slot; Skipped; NewSecret; Accounts = @(@{ Sid; Name; OldSecret; Reapply }) }` | new password twice (`Test-CrSecretEqual`), checks (site rules, local policy per account, slot `MaxLength`), old password per account with "same as previous? (Y/N)", empty new password → confirm skip; `Reapply` = new equals old (D20). Rotate-mode Windows slots only, in `Order`, honouring `-Only` and blocked slots. |
-| `Invoke-CrCredentialProbe -State -Account <resolved account> -OldSecret -NewSecret -Journal -RunId` → `@{ Sid; Name; Outcome; LogonType; Fallback; Win32Error; Attempts }` | Outcome: `Old`, `New`, `Reapply`, `BothFailed`, `Unverifiable`, `Locked` (no attempt), `BudgetExceeded`, `Disabled`. D12: before each attempt re-read `Get-CrUserInfo`; attempt only if threshold is 0 or `threshold - BadPasswordCount >= 2`. D16 type via `Select-CrProbeLogonType`. Error 1385 (logon type not granted) proves nothing about the password: outcome `Unverifiable`; the apply then uses the change path, where `NetUserChangePassword` itself validates the old password (one more budgeted attempt). Further mappings: 1327 (account restriction) → `Unverifiable`; 1330/1907 (expired / must change) → the password is valid; 1909 → `Locked`; 1331 → `Disabled`; `Get-CrUserInfo` failing → `Unverifiable` without an attempt; an unknown lockout threshold counts as 3. `Read-CrSlotSecrets` takes `-BlockedSlots` (Preflight's map) and returns per slot also `Label`, `Reason`, `Findings`. Order: new first if `Test-CrJournalStepInUnfinishedRun … -Step Secret`, else old first; the second test only if the first failed. |
+| `Invoke-CrCredentialProbe -State -Account <resolved account> -OldSecret -NewSecret -Journal -RunId` → `@{ Sid; Name; Outcome; LogonType; Fallback; Win32Error; Attempts }` | Outcome: `Old`, `New`, `Reapply`, `BothFailed`, `Unverifiable`, `Locked` (no attempt), `BudgetExceeded`, `Disabled`. D12: before each attempt re-read `Get-CrUserInfo`; attempt only if threshold is 0 or `BadPasswordCount + 2 < threshold` (`Test-CrProbeBudget`; strict rule, v10.4). D16 type via `Select-CrProbeLogonType`. Error 1385 (logon type not granted) proves nothing about the password: outcome `Unverifiable`; the apply then uses the change path, where `NetUserChangePassword` itself validates the old password (one more budgeted attempt). Further mappings: 1327 (account restriction) → `Unverifiable`; 1330/1907 (expired / must change) → the password is valid; 1909 → `Locked`; 1331 → `Disabled`; `Get-CrUserInfo` failing → `Unverifiable` without an attempt; an unknown lockout threshold counts as 3. `Read-CrSlotSecrets` takes `-BlockedSlots` (Preflight's map) and returns per slot also `Label`, `Reason`, `Findings`. Order: new first if `Test-CrJournalStepInUnfinishedRun … -Step Secret`, else old first; the second test only if the first failed. |
 | `Confirm-CrYes -Prompt` → bool | exact `YES` (case-sensitive) |
 
 ## Write side of existing modules
@@ -246,9 +246,9 @@ Stored as `<log root>\journal.clixml` (`Export-Clixml -Path` / `Import-Clixml -P
   Slots in ascending `Order`; per slot the steps of PLAN §8 (pre-steps, secret — skipped for `New`/`Reapply`, dependents, grants incl. flags and adds, verify with `Invoke-CrLogonTest` using the probe's logon type). Then the enforcement phase: removals (with rails), the auto-logon step (`Get-CrAutoLogonDecision` with the accounts actually verified, then `Invoke-CrAutoLogonAction`), check-mode fixes. A failing slot stops at that step and is reported with what is done/pending; other slots continue. Exit code: 1 if any slot failed, 4 if follow-ups (LOGINS for accounts whose password changed, IIS), else 0.
 - Entry point with `-Apply`: audit as before → stop with 2 if `MachineBlocked` → `Read-CrSlotSecrets` → probes → print the plan, the probe outcomes and the high-impact items → `Confirm-CrYes` (else exit 3) → `Invoke-CrApply` → report + CSV → re-audit summary (drift left) → exit code. All secrets are disposed (`.Dispose()`) at the end.
 
-# v10: account model (D18, D21–D25; PLAN v10.3) — supersedes the M2 parts above where they conflict
+# v10: account model (D18, D21–D25; PLAN v10.4) — supersedes the M2 parts above where they conflict
 
-PLAN v10.3: §1, §1.1, D9, D18, D20–D25, §5 config example, §6 steps 6–7, §7.5, §8 slot order and enforcement phase. History: v10 introduced `SOP-Admin`/`PUB-User` as created target accounts; v10.1 returned the auto-logon accounts to the v9 model; v10.2 dropped `SOP-Admin` and kept `BiCA Admin`/`BiCA Remote`; v10.3 creates missing BiCA accounts.
+PLAN v10.4: §1, §1.1, D9, D18, D20–D25, §5 config example, §6 steps 6–7, §7.5, §8 slot order and enforcement phase. History: v10 introduced `SOP-Admin`/`PUB-User` as created target accounts; v10.1 returned the auto-logon accounts to the v9 model; v10.2 dropped `SOP-Admin` and kept `BiCA Admin`/`BiCA Remote`; v10.3 creates missing BiCA accounts; v10.4 records the decisions on review round 12 (always move dependents to `ApplicationUser`, no move to a created account, strict budget, no `-LogPath`).
 
 ## Config (Config.ps1, config/CredentialRotation.psd1)
 
@@ -280,7 +280,7 @@ Resolved entries gain:
 - For `Mode = 'Disable'` entries: `Mode = 'Disable'`, `Accounts` = the existing ones
 - `Get-CrOtherEnabledAccounts -State -Resolved` → array of State users that are enabled and not selected by any entry (managed, replaced, disable, check). Built-in disabled accounts never appear (they're disabled).
 
-Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved -Fallback` (the `Operator` entry's account), `Test-CrAppUserEntry -Entry` (`$true` for the entry with `Replaces`: the application account, target of retired accounts' dependents on "move", D24/O5).
+Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved -Fallback` (the `Operator` entry's account), `Test-CrAppUserEntry -Entry` (`$true` for the entry with `Replaces`: the application account, target of the dependents of retired and operator-disabled accounts, D24), `Test-CrEntryCreated -Entry` (`$true` if the entry has a `ToCreate` placeholder), `Get-CrMovableDependentCount -State -Sid`.
 
 ## Audit findings (Plan.ps1)
 
@@ -288,8 +288,9 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
 - `Drift` "Create <name>" for `Create`, plus `Info` "no Windows login in SQL Server" when SQL Server is installed
 - for a disabled managed account: `Drift` "Enable the account" only with `EnableIfDisabled`; otherwise `Info` "stays disabled", and it doesn't count as verified for the auto-logon decision
 - `Drift` "Disable <name> (replaced by X)" per enabled replaced account and per enabled `Disable` account
-- `HighImpact` "Move <service/task/COM+> from <old> to <new>" per dependent of an account to be disabled (D24), and `Ambiguous` for dependents of retired accounts (O5)
-- `Ambiguous` "Operator decides: disable or keep <name>" per other enabled account (D23)
+- `HighImpact` "Move <service/task/COM+> from <old> to <target>" per dependent of an account to be disabled (D24): the replacement, or `ApplicationUser` for retired and other accounts (v10.4)
+- `HighImpact` "Not disabled: <target> is created in this run …; migrate them manually (D24)" instead of the disable and move findings, when the target account is created in this run and the account has movable dependents
+- `Ambiguous` "Operator decides: disable or keep <name>" per other enabled account (D23); the detail lists its dependents, which move to `ApplicationUser` if it is disabled
 - `HighImpact` "the running account <name> is disabled at the end; log on as <operator> next time" when the running account is to be disabled (D25)
 - `HighImpact` for an unreadable task folder (dependents there unknown)
 - no probe-type finding for set accounts
@@ -324,6 +325,8 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
   - new password twice per slot; one prompt for all accounts of a slot (the auto-logon slot: every existing `PUB-User`/`WinAutoUser`)
   - old password **only** for accounts with `PasswordMode = 'Change'` that exist; created and set accounts get no old-password prompt
   - `Reapply` only for Change accounts (Set accounts: setting the same value is harmless)
+  - a failing `Test-CrLocalPasswordPolicy` call (no `Status`, or an exception) is a warning, not a rejection (`Get-CrNewSecretProblems`, v10.4); only a policy verdict rejects
+  - the checks apply to a re-apply too (confirmed v10.4)
   - the names for the D15 tokens are every configured name of the slot: existing accounts, accounts to be created, and the entries' `Missing` names (`Read-CrOneSlotSecret -ExtraTokenNames`, `Get-CrNewSecretProblems -ExtraNames`)
   - disabled accounts are listed as "disabled, stays disabled" or, with `EnableIfDisabled`, "will be enabled"
 - `New-CrSlotAccount` returns also `Disabled` and `Enable`.
@@ -338,29 +341,31 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
   - Any other account → `TurnOff` (SM) or `Switch` to the first usable account of the list (other machines; `Ambiguous` if none, or if the target isn't verified).
   - `OperatorOptions` are `TurnOff` and `LeaveUnchanged` only (`StandardizeCurrent` is gone).
 - `Test-CrAutoLogonUsable -State -User -RemovedAdminSids` (no `-VerifiedSids`): a disabled account is never usable, because the auto-logon accounts are never enabled (D21).
-- `Invoke-CrAutoLogonAction` has no `StandardizeCurrent` action.
+- `Invoke-CrAutoLogonAction` has no `StandardizeCurrent` action. `Switch` starts with step `AutoAdminLogonOff` (v10.4), then the Standardize steps (with `RemoveAutoLogonSID`) and `AutoAdminLogonOn` last.
 
 ## Apply.ps1 / entry point
 
-- Entry `-Apply` order: audit → print the enabled local accounts (D21) with what happens to each → `Read-CrOtherAccountDecisions` → `Read-CrSlotSecrets` → probe (Change accounts only) → summary → YES → `Invoke-CrApply`.
+- Entry `-Apply` order: audit → print the enabled local accounts (D21) with what happens to each → `Read-CrOtherAccountDecisions` → `Read-CrSlotSecrets` → probe (Change accounts only) → summary → YES → `Invoke-CrApply`. There is no operator decision on dependents any more (`Read-CrDependentDecisions` and `-DependentDecisions` are gone, v10.4).
 - Per slot:
   1. create (if `Create`; the group memberships are re-read afterwards)
   2. set or change
   3. enable if disabled and `EnableIfDisabled`
   4. grants (flags, groups, rights)
   5. dependents (own)
-  6. verify (`Invoke-CrLogonTest`, D16 type)
+  6. verify (`Invoke-CrLogonTest`, D16 type), within the D12 budget: `Invoke-CrApplyLogonTest` calls `Test-CrApplyBudget` (same rule as `Test-CrProbeBudget`) first and returns `Skipped`, `Budget = $true` when it forbids the logon (`HighImpact` "Not verified (lockout budget)")
   
   A disabled account is not logon-tested (reported "cannot be verified"). When a slot stops after step 2, the accounts already on the new password are still logon-tested (`Invoke-CrApplyVerifyOnNew`).
 - Enforcement per PLAN §8:
   1. removals
-  2. dependent moves (D24; only to a verified replacement)
+  2. dependent moves (D24; only to a verified replacement, or to `ApplicationUser` for retired and operator-disabled accounts; never to an account created in this run or in an earlier unfinished run per the journal step `Created` — the account then stays enabled)
   3. auto-logon step (a kept account that got a new password but couldn't be verified → `HighImpact` "auto-logon broken until re-run")
   4. disabling: replaced + `Disable` entries + operator-chosen others. Never the running account. An account stays enabled if one of its dependents couldn't be moved or it is still the auto-logon account. Nothing is disabled while dependents are unknown.
   5. check-mode fixes
   6. **running account last (D25)**, only if it is itself to be disabled, and the `Operator` entry's account (`Get-CrApplyOperatorEntry -Resolved`) is not the running account and is enabled, in Administrators, verified and holds an effective `RemoteInteractive` right (`Get-CrEffectiveLogonRights`).
 - `Get-CrApplyAppUserEntry -Resolved`: the managed entry with `Replaces` (`Test-CrAppUserEntry`).
 - `Find-CrApplyUserByName` ignores a `X\` prefix (e.g. `.\Bica Admin` in `DefaultUserName`).
-- Follow-ups: LOGINS for accounts whose password changed or was created; IIS as before; "log on as <operator> next time" after D25.
+- Follow-ups: LOGINS for accounts whose password changed or was created; `RDP` "Update the saved RDP credentials" for the `Operator` entry's account after its set (v10.4); IIS as before; "log on as <operator> next time" after D25.
+- `Get-CrApplyDisablePlan -State -Resolved -Preview -RunningSid -Only -OtherDecisions` (no `-DependentDecisions`): items without `NeedsDecision`/`Decision`; `MoveEntry` = the replacement entry, or the application entry for `Disable` and `Other` items with dependents; `Planned = $false` with a reason when the move target is created in this run (`Test-CrApplyEntryCreated -Preview -Entry`).
+- Exit code (v10.4): 1 also when a selected slot ends `Skipped` or `Blocked`, except the SQL slots of this version (`Unsupported = $true`); `Invoke-CrApply` returns `NotAppliedSlots`. Exit 1 also when a verification was skipped by the D12 budget (`VerifyIncomplete`). An account kept enabled because its move target is created in this run (`MigrateManually` on the disable item) gets a `FollowUp` "Migrate ... manually, then disable it (D24)". The entry point completes the journal run only when the exit code is not 1, so a partial run stays unfinished for the re-run (D11).
 
 - **ForceGuest (D16):** when `State.Policy.ForceGuest` is `True`, `Select-CrProbeLogonType` must not choose `Network` (Windows may map a local network logon to Guest, which would accept any password); it uses the next allowed type, or `Unverifiable` if none.

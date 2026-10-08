@@ -6,7 +6,7 @@
 .DESCRIPTION
     Discovers the local accounts, groups, rights, dependents, auto-logon, write filter and SQL Server state,
     compares them with the configuration and reports what -Apply would change (audit, changes nothing).
-    With -Apply (account model v10.3, PLAN D18, D21-D25) it lists the enabled local accounts and what happens to each,
+    With -Apply (account model v10.4, PLAN D18, D21-D25) it lists the enabled local accounts and what happens to each,
     asks about the other enabled accounts, prompts for the passwords per credential slot, probes ApplicationUser's old
     password, shows the plan and, after YES, creates the missing admin accounts (BiCA Admin, BiCA Remote,
     ApplicationUser), sets the passwords of the managed accounts incl. every existing PUB-User/WinAutoUser
@@ -26,15 +26,13 @@
 .PARAMETER ConfigPath
     The .psd1 configuration. Default: CredentialRotation.psd1 next to this script, or ..\config\ when unbundled.
 
-.PARAMETER LogPath
-    Root folder for logs. Default: %ProgramData%\CredentialRotation.
+    Logs go to %ProgramData%\CredentialRotation (there is no log-path parameter, PLAN 3).
 #>
 [CmdletBinding()]
 param(
     [switch]$Apply,
     [string[]]$Only,
     [string]$ConfigPath,
-    [string]$LogPath,
     # Collects stray words (e.g. "echo %ERRORLEVEL%" typed on the same line). Because this is the only
     # parameter with a Position, the others can only be given by name.
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
@@ -48,7 +46,7 @@ if ($UnexpectedArguments) {
 }
 
 $ErrorActionPreference = 'Stop'
-$script:CrToolVersion = '0.3.0'
+$script:CrToolVersion = '0.4.0'
 $script:CrScriptPath = $MyInvocation.MyCommand.Path
 $script:CrScriptDir = Split-Path -Parent $script:CrScriptPath
 
@@ -168,7 +166,7 @@ function Invoke-CrMain {
         }
 
         $runId = (Get-Date).ToString('yyyyMMdd-HHmmss')
-        $log = Initialize-CrLog -Root $LogPath -RunId $runId
+        $log = Initialize-CrLog -RunId $runId
         Write-Host ('Log: {0}' -f $log['File'])
         if ($log['Corrected']) { Write-Host 'Warning: the log folder had unsafe permissions; they were corrected and an existing journal is ignored.' }
 
@@ -288,17 +286,15 @@ function Invoke-CrApplyFlow {
         }
         if ($promptFindings.Count -gt 0) { Write-CrFindingsReport -Findings $promptFindings }
         $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Only $Only
-        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions -DependentDecisions @{}
+        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions
         $alDecision = Get-CrApplyAutoLogonPreview -State $State -Config $Config -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only
         Write-CrApplySummary -Preview $preview -DisablePlan $disablePlan -Plan $Plan -AutoLogonDecision $alDecision -Only $Only
 
-        # Operator decisions (D13): ApplicationUser's old password not usable (set with DPAPI loss / skip),
-        # dependents of accounts without replacement (move to ApplicationUser / keep enabled), ambiguous auto-logon.
+        # Operator decisions (D13): ApplicationUser's old password not usable (set with DPAPI loss / skip), ambiguous
+        # auto-logon. Dependents of retired and operator-disabled accounts always move to ApplicationUser (D24, v10.4).
         Resolve-CrProbeDecisions -State $State -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Journal $journal -RunId $RunId -Only $Only
         $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Only $Only
-        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions -DependentDecisions @{}
-        $dependentDecisions = Read-CrDependentDecisions -DisablePlan $disablePlan -Resolved $Resolved
-        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions -DependentDecisions $dependentDecisions
+        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions
         $alDecision = Get-CrApplyAutoLogonPreview -State $State -Config $Config -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only
         $alChoice = $null
         if ($alDecision -is [hashtable] -and $alDecision['Action'] -eq 'Ambiguous') {
@@ -325,7 +321,7 @@ function Invoke-CrApplyFlow {
         $promptForAutoLogon = { param($Decision) Read-CrAutoLogonChoice -Decision $Decision }
         $result = Invoke-CrApply -State $State -Config $Config -Resolved $Resolved -Preflight $Preflight -Plan $Plan `
             -SlotSecrets $slotSecrets -Probes $probes -Journal $journal -RunId $RunId -Only $Only -RunningSid $RunningSid `
-            -OtherDecisions $otherDecisions -DependentDecisions $dependentDecisions -AutoLogonChoice $alChoice -AutoLogonPrompt $promptForAutoLogon
+            -OtherDecisions $otherDecisions -AutoLogonChoice $alChoice -AutoLogonPrompt $promptForAutoLogon
 
         # 11 report
         Write-CrFindingsReport -Findings $result['Findings']
@@ -338,7 +334,9 @@ function Invoke-CrApplyFlow {
         foreach ($d in (ConvertTo-CrArray $result['Disables'])) {
             Write-CrLog ('Disable {0} ({1}): {2}; {3}' -f $d['Name'], $d['Kind'], $d['Status'], $d['Reason'])
         }
-        Complete-CrJournalRun -Journal $journal -RunId $RunId
+        # A partial failure (exit 1) stays unfinished, so a re-run probes the new password first and doesn't move
+        # dependents to an account created in it (D11, D24; PLAN 13.4 G1).
+        if ([int]$result['ExitCode'] -ne 1) { Complete-CrJournalRun -Journal $journal -RunId $RunId }
         if ($result['RunningAccount'] -is [hashtable] -and $result['RunningAccount']['Disabled']) {
             $opName = 'the operator account'
             $opEntry = Get-CrApplyOperatorEntry -Resolved $Resolved
@@ -374,6 +372,8 @@ function Invoke-CrApplyFlow {
         } elseif ($exit -eq 4) {
             Write-Host 'Result: applied; FOLLOW-UP REQUIRED (see above).'
         } elseif ($exit -eq 1) {
+            $notApplied = ConvertTo-CrArray $result['NotAppliedSlots']
+            if ($notApplied.Count -gt 0) { Write-Host ('Not applied (skipped or blocked): {0}.' -f ($notApplied -join ', ')) }
             Write-Host 'Result: partial failure; re-run with the same passwords to complete the pending steps.'
         } else {
             Write-Host ('Result: exit code {0}.' -f $exit)

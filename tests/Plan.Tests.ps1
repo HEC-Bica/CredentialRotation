@@ -6,6 +6,8 @@ foreach ($m in @('Compat', 'Config', 'Rights', 'Principals', 'AutoLogon', 'Plan'
 # Pester 3.4 keeps a Mock for the whole Describe/Context it is defined in: every Mock lives in its own Context.
 # Account model PLAN v10.3 (D18, D21-D25): BiCA Admin, BiCA Remote (the operator's account), ApplicationUser (replaces
 # RID-500) and the auto-logon accounts PUB-User / WinAutoUser are managed; SP Admin, SYS Admin and SOP-Admin are retired.
+# v10.4 (D24): the dependents of retired and operator-disabled accounts always move to ApplicationUser; nothing moves to
+# an ApplicationUser created in this run (the account with dependents stays enabled).
 
 function New-CrTestPlan {
     param($State, [string[]]$Only, $Preflight, [string]$RunningSid = 'S-1-5-21-9-9-9-9999')
@@ -80,10 +82,13 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.3)' {
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Account not found (nothing to disable)*').Count | Should Be 1
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SOP-Admin' 'Account not found (nothing to disable)*').Count | Should Be 1
         }
-        It 'puts the dependents of SP Admin to the operator (D24, O5)' {
-            $f = @(Get-CrTestFindings $plan 'Ambiguous' 'Tasks' 'SP Admin' 'Operator decides: move scheduled task \SpMaintenance from SP Admin to ApplicationUser or keep SP Admin enabled*')
+        It 'moves the dependents of SP Admin to ApplicationUser (D24, v10.4)' {
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'SP Admin' 'Move scheduled task \SpMaintenance from SP Admin to ApplicationUser (D24)')
             $f.Count | Should Be 1
-            @(Get-CrTestFindings $plan 'HighImpact' $null 'SP Admin' 'Move*').Count | Should Be 0
+            $f[0]['Detail'] | Should Be 'Only to a verified ApplicationUser with its new password from this run; otherwise SP Admin stays enabled'
+            $f[0]['Slot'] | Should BeNullOrEmpty
+            @(Get-CrTestFindings $plan 'Ambiguous' $null 'SP Admin').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SP Admin' 'Not disabled*').Count | Should Be 0
         }
         It 'puts every other enabled account to the operator (D23)' {
             $all = @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*')
@@ -165,9 +170,10 @@ Describe 'New-CrPlan on an IPT01-like machine (account model v10.3)' {
         @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Disable SOP-Admin (no replacement)').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Ambiguous' $null 'SOP-Admin').Count | Should Be 0
     }
-    It 'puts the service of SYS Admin to the operator (D24, O5)' {
+    It 'moves the service of SYS Admin to ApplicationUser (D24, v10.4)' {
         @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS Admin' 'Disable SYS Admin (no replacement)').Count | Should Be 1
-        @(Get-CrTestFindings $plan 'Ambiguous' 'Services' 'SYS Admin' 'Operator decides: move service LegacySync from SYS Admin to ApplicationUser or keep SYS Admin enabled (D24, O5)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'HighImpact' 'Services' 'SYS Admin' 'Move service LegacySync from SYS Admin to ApplicationUser (D24)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS Admin').Count | Should Be 0
     }
     It 'has no other enabled accounts' {
         @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*').Count | Should Be 0
@@ -243,6 +249,149 @@ Describe 'New-CrPlan: created and disabled accounts and the auto-logon step' {
     }
 }
 
+Describe 'New-CrPlan: ApplicationUser is created in this run (D24, v10.4)' {
+    # A created account has a new SID: nothing is moved to it, so an account with movable dependents stays enabled.
+    function Add-CrTestService {
+        param($State, [string]$Name, [string]$Sid)
+        $svc = @{ Name = $Name; DisplayName = $Name; StartName = '.\synthetic'; StartNameSid = $Sid; StartMode = 'Auto'; State = 'Running'
+                  PathExecutable = 'C:\App\Synthetic.exe'; DependentServices = @(); DependsOn = @() }
+        $State.Services = @($State.Services) + @($svc)
+    }
+
+    Context 'the built-in Administrator runs a service, SYS Admin runs LegacySync, SOP-Admin runs nothing' {
+        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
+        $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
+        Add-CrTestService -State $state -Name 'AdminJob' -Sid (Get-CrTestUserSid $state 'Administrator')
+        $plan = New-CrTestPlan -State $state
+        $sysAdminSid = Get-CrTestUserSid $state 'SYS Admin'
+
+        It 'creates ApplicationUser (D21)' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'ApplicationUser' 'Create ApplicationUser').Count | Should Be 1
+        }
+        It 'keeps the replaced Administrator enabled with one HighImpact item and no move' {
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'Administrator' 'Not disabled: ApplicationUser is created in this run, so the services, scheduled tasks and COM+ applications of Administrator are not moved to it; migrate them manually (D24)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'AppUser'
+            $f[0]['Detail'] | Should Be 'A created account has a new SID: no SQL login, ACLs or profile of Administrator'
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable*').Count | Should Be 0
+            @(Get-CrTestFindings $plan $null $null 'Administrator' 'Move*').Count | Should Be 0
+            @(Get-CrTestFindings $plan $null $null 'Administrator').Count | Should Be 1
+        }
+        It 'keeps the retired SYS Admin enabled with one HighImpact item and no move' {
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled: ApplicationUser is created in this run, so the services, scheduled tasks and COM+ applications of SYS Admin are not moved to it; migrate them manually (D24)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should BeNullOrEmpty
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS Admin' 'Disable*').Count | Should Be 0
+            @(Get-CrTestFindings $plan $null $null 'SYS Admin' 'Move*').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS Admin').Count | Should Be 0
+        }
+        It 'disables the retired SOP-Admin without dependents as usual' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Disable SOP-Admin (no replacement)').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null $null 'SOP-Admin' 'Not disabled*').Count | Should Be 0
+        }
+        It 'has no D25 item when the running retired account stays enabled' {
+            $running = New-CrTestPlan -State $state -RunningSid $sysAdminSid
+            @(Get-CrTestFindings $running 'HighImpact' 'Accounts' 'SYS Admin' 'The running account*').Count | Should Be 0
+            @(Get-CrTestFindings $running 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled*').Count | Should Be 1
+        }
+    }
+
+    Context 'the built-in Administrator has no dependents' {
+        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
+        $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
+        $plan = New-CrTestPlan -State $state
+
+        It 'disables it as usual (replaced by ApplicationUser)' {
+            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (replaced by ApplicationUser)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'AppUser'
+            @(Get-CrTestFindings $plan $null $null 'Administrator' 'Not disabled*').Count | Should Be 0
+        }
+        It 'still keeps SYS Admin (service LegacySync) enabled' {
+            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled: ApplicationUser is created in this run*').Count | Should Be 1
+        }
+    }
+
+    Context 'ApplicationUser exists' {
+        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
+        $state = New-CrTestState -Profile IPT01
+        Add-CrTestService -State $state -Name 'AdminJob' -Sid (Get-CrTestUserSid $state 'Administrator')
+        $plan = New-CrTestPlan -State $state
+
+        It 'disables the Administrator and moves its service to ApplicationUser (D24)' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (replaced by ApplicationUser)').Count | Should Be 1
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Services' 'Administrator' 'Move service AdminJob from Administrator to ApplicationUser (D24)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'AppUser'
+            @(Get-CrTestFindings $plan $null $null $null 'Not disabled*').Count | Should Be 0
+        }
+    }
+}
+
+Describe 'Get-CrMovableDependentCount (D24)' {
+    $sid = 'S-1-5-21-1000-2000-3000-1050'
+    $state = @{
+        Services = @(@{ Name = 'S1'; StartNameSid = $sid }, @{ Name = 'S2'; StartNameSid = 'S-1-5-18' })
+        Tasks    = @(@{ Path = '\T1'; UserSid = $sid; LogonType = 1 }, @{ Path = '\T6'; UserSid = $sid; LogonType = 6 }, @{ Path = '\T3'; UserSid = $sid; LogonType = 3 })
+        ComPlus  = @(@{ Name = 'C1'; IdentitySid = $sid; Activation = 'Server' }, @{ Name = 'C2'; IdentitySid = $sid; Activation = 'Library' })
+        Dcom     = @(@{ AppId = '{00000000-0000-0000-0000-000000000009}'; Name = 'D1'; RunAsSid = $sid })
+        Iis      = @{ Installed = $true; AppPools = @(@{ Name = 'P1'; UserSid = $sid }); VirtualDirectories = @() }
+    }
+
+    It 'counts services, password-stored tasks and COM+ server identities only' {
+        Get-CrMovableDependentCount -State $state -Sid $sid | Should Be 4
+    }
+    It 'is 0 for an account without dependents and for no SID' {
+        Get-CrMovableDependentCount -State $state -Sid 'S-1-5-21-1000-2000-3000-1099' | Should Be 0
+        Get-CrMovableDependentCount -State $state -Sid '' | Should Be 0
+    }
+    It 'counts the dependents of ApplicationUser on the SM fixture' {
+        $sm = New-CrTestState -Profile SM
+        # 4 services, 3 password-stored tasks, 1 COM+ application
+        Get-CrMovableDependentCount -State $sm -Sid (Get-CrTestUserSid $sm 'ApplicationUser') | Should Be 8
+    }
+}
+
+Describe 'Test-CrEntryCreated' {
+    It 'is true for an entry with a ToCreate placeholder' {
+        Test-CrEntryCreated @{ Accounts = @(@{ Name = 'ApplicationUser'; Sid = $null; User = $null; ToCreate = $true }) } | Should Be $true
+    }
+    It 'is false for an entry with existing accounts only' {
+        Test-CrEntryCreated @{ Accounts = @(@{ Name = 'ApplicationUser'; Sid = 'S-1-5-21-1000-2000-3000-1003'; User = @{} }) } | Should Be $false
+    }
+    It 'is false without accounts or without an entry' {
+        Test-CrEntryCreated @{ Accounts = @() } | Should Be $false
+        Test-CrEntryCreated $null | Should Be $false
+        Test-CrEntryCreated 'AppUser' | Should Be $false
+    }
+}
+
+Describe 'Add-CrDisableDependentFindings -TargetName (D24)' {
+    $sid = 'S-1-5-21-1000-2000-3000-1050'
+    $state = @{
+        Services = @(@{ Name = 'S1'; StartNameSid = $sid })
+        Tasks    = @(@{ Path = '\T1'; UserSid = $sid; LogonType = 1 }, @{ Path = '\T3'; UserSid = $sid; LogonType = 3 })
+        ComPlus  = @(@{ Name = 'C1'; IdentitySid = $sid; Activation = 'Server' })
+        Dcom     = @()
+        Iis      = @{ Installed = $false }
+    }
+    $plan = @{ Findings = New-Object System.Collections.ArrayList; Drift = $false }
+    Add-CrDisableDependentFindings -Plan $plan -State $state -Sid $sid -Name 'Old Account' -Slot 'X' -TargetName 'New Account'
+
+    It 'gives one HighImpact move per movable item, to the target' {
+        @(Get-CrTestFindings $plan 'HighImpact' 'Services' 'Old Account' 'Move service S1 from Old Account to New Account (D24)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'Old Account' 'Move scheduled task \T1 from Old Account to New Account (D24)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'HighImpact' 'ComPlus' 'Old Account' 'Move COM+ application C1 from Old Account to New Account (D24)').Count | Should Be 1
+        @(Get-CrTestFindings $plan $null $null $null 'Move*').Count | Should Be 3
+    }
+    It 'reports a task without a stored password as not moved' {
+        @(Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'Old Account' 'Scheduled task runs as Old Account without a stored password (LogonType 3)*\T3').Count | Should Be 1
+    }
+    It 'asks the operator nothing' {
+        @(Get-CrTestFindings $plan 'Ambiguous').Count | Should Be 0
+    }
+}
+
 Describe 'Get-CrAutoLogonSlot' {
     It 'returns the slot of the entry with the AutoLogon block' {
         $state = New-CrTestState -Profile IPT01
@@ -302,6 +451,18 @@ Describe 'New-CrPlan account state findings' {
         @(Get-CrTestFindings $plan 'Drift' $null 'SYS Admin').Count | Should Be 0
         @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Already disabled*').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS Admin').Count | Should Be 0
+    }
+    It 'tells the operator that the dependents of an other account move to ApplicationUser if it is disabled (D23, D24)' {
+        $state = New-CrTestState -Profile IPT01
+        $extra = Add-CrTestUser -State $state -Name 'ExtraUser' -Groups @('S-1-5-32-545')
+        $svc = @{ Name = 'ExtraSvc'; DisplayName = 'Extra Service'; StartName = '.\ExtraUser'; StartNameSid = $extra.Sid; StartMode = 'Auto'; State = 'Running'
+                  PathExecutable = 'C:\App\Extra.exe'; DependentServices = @(); DependsOn = @() }
+        $state.Services = @($state.Services) + @($svc)
+        $plan = New-CrTestPlan -State $state
+        $f = @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' 'ExtraUser' 'Operator decides: disable or keep ExtraUser (D23)')
+        $f.Count | Should Be 1
+        $f[0]['Detail'] | Should Be 'member of: Users; dependents (moved to ApplicationUser if it is disabled, D24): service ExtraSvc'
+        @(Get-CrTestFindings $plan $null $null 'ExtraUser' 'Move*').Count | Should Be 0
     }
     It 'blocks every Windows entry and asks nothing when the Users part failed' {
         $state = New-CrTestState -Profile IPT01 -Parts @{ Users = @{ Error = 'access denied' } }

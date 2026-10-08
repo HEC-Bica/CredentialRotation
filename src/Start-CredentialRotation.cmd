@@ -2,7 +2,7 @@
 rem Start-CredentialRotation.cmd - launcher for CredentialRotation.ps1 (docs/PLAN.md section 3)
 rem
 rem Run elevated ("Run as administrator") from C:\temp\CredentialRotation-<version>\ :
-rem   Start-CredentialRotation.cmd [/PS2] [-Apply] [-Only <slot>[,<slot>...]] [-LogPath <folder>]
+rem   Start-CredentialRotation.cmd [/PS2] [-Apply] [-Only <slot>[,<slot>...]]
 rem
 rem   /PS2  first argument only: run on the PowerShell 2.0 engine (-Version 2).
 rem   All other arguments are passed unchanged to CredentialRotation.ps1.

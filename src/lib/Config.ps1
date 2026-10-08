@@ -45,6 +45,12 @@ function Import-CrConfig {
     $full = (Resolve-Path -LiteralPath $Path).ProviderPath
     $directory = Split-Path -Parent $full
     $fileName = Split-Path -Leaf $full
+    # PLAN 5, 9: Import-LocalizedData -UICulture en-US prefers a copy in en-US\ or en\, which is not the file whose
+    # hash is displayed; such a copy is refused.
+    foreach ($culture in @('en-US', 'en')) {
+        $copy = Join-Path (Join-Path $directory $culture) $fileName
+        if (Test-Path -LiteralPath $copy) { throw ('A copy of the config exists in a culture subfolder and would be loaded instead of {0}: {1}. Remove it.' -f $full, $copy) }
+    }
     # Import-LocalizedData falls back to the base directory when there is no en-US subfolder (PLAN section 5).
     # -BindingVariable is mandatory in PS 2.0 (found by the first /PS2 audit; without it PS 2.0 prompts).
     $data = $null

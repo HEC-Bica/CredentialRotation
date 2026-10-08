@@ -1,4 +1,4 @@
-# Apply.ps1 - slot sequencing, enforcement phase and exit code of -Apply, account model v10.3
+# Apply.ps1 - slot sequencing, enforcement phase and exit code of -Apply, account model v10.4
 # (docs/PLAN.md sections 6 steps 6-11, 7.5, 8, D7-D9, D11, D13, D16-D18, D20-D25; docs/dev/CONTRACTS.md
 # "Apply.ps1 and the entry point" and "v10: account model").
 # Secrets are SecureStrings. They are handed to the building blocks as -Secret/-OldSecret/-NewSecret and are
@@ -126,7 +126,7 @@ function Get-CrApplyEntryAccountSid {
 }
 
 # The application account (ApplicationUser): the managed entry that replaces accounts (Test-CrAppUserEntry, Plan.ps1).
-# Dependents of retired accounts without a replacement move there when the operator chooses "move" (D24, O5).
+# Dependents of retired and operator-disabled accounts always move there (D24, v10.4).
 function Get-CrApplyAppUserEntry {
     param($Resolved)
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
@@ -223,7 +223,8 @@ function Get-CrApplyResultText {
     return $text
 }
 
-# D12 before using the old password: re-read the account, refuse when locked or when fewer than two attempts remain.
+# D12 before every logon or old-password use: re-read the account, refuse when locked or when two more failures would
+# reach the threshold (strict rule, the same as Test-CrProbeBudget).
 function Test-CrApplyBudget {
     param($State, [string]$UserName)
     $r = @{ Ok = $false; Locked = $false; Reason = $null }
@@ -244,7 +245,7 @@ function Test-CrApplyBudget {
     $policy = $State['Policy']
     if ($policy -is [hashtable] -and -not $policy['Error'] -and $null -ne $policy['LockoutThreshold']) { $threshold = [int]$policy['LockoutThreshold'] }
     $bad = [int]$info['BadPasswordCount']
-    if ($threshold -gt 0 -and ($threshold - $bad) -lt 2) {
+    if ($threshold -gt 0 -and -not (Test-CrProbeBudget -Threshold $threshold -BadPasswordCount $bad)) {
         $r['Reason'] = 'lockout budget: {0} of {1} bad attempts already counted (D12)' -f $bad, $threshold
         return $r
     }
@@ -334,6 +335,14 @@ function Invoke-CrApplyLogonTest {
     if (-not $type) {
         $r['Skipped'] = $true
         $r['Message'] = 'No logon type is clearly allowed for this account (D16); the new password could not be verified with a logon'
+        return $r
+    }
+    # D12 (v10.4): the verification logon is budgeted like the probe; the counter is re-read first.
+    $budget = Test-CrApplyBudget -State $Context['State'] -UserName $Item['UserName']
+    if (-not $budget['Ok']) {
+        $r['Skipped'] = $true
+        $r['Budget'] = $true
+        $r['Message'] = 'Not verified (lockout budget, D12): ' + $budget['Reason']
         return $r
     }
     $t = Invoke-CrLogonTest -UserName $Item['UserName'] -Secret $Secret -LogonType $type
@@ -623,7 +632,7 @@ function Get-CrApplyPreview {
             if ($e['Error']) { $hasError = $true }
             if (-not $e['NotApplicable'] -or $e['Create']) { [void]$applicable.Add($e) }
         }
-        if ($isSql) { $p['Status'] = 'Skipped'; $p['Reason'] = 'SQL rotation is not available in this version'; continue }
+        if ($isSql) { $p['Status'] = 'Skipped'; $p['Unsupported'] = $true; $p['Reason'] = 'SQL rotation is not available in this version'; continue }
         if ($blocked.ContainsKey($slot)) { $p['Status'] = 'Blocked'; $p['Reason'] = [string]$blocked[$slot]; continue }
         if ($hasError) { $p['Status'] = 'Blocked'; $p['Reason'] = 'Account data could not be read'; continue }
         if ($applicable.Count -eq 0) { $p['Status'] = 'NotApplicable'; $p['Reason'] = 'No account of this slot exists on this machine'; continue }
@@ -675,6 +684,22 @@ function Get-CrApplyPreview {
     return , $list.ToArray()
 }
 
+# $true if the entry's account is created in this run (its preview slot has an account with Path 'Create').
+function Test-CrApplyEntryCreated {
+    param($Preview, $Entry)
+    if (-not ($Entry -is [hashtable])) { return $false }
+    $p = Find-CrApplyPreviewSlot -Preview $Preview -Slot ([string]$Entry['Slot'])
+    if (-not $p) { return $false }
+    foreach ($a in (ConvertTo-CrArray $p['Accounts'])) { if (($a -is [hashtable]) -and $a['Path'] -eq 'Create') { return $true } }
+    return $false
+}
+
+# D24 (v10.4): an account created by the tool has a new SID, so it has no SQL login, ACLs or profile of the old one.
+function Get-CrApplyCreatedTargetReason {
+    param([string]$TargetName, [string]$Name)
+    return ('stays enabled: {0} is created in this run (new SID: no SQL login, ACLs or profile of {1}), so the services, scheduled tasks and COM+ applications of {1} are not moved; migrate them manually (D24)' -f $TargetName, $Name)
+}
+
 function Find-CrApplyPreviewSlot {
     param($Preview, [string]$Slot)
     foreach ($p in (ConvertTo-CrArray $Preview)) { if ($p -is [hashtable] -and [string]$p['Slot'] -eq $Slot) { return $p } }
@@ -683,14 +708,14 @@ function Find-CrApplyPreviewSlot {
 
 # Accounts this run disables (D22-D25) and what blocks it. One item per account:
 # @{ Sid; Name; User; Kind ('Replaced'|'Disable'|'Other'); IsRunning; ReplacementEntry; ReplacementName; ReplacementSlot;
-#    Services; Tasks; ComPlus; OtherTasks; HasDependents; NeedsDecision; Decision ('Move'|'Keep'|$null);
+#    Services; Tasks; ComPlus; OtherTasks; HasDependents;
 #    MoveEntry (where the dependents go); Planned ($true = disabled if the conditions hold at the time); Reason }.
 # Replaced accounts only for selected slots; Disable entries and operator-chosen others (D23) only without -Only.
-# Dependents of an account without replacement move to the application account only on the operator's 'Move' (D24).
+# Dependents of an account without replacement always move to the application account (D24, O5 decided in v10.4).
+# No move to an account created in this run (new SID): the account keeps its dependents and stays enabled.
 function Get-CrApplyDisablePlan {
-    param($State, $Resolved, $Preview, [string]$RunningSid, [string[]]$Only, $OtherDecisions, $DependentDecisions)
+    param($State, $Resolved, $Preview, [string]$RunningSid, [string[]]$Only, $OtherDecisions)
     if (-not ($OtherDecisions -is [hashtable])) { $OtherDecisions = @{} }
-    if (-not ($DependentDecisions -is [hashtable])) { $DependentDecisions = @{} }
     $items = New-Object System.Collections.ArrayList
     $seen = New-Object System.Collections.ArrayList
     $appEntry = Get-CrApplyAppUserEntry -Resolved $Resolved
@@ -742,7 +767,7 @@ function Get-CrApplyDisablePlan {
             Sid = $sid; Name = $name; User = $user; Kind = $c['Kind']; IsRunning = ($sid -eq $RunningSid)
             ReplacementEntry = $null; ReplacementName = $null; ReplacementSlot = $null
             Services = $services; Tasks = $tasks; ComPlus = $complus; OtherTasks = $otherTasks; HasDependents = $hasDeps
-            NeedsDecision = $false; Decision = $null; MoveEntry = $null; Planned = $true; Reason = $null
+            MoveEntry = $null; Planned = $true; Reason = $null
         }
         if ($c['Kind'] -eq 'Replaced') {
             $e = $c['Entry']
@@ -767,20 +792,21 @@ function Get-CrApplyDisablePlan {
                 $item['Planned'] = $false
                 $item['Reason'] = 'kept enabled by the operator (D23)'
             } elseif ($hasDeps) {
-                $item['NeedsDecision'] = $true
-                $item['Decision'] = $DependentDecisions[$sid]
-                if ($item['Decision'] -eq 'Move' -and $appEntry) {
+                if ($appEntry) {
                     $item['MoveEntry'] = $appEntry
                 } else {
                     $item['Planned'] = $false
-                    $item['Reason'] = 'kept enabled: it runs services, scheduled tasks or COM+ applications and moving them was not chosen (D24)'
-                    if (-not $item['Decision']) { $item['Reason'] = 'operator decision needed: move its dependents to the application account or keep the account enabled (D24)' }
+                    $item['Reason'] = 'stays enabled: it runs services, scheduled tasks or COM+ applications and there is no application account to move them to (D24)'
                 }
             }
         }
-        if ($depUnknown -and ($item['Planned'] -or $item['NeedsDecision'])) {
+        if ($item['Planned'] -and $hasDeps -and (Test-CrApplyEntryCreated -Preview $Preview -Entry $item['MoveEntry'])) {
             $item['Planned'] = $false
-            $item['NeedsDecision'] = $false
+            $item['Reason'] = Get-CrApplyCreatedTargetReason -TargetName (Get-CrApplyEntryAccountName $item['MoveEntry']) -Name $name
+            $item['MigrateManually'] = $true
+        }
+        if ($depUnknown -and $item['Planned']) {
+            $item['Planned'] = $false
             $item['Reason'] = $depUnknown
         }
         [void]$items.Add($item)
@@ -1203,6 +1229,10 @@ function Invoke-CrApplySlotSteps {
                 Add-CrApplyFinding $Context 'Info' 'Verify' ($t['Message'] + '; the credential probe already logged on with it') $slot $it['Name']
             } elseif ($t['Disabled']) {
                 Add-CrApplyFinding $Context 'Info' 'Verify' $t['Message'] $slot $it['Name']
+            } elseif ($t['Budget']) {
+                # Not verified: a re-run after the lockout window completes it, so the result is partial (exit 1).
+                $Context['VerifyIncomplete'] = $true
+                Add-CrApplyFinding $Context 'HighImpact' 'Verify' ($t['Message'] + '. Accounts it replaces stay enabled and the auto-logon is not written for it; re-run after the lockout window to verify it (D12, D22).') $slot $it['Name']
             } else {
                 Add-CrApplyFinding $Context 'Info' 'Verify' ($t['Message'] + '. Accounts it replaces stay enabled and the auto-logon is not written for it (D22, PLAN 7.5).') $slot $it['Name']
             }
@@ -1222,6 +1252,10 @@ function Add-CrApplyFollowUps {
         if (-not $it['Sid'] -or $Context['Changed'] -notcontains $it['Sid']) { continue }
         if ($it['Entry']['LoginsEntry']) {
             Add-CrApplyFinding $Context 'FollowUp' 'LOGINS' 'Update the LOGINS registry entry with the new password (outside the tool)' $Slot $it['Name']
+        }
+        # PLAN 8, D25: an RDP client retrying the old saved password would lock the operator's account.
+        if ($it['Entry']['Operator']) {
+            Add-CrApplyFinding $Context 'FollowUp' 'RDP' 'Update the saved RDP credentials of this account with the new password; a client retrying the old one locks the account' $Slot $it['Name']
         }
         foreach ($f in (ConvertTo-CrArray $Context['Plan']['Findings'])) {
             if (-not ($f -is [hashtable])) { continue }
@@ -1361,6 +1395,12 @@ function Get-CrApplyMoveTarget {
         $r['Reason'] = '{0} is not verified on its new password in this run' -f $name
         return $r
     }
+    # D24 (v10.4): never to an account the tool created, in this run or in an earlier unfinished one (re-run, D11).
+    $createdEarlier = Test-CrJournalStepInUnfinishedRun -Journal $Context['Journal'] -Sid $sid -Step 'Created' -ExceptRunId $Context['RunId']
+    if (($Context['Created'] -contains $sid) -or $createdEarlier) {
+        $r['Reason'] = '{0} was created by this tool (new SID: no SQL login, ACLs or profile of {1}); migrate its dependents manually' -f $name, $Item['Name']
+        return $r
+    }
     $u = Find-CrApplyUser -State $Context['State'] -Sid $sid
     if (-not $u -or $u['Disabled']) { $r['Reason'] = '{0} is not enabled' -f $name; return $r }
     $slotSecret = $Context['SlotSecrets'][[string]$e['Slot']]
@@ -1376,7 +1416,8 @@ function Get-CrApplyMoveTarget {
 }
 
 # 2 dependent moves (D24): services, password-stored tasks and COM+ identities of each account to be disabled go to
-# its replacement (or, on the operator's choice, the application account). A failure keeps the account enabled.
+# its replacement, or for retired and operator-disabled accounts to the application account. A failure keeps the
+# account enabled.
 function Invoke-CrApplyMoves {
     param($Context, $DisablePlan)
     $State = $Context['State']
@@ -1658,6 +1699,10 @@ function Invoke-CrApplyDisables {
         if (-not $item['Planned']) {
             $item['Status'] = 'KeptEnabled'
             Add-CrApplyFinding $Context 'Info' 'Accounts' ('Not disabled: ' + $item['Reason']) $item['ReplacementSlot'] $item['Name']
+            if ($item['MigrateManually']) {
+                # D24 (v10.4): reported for a manual migration (FOLLOW-UP REQUIRED, exit 4).
+                Add-CrApplyFinding $Context 'FollowUp' 'Accounts' ('Migrate the services, scheduled tasks and COM+ applications of this account manually, then disable it (D24)') $item['ReplacementSlot'] $item['Name']
+            }
             continue
         }
         $blocker = Get-CrApplyDisableBlocker -Context $Context -Item $item
@@ -1773,15 +1818,14 @@ function Invoke-CrApplyCheckFixes {
 
 # Applies the confirmed plan (CONTRACTS "Apply.ps1 / entry point", v10). -Probes: hashtable SID -> probe result of the
 # Change accounts, optionally with Path = 'Set'|'Skip' (operator choice before YES). -OtherDecisions: SID ->
-# 'Disable'|'Keep' (Read-CrOtherAccountDecisions, D23). -DependentDecisions: SID -> 'Move'|'Keep' for accounts without
-# a replacement that run dependents (D24). -AutoLogonChoice: the operator's choice for an ambiguous auto-logon made
+# 'Disable'|'Keep' (Read-CrOtherAccountDecisions, D23). -AutoLogonChoice: the operator's choice for an ambiguous auto-logon made
 # before YES; -AutoLogonPrompt: called with the decision when the step turns out ambiguous at runtime (D13).
 # Returns @{ Findings; Slots; Disables; CheckFixes; AutoLogon; RunningAccount; ExitCode; ChangedSids; CreatedSids;
 # VerifiedSids; RemovedAdminSids }. Exit code: 2 machine blocked, 1 any failure, 4 follow-ups, else 0.
 function Invoke-CrApply {
     param(
         $State, $Config, $Resolved, $Preflight, $Plan, $SlotSecrets, $Probes, $Journal, [string]$RunId,
-        [string[]]$Only, [string]$RunningSid, $OtherDecisions, $DependentDecisions,
+        [string[]]$Only, [string]$RunningSid, $OtherDecisions,
         [string]$AutoLogonChoice, [scriptblock]$AutoLogonPrompt
     )
     if (-not $RunningSid) { $RunningSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value }
@@ -1818,7 +1862,7 @@ function Invoke-CrApply {
     }
     $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $SlotSecrets -Probes $Probes -Only $Only
     # Planned before the slots run: the dependents and users as discovered by the audit.
-    $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $OtherDecisions -DependentDecisions $DependentDecisions
+    $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $OtherDecisions
 
     $slots = New-Object System.Collections.ArrayList
     foreach ($p in $preview) {
@@ -1832,7 +1876,7 @@ function Invoke-CrApply {
         foreach ($a in (ConvertTo-CrArray $p['Accounts'])) {
             if ($a['Path'] -eq 'Skip') { Add-CrApplyFinding $ctx 'Info' 'Password' ('Account skipped: ' + $a['Reason']) $p['Slot'] $a['Name'] }
         }
-        [void]$slots.Add(@{ Slot = $p['Slot']; Status = $p['Status']; Pending = @(); Errors = @(); Done = @(); Notes = @(); Members = @(); FailedStep = $null; Reason = $p['Reason'] })
+        [void]$slots.Add(@{ Slot = $p['Slot']; Status = $p['Status']; Unsupported = [bool]$p['Unsupported']; Pending = @(); Errors = @(); Done = @(); Notes = @(); Members = @(); FailedStep = $null; Reason = $p['Reason'] })
     }
     $ctx['SlotResults'] = $slots.ToArray()
 
@@ -1871,8 +1915,18 @@ function Invoke-CrApply {
         [void]$disables.Add(@{ Sid = $i['Sid']; Name = $i['Name']; Kind = $i['Kind']; Replacement = $i['ReplacementName']; MovedTo = $i['MovedTo']; IsRunning = $i['IsRunning']; Status = $status; Reason = $i['Reason'] })
     }
 
-    $failed = [bool]$ctx['EnforcementFailed']
-    foreach ($sr in $slots) { if ($sr['Status'] -eq 'Failed') { $failed = $true } }
+    $failed = [bool]($ctx['EnforcementFailed'] -or $ctx['VerifyIncomplete'])
+    # PLAN 6 step 11: a selected slot that was skipped or blocked is a partial result too (exit 1); the SQL slots of
+    # this version (not supported, M5) don't count.
+    $notApplied = New-Object System.Collections.ArrayList
+    foreach ($sr in $slots) {
+        if ($sr['Status'] -eq 'Failed') { $failed = $true }
+        if ((@('Skipped', 'Blocked') -contains [string]$sr['Status']) -and -not $sr['Unsupported']) {
+            $failed = $true
+            [void]$notApplied.Add([string]$sr['Slot'])
+        }
+    }
+    $result['NotAppliedSlots'] = $notApplied.ToArray()
     foreach ($fx in (ConvertTo-CrArray $fixes)) { if ($fx['Status'] -eq 'Failed') { $failed = $true } }
     if ($result['AutoLogon'] -and -not $result['AutoLogon']['Success']) { $failed = $true }
     $followUps = @($ctx['Findings'] | Where-Object { $_['Severity'] -eq 'FollowUp' })
@@ -2013,31 +2067,6 @@ function Resolve-CrProbeDecisions {
             }
         }
     }
-}
-
-# Operator decision per account without replacement that runs dependents (D24, O5): move them to the application
-# account (ApplicationUser) or keep the account enabled. Returns a hashtable SID -> 'Move'|'Keep'.
-function Read-CrDependentDecisions {
-    param($DisablePlan, $Resolved)
-    $decisions = @{}
-    $appEntry = Get-CrApplyAppUserEntry -Resolved $Resolved
-    foreach ($item in (ConvertTo-CrArray $DisablePlan)) {
-        if (-not $item['NeedsDecision']) { continue }
-        $deps = New-Object System.Collections.ArrayList
-        foreach ($x in (Join-CrApplyList (Join-CrApplyList $item['Services'] $item['Tasks']) $item['ComPlus'])) { [void]$deps.Add((Get-CrApplyItemLabel $x)) }
-        Write-Host ''
-        Write-Host ('{0} is to be disabled but runs: {1}' -f $item['Name'], (($deps.ToArray()) -join ', '))
-        if (-not $appEntry) {
-            Write-Host '  No application account is configured to take them over; the account stays enabled.'
-            $decisions[$item['Sid']] = 'Keep'
-            continue
-        }
-        $appName = Get-CrApplyEntryAccountName $appEntry
-        $c = Read-CrOperatorChoice -Prompt ('[M] move them to {0} (with its new password) and disable {1}, [K] keep {1} enabled' -f $appName, $item['Name']) -Choices @('M', 'K') -Default 'K'
-        if ($c -eq 'M') { $decisions[$item['Sid']] = 'Move' } else { $decisions[$item['Sid']] = 'Keep' }
-        Write-CrLog ('Dependents of {0}: operator decision {1}' -f $item['Name'], $decisions[$item['Sid']])
-    }
-    return $decisions
 }
 
 # The auto-logon decision the run is expected to reach (for the summary before YES and the operator's choice).

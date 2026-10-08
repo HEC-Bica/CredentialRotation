@@ -11,7 +11,7 @@ A PowerShell tool that rotates the local Windows and SQL Server credentials on s
 | Milestone | Content | State |
 |---|---|---|
 | M1 | Read-only audit | On branch `feature/m1-audit`; **tested on `SM-QS-K1`** (Windows 10) **and `SM-102575`** (Windows Embedded 7), PS 5.1 and PS 2.0 |
-| M2 | Password prompts, account model (PLAN v10.3), groups, flags, auto-logon policy | Code and unit tests written (version 0.3.0); **not yet run** |
+| M2 | Password prompts, account model (PLAN v10.4), groups, flags, auto-logon policy | Code written (version 0.4.0); **not yet run** |
 | M3 | Services, scheduled tasks, COM+ updates and moves | Code and unit tests written; **not yet run** |
 
 AppLocker blocks scripts on the development machine, so all runs happen on the test machines.
@@ -32,11 +32,11 @@ Known limitation of `/PS2` test runs: on machines with WMF 5.1 or Windows 10, `p
 
 ## Testing on a machine
 
-There are three test steps. The code for all three exists (version 0.3.0), but only step 1 has been run so far. Steps 2 and 3 are untested, and the unit tests of version 0.3.0 haven't been run yet.
+There are three test steps. The code for all three exists (version 0.4.0), but only step 1 has been run so far. Steps 2 and 3 are untested, and the unit tests of version 0.4.0 haven't been run yet.
 
 ### Step 1: audit (read-only)
 
-Step 1 has been done with the M1 version. Repeat it with version 0.3.0 before step 2: the audit now reports the account model of PLAN v10.3.
+Step 1 has been done with the M1 version. Repeat it with version 0.4.0 before step 2: the audit now reports the account model of PLAN v10.4.
 
 The audit reads the machine and reports what `-Apply` would change. It changes nothing, apart from creating its log folder `%ProgramData%\CredentialRotation`.
 
@@ -84,7 +84,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\temp\CredentialRotati
 - the `.log` and `.csv` files from `%ProgramData%\CredentialRotation\logs\`
 - the inventory JSON (it contains account names and SIDs; never commit it)
 
-### Step 2: re-apply the current password of `ApplicationUser` (`-Apply -Only AppUser`, version 0.3.0)
+### Step 2: re-apply the current password of `ApplicationUser` (`-Apply -Only AppUser`, version 0.4.0)
 
 A safe first write test, done before any real rotation (PLAN D20, O9). Only `ApplicationUser` is changed with its old password, so only for it can the tool recognize a re-apply: when the new password you type equals its current password, it
 - does not change the Windows password (no history rejection, DPAPI data untouched)
@@ -140,7 +140,7 @@ The real rotation is **one full run without `-Only`**, with the **new site passw
 
 If you ever split a run with `-Only`, run `-Only AutoLogon` before `-Only BiCAAdmin`: where auto-logon runs as `BiCA Admin`, the switch to `WinAutoUser` is only possible once the auto-logon slot is done.
 
-What each slot does (PLAN v10.3):
+What each slot does (PLAN v10.4):
 - `BiCAAdmin` and `BiCARemote`: their passwords are **set**, each to its own new password. A missing account is created.
 - `AppUser`: changed with its old password. A missing account is created. It replaces the built-in Administrator, which is disabled and whose services and tasks move to `ApplicationUser`. Exception: if `ApplicationUser` is created in this run, nothing is moved and the Administrator stays enabled (manual migration, reported).
 - Retired accounts, and other accounts you choose to disable: their services, tasks and COM+ applications move to `ApplicationUser`, then the account is disabled.

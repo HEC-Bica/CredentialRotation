@@ -50,7 +50,7 @@
            AutoLogonUser = @( @{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' } )   # kept if active; switch target: first usable
            AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' }
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
-        # Retired without replacement (D22); a dependent running as them is an operator decision (D24).
+        # Retired without replacement (D22); their dependents move to ApplicationUser (D24, v10.4).
         @{ Id = 'Retired';  Kind = 'Windows'; Names = @('SP Admin', 'SYS Admin', 'SOP-Admin'); Mode = 'Disable' }
         # Kept and checked (no password change)
         @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1', 'WinUser2', 'WinUser3'); Role = 'WinUser'; Mode = 'Check' }
