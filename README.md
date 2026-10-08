@@ -103,7 +103,7 @@ C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 -Apply -Only Ap
 echo %ERRORLEVEL%
 ```
 
-The tool runs the audit first and lists the enabled local accounts with what happens to each. It then asks for the **new password twice** and, for `ApplicationUser` only, its **current password**. For the re-apply, type the current password as the new password. Never put a password on the command line. An empty new password skips the slot after a Y/N question.
+The tool runs the audit first and lists the enabled local accounts with what happens to each. It then asks for the **new password twice** and, for `ApplicationUser` only, its **current password**. For the re-apply, type the current password as the new password. The site password rules (at least 8 characters, complexity, no part of the account name) apply to the re-apply too: if the current password of `ApplicationUser` breaks them, step 2 isn't possible on that machine. Never put a password on the command line. An empty new password skips the slot after a Y/N question.
 
 It then tests the old password (at most one failed logon, within the lockout budget). Where it can't decide alone, it asks:
 - both passwords fail: enter again / set the password (DPAPI data lost) / skip
@@ -125,7 +125,7 @@ After the apply it prints the slot results (done / error / pending steps), the *
 |---|---|
 | 0 | Applied, nothing outstanding (the normal result of the `ApplicationUser` re-apply) |
 | 4 | Applied, follow-up required: `LOGINS` entries or IIS identities to update (the normal result of a rotation) |
-| 1 | Partial failure: a slot stopped at a step or an account was skipped; the report lists what is done and pending. Re-run with the same passwords to complete it |
+| 1 | Partial failure: a slot stopped at a step, or a selected slot or account was skipped or blocked; the report lists what is done and pending. Re-run with the same passwords to complete it |
 | 2 | Preflight failed, nothing changed (e.g. not elevated, a write filter protects `C:`) |
 | 3 | Aborted: not confirmed with `YES`, Ctrl+C, or an unexpected error (please send the output) |
 
@@ -133,17 +133,20 @@ After the apply it prints the slot results (done / error / pending steps), the *
 
 ### Step 3: rotate to new credentials (`-Apply`)
 
-Same command and prompts as step 2, but with the **new site password** for each slot, which must never have been used before (password history). Order:
+The real rotation is **one full run without `-Only`**, with the **new site password** for each slot, which must never have been used before (password history). Order:
 1. Re-apply test (step 2) on test site 102575 with `/PS2`.
-2. First real rotation on test site 102575, slot by slot with `-Only`: `-Only BiCAAdmin`, then `-Only AppUser`, `-Only AutoLogon`, and `-Only BiCARemote` last. Then a full run without `-Only`, for the retired accounts (`SP Admin`, `SYS Admin`, `SOP-Admin`), the decision on other enabled accounts and the check-mode fixes.
-3. Then test site QS-K1.
+2. Full rotation on test site 102575, also with `/PS2` (`Start-CredentialRotation.cmd /PS2 -Apply`), so the write paths run once on PowerShell 2.0. It processes all slots (`BiCA Remote` last), the retired accounts (`SP Admin`, `SYS Admin`, `SOP-Admin`), the decision on other enabled accounts and the check-mode fixes.
+3. Then test site QS-K1, with PowerShell 5.1 (without `/PS2`).
+
+If you ever split a run with `-Only`, run `-Only AutoLogon` before `-Only BiCAAdmin`: where auto-logon runs as `BiCA Admin`, the switch to `WinAutoUser` is only possible once the auto-logon slot is done.
 
 What each slot does (PLAN v10.3):
 - `BiCAAdmin` and `BiCARemote`: their passwords are **set**, each to its own new password. A missing account is created.
-- `AppUser`: changed with its old password. A missing account is created. It replaces the built-in Administrator, which is disabled and whose services and tasks move to `ApplicationUser`.
+- `AppUser`: changed with its old password. A missing account is created. It replaces the built-in Administrator, which is disabled and whose services and tasks move to `ApplicationUser`. Exception: if `ApplicationUser` is created in this run, nothing is moved and the Administrator stays enabled (manual migration, reported).
+- Retired accounts, and other accounts you choose to disable: their services, tasks and COM+ applications move to `ApplicationUser`, then the account is disabled.
 - `AutoLogon`: one password for every existing `PUB-User` and `WinAutoUser`, also a disabled one. Neither is ever created, enabled or disabled. An active auto-logon as either of them is kept. An auto-logon as any other account is turned off (SM machines) or switched to `PUB-User`, else `WinAutoUser`.
 
-`-Only` takes slot names (`BiCAAdmin`, `AppUser`, `AutoLogon`, `BiCARemote`), several separated by commas. An unknown slot name stops the tool with exit code 2. The auto-logon step runs when the `AutoLogon` slot or the slot of the current auto-logon account is selected. Check-mode, retired and other accounts are only processed without `-Only`. `BiCA Remote` is your own account: after its new password is set, update saved RDP credentials.
+`-Only` takes slot names (`BiCAAdmin`, `AppUser`, `AutoLogon`, `BiCARemote`), several separated by commas. An unknown slot name stops the tool with exit code 2. The auto-logon step runs when the `AutoLogon` slot or the slot of the current auto-logon account is selected. Check-mode, retired and other accounts are only processed without `-Only`. `BiCA Remote` is your own account: after its new password is set, update saved RDP credentials (the tool lists this as a follow-up); an RDP client retrying the old password locks the account.
 
 If a run is interrupted or a slot fails, re-run with the same passwords. Accounts whose password is set simply get the same value again. For `ApplicationUser`, the run journal makes the probe test the new password first after an interrupted run, and an account already on it is not changed again (D11). The pending steps are completed.
 

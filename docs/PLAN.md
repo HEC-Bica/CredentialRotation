@@ -1,6 +1,14 @@
 # Credential Rotation Tool — Implementation Plan
 
-Status: draft v10.3 · 2026-10-07.
+Status: draft v10.4 · 2026-10-08.
+- **v10.4:** user decisions after review round 12 (§13.1, Appendix A):
+  - The first real rotation is **one full run** without `-Only`, after the `-Only AppUser` re-apply. On test site 102575 both run with `/PS2`.
+  - Dependents of retired accounts and of other accounts the operator disables are **always moved** to `ApplicationUser` (O5 decided, D24). A built-in Administrator whose replacement `ApplicationUser` is created in the same run keeps its dependents and stays enabled.
+  - Lockout budget: the strict D12 rule, also for the verification logons.
+  - An interrupted run is completed by a re-run only; the auto-logon step is not offered after an abort.
+  - `-LogPath` is removed. A switch of auto-logon turns it off first.
+  - `PUB-User` is set like the other auto-logon accounts, without a DPAPI warning.
+  - The site rules (D15) also apply to a re-apply.
 - **v10.3:** the open items O7–O9 are decided (§13.3):
   - `BiCA Admin` and `BiCA Remote` get their new passwords by a set (O8).
   - A missing `BiCA Admin`/`BiCA Remote` is created, like `ApplicationUser` (O7).
@@ -16,7 +24,7 @@ Status: draft v10.3 · 2026-10-07.
   - An active auto-logon as either of them is kept.
 - **v10:** account model redesigned (D21–D25): target accounts are created if missing, the accounts they replace are disabled, and passwords are **set** (only `ApplicationUser` is changed with its old password). v10.1 and v10.2 reverted parts of it; what remains is `ApplicationUser` created if missing, the built-in Administrator disabled, retired accounts disabled, the operator decision on other accounts, and set passwords.
 - Sections not yet rewritten in detail defer to D18 and D21–D25 where they conflict.
-- Eleven rounds of independent review (Appendix A).
+- Twelve rounds of independent review (Appendix A).
 - Updated with the **M0 inventories of two test sites** (§13.2) and the user's decisions on their findings:
   - **QS-K1:** `SM-QS-K1` and `IPT01-QS-K1`, Windows 10 LTSC 2019
   - **102575:** `SM-102575` and `IPT01-102575`, Windows Embedded Standard 7 SP1
@@ -58,8 +66,8 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 | **`ApplicationUser`** | by name; **created if missing** | **change** with the old password (keeps DPAPI, D9); if that fails the operator chooses set/skip; plus dependents: services, scheduled tasks, COM+; replaces the built-in Administrator | Administrators only · enabled · PNE · CCP · PR | yes |
 | **Auto-logon accounts:** `PUB-User`, `WinAutoUser` | by name; **every existing one, enabled or disabled**; **never created** (v10.1) | **set** password: all of them get the one auto-logon slot password (D9). Enabled state unchanged: the tool never enables or disables them. The active auto-logon account keeps its auto-logon (D18) | Users only · PNE · CCP · PR | no |
 | Replaced account | the built-in Administrator (RID 500, possibly renamed) | **disable only** (groups and password unchanged, D22); dependents moved to `ApplicationUser` (D24) | disabled | — |
-| Retired accounts | `SP Admin`, `SYS Admin`, **`SOP-Admin`** where it exists (v10.2) | **disable only** (D22); a dependent running as them is an operator decision (D24, O5); if one is the running account, it is disabled last (D25) | disabled | — |
-| Other enabled accounts | every enabled local account not listed in this table | **the operator decides per account** before `YES`: disable or keep (D23) | as decided | — |
+| Retired accounts | `SP Admin`, `SYS Admin`, **`SOP-Admin`** where it exists (v10.2) | **disable only** (D22); their dependents are moved to `ApplicationUser` (D24, v10.4); if one is the running account, it is disabled last (D25) | disabled | — |
+| Other enabled accounts | every enabled local account not listed in this table | **the operator decides per account** before `YES`: disable or keep (D23); the dependents of a disabled one are moved to `ApplicationUser` (D24) | as decided | — |
 | `WinUser1`, `WinUser2`, `WinUser3` | by name | **check + fix**, no password change | Users · PNE · CCP. **Allowed extra groups** (kept, never added): `Remote Desktop Users`, groups named `hw_fn_*`. All other groups are removed | — |
 | FTP users (0–3 per machine) | name starts or ends with `ftp`, case-insensitive | **check + fix**, no password change | CardCenters only · PNE · CCP. **Removed from Users** too (confirmed; `SM-102575` has `AG_FTP` and `LVSTG_FTP` in CardCenters + Users). If `CardCenters` doesn't exist: report, leave groups unchanged | — |
 | `SQLApplication`, `SQLScript`, `SQLService` | SQL logins on the default instance | rotate | member of `sysadmin` | yes |
@@ -123,7 +131,7 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 | D9 | **Windows passwords are *set*** (`NetUserSetInfo` 1003, no old password asked), **except `ApplicationUser`, which is *changed* with its validated old password** (`NetUserChangePassword`) to keep its DPAPI data; if the old password doesn't work, the operator chooses set (DPAPI loss) or skip. The auto-logon slot sets `PUB-User` and `WinAutoUser` to the same value. SQL logins are set as sysadmin. | Confirmed 2026-10-07 after the DPAPI explanation: a set makes the account's DPAPI-protected secrets unreadable; only `ApplicationUser` (runs SQL Server and the retail application, many master keys) needs them. Setting the *same* password loses nothing. Re-confirmed for `BiCA Admin`/`BiCA Remote` after v10.2 kept them in use (O8, 2026-10-07): their DPAPI data (master keys on both test sites) is given up. |
 | D10 | **Group exclusivity with explicit allow-lists. No other privilege reductions.** | Confirmed, incl. the `WinUser` allow-list. |
 | D11 | **Re-runs are idempotent.** | Recover from a crash by re-running with the same input. |
-| D12 | **Lockout budget for the tool's own logon attempts** (since D9 revised: only the `ApplicationUser` old-password probe and the post-set verifications log on). The threshold and duration are **read per machine**: QS-K1 has 4/5 min on SM and 10/15 min on IPT01, 102575 has 4/3 min on both. The counter and the locked state are re-read immediately before every attempt and before `ChangePassword`. An attempt is made only if at least two attempts remain below the threshold. The probe order minimizes failures (§6 step 7). Failures from other sources are not under the tool's control. | Protects especially `BiCA Remote`. |
+| D12 | **Lockout budget for the tool's own logon attempts** (since D9 revised: only the `ApplicationUser` old-password probe and the post-set verifications log on). The threshold and duration are **read per machine**: QS-K1 has 4/5 min on SM and 10/15 min on IPT01, 102575 has 4/3 min on both. The counter and the locked state are re-read immediately before every attempt and before `ChangePassword`. An attempt is made only if at least two attempts remain below the threshold, i.e. the counter plus two is still below the threshold (threshold 4: attempts only at counter 0 or 1; strict rule confirmed 2026-10-08). This applies to every logon the tool makes, including the verification after a set (v10.4); a verification that the budget forbids is reported as "not verified (lockout budget)". The probe order minimizes failures (§6 step 7). Failures from other sources are not under the tool's control. | Protects especially `BiCA Remote`. |
 | D13 | **Ambiguity → ask the operator, never guess.** | Explicit requirement. |
 | D14 | **All three SQL logins are `sysadmin`.** Deliberate and user-confirmed; matches both test sites. | Confirmed. |
 | D15 | **Site password rules = the strictest rule of any machine**, enforced by the tool on every machine in addition to the local OS policy. Default: minimum length **8** + an **emulation of Windows complexity**, the strictest found on the test sites (`IPT01-QS-K1`). Configurable in `SitePasswordRules`. The emulation: 3 of 5 categories (Unicode upper, lower, digits, non-alphanumeric, other letters), and no case-insensitive token of 3+ characters from the `SamAccountName` or `FullName` of any account in the slot (split on `, . - _ #`, space, tab), nor from the SQL login name. It is implemented in `Native.ps1` over the BSTR, so plaintext stays out of PowerShell. | Confirmed. A shared site password must be accepted on every machine; otherwise the site diverges. |
@@ -131,11 +139,11 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 | D17 | **The tool never restarts the application user's dependents** (SQL Server, Agent, retail services, COM+ applications). SCM, task and COM+ credentials are updated and reported as "restart pending". They take effect at the next start (maintenance window, reboot, or after the `LOGINS` update). | Confirmed. A password change doesn't need an immediate restart. A restart would cause an outage and make the app re-read stale `LOGINS` entries. |
 | D18 | **Auto-logon policy** (v10.1: back to the v9 accounts). Auto-logon only ever runs as a usable `PUB-User` or `WinAutoUser` (enabled, unlocked, interactive logon allowed, not admin), **never as an admin**.<br>• An **active** auto-logon as either of them (auto-logon on and the account enabled) is **kept** on every machine and standardized with the new auto-logon password. There is no switch between the two.<br>• **SM machines** (computer name starts with `SM`, case-insensitive): auto-logon as any other account is turned off.<br>• **Other machines:** any other account is switched to the selected user: `PUB-User` if usable, otherwise `WinAutoUser`. Without a usable one, the operator decides (D13).<br>• Neither account is created or enabled for auto-logon. Auto-logon that is off stays off.<br>Rules in §7.5. | Confirmed. v10.1 (2026-10-07): `PUB-User` can't be enforced as the only auto-logon account because of logon restrictions. Test site 102575 runs auto-logon as `BiCA Admin` with a plain-text password. |
 | D19 | **Write-filter guard.** Preflight detects EWF/FBWF (Windows Embedded Standard 7) and UWF (Windows 10). A volume counts as protected if the filter protects it in the **current session**, unless a whole-volume commit is pending for the next shutdown (EWF `-commit`). If the state can't be determined while a filter driver is installed, the volume counts as protected.<br>• **System volume protected → all of `-Apply` is blocked** (confirmed): slots, auto-logon step, enforcement phase. The tool's own journal and logs would vanish too. Audit still runs and explains why.<br>• Otherwise, a protected volume holding SQL `master` data or log files (`sys.master_files`) blocks the SQL slots. | Confirmed: unknown whether the machines use a write filter. Changes on a protected volume vanish at the next reboot. |
-| D20 | **Re-apply mode.** Entering an account's *current* password as its new password: `ApplicationUser` → treated as already on the new secret (no change); the set accounts → set to the same value, which keeps their DPAPI data and passes history (an admin set isn't checked against history, spike 7). Dependents are rewritten, groups and flags enforced, everything verified; no `LOGINS` follow-up for an unchanged password. **Account creation, disabling (D22/D23) and dependent moves (D24) still happen in a re-apply run;** use `-Only` to limit it. SQL slots left empty. A set account can't be recognized as a re-apply (no old password is asked), so it still gets a new password age and a `LOGINS` follow-up. **The safe first write test is `-Only AppUser`** (O9): `ApplicationUser` is the only account whose re-apply the probe detects, and under `-Only` the retired and other accounts are not processed. It disables the built-in Administrator, which is already disabled on all four test machines. The auto-logon slot sets both accounts to one value, so it is only a re-apply if `PUB-User` and `WinAutoUser` already share their password; otherwise it is a real change for one of them (DPAPI loss, history). Then leave the slot empty in a re-apply run. | Confirmed as the safe first write test (README step 2); scope `-Only AppUser` confirmed 2026-10-07 (O9). |
+| D20 | **Re-apply mode.** Entering an account's *current* password as its new password: `ApplicationUser` → treated as already on the new secret (no change); the set accounts → set to the same value, which keeps their DPAPI data and passes history (assumed: an admin set isn't checked against history; spike 7, still open as O6). Dependents are rewritten, groups and flags enforced, everything verified; no `LOGINS` follow-up for an unchanged password. **Account creation, disabling (D22/D23) and dependent moves (D24) still happen in a re-apply run;** use `-Only` to limit it. SQL slots left empty. A set account can't be recognized as a re-apply (no old password is asked), so it still gets a new password age and a `LOGINS` follow-up. **The safe first write test is `-Only AppUser`** (O9): `ApplicationUser` is the only account whose re-apply the probe detects, and under `-Only` the retired and other accounts are not processed. It disables the built-in Administrator, which is already disabled on all four test machines. The auto-logon slot sets both accounts to one value, so it is only a re-apply if `PUB-User` and `WinAutoUser` already share their password; otherwise it is a real change for one of them (DPAPI loss, history). Then leave the slot empty in a re-apply run. | Confirmed as the safe first write test (README step 2); scope `-Only AppUser` confirmed 2026-10-07 (O9). |
 | D21 | **Account model: three managed admin accounts plus the existing auto-logon accounts** (v10.2).<br>• `BiCA Admin`, `BiCA Remote` (admin; the operator's account) and `ApplicationUser` (admin; application): each gets its own new password and is created if missing (`NetUserAdd` with the slot password, role groups and flags; v10.3 for the BiCA accounts).<br>• Only `ApplicationUser` is enabled if it exists but is disabled; the enabled state of an existing BiCA account is unchanged.<br>• The auto-logon accounts `PUB-User` and `WinAutoUser` are managed only where they exist (v10.1): never created, enabled state unchanged, all set to the one auto-logon slot password.<br>• `SOP-Admin` is never created (v10.2); an existing one is retired (D22).<br>• The tool first **lists the existing enabled local accounts**, then enforces roles and keeps `WinUser1–3` and the FTP users in check mode. | Confirmed 2026-10-07. v10.1: `PUB-User` is not created or enforced (logon restrictions); `WinAutoUser` is kept. v10.2: `SOP-Admin` dropped because of SQL Server (the operator's integrated sysadmin access runs through the BiCA Windows logins); `BiCA Admin`/`BiCA Remote` kept with new unique passwords. v10.3: missing BiCA accounts are created (O7). |
 | D22 | **Replaced and retired accounts are disabled only** (`UF_ACCOUNTDISABLE`; groups and password unchanged, so re-enabling is possible):<br>• built-in Administrator (RID 500) → `ApplicationUser`<br>• retired, no replacement: `SP Admin`, `SYS Admin`, and `SOP-Admin` where it exists (v10.2)<br>A replaced account is only disabled when its replacement exists, is enabled and was verified on its new password in this run. An account that is still the auto-logon account after the auto-logon step stays enabled (e.g. the operator chose "leave unchanged"); the conflict is reported. `BiCA Admin`, `BiCA Remote` (v10.2), `PUB-User` and `WinAutoUser` (v10.1) are not replaced. | Confirmed; `SOP-Admin` "the same as `SP Admin`" (2026-10-07, v10.2). |
 | D23 | **Other enabled accounts** (not managed, not replaced, not `WinUser1–3`/FTP users) are listed and **the operator decides per account** before `YES`: disable or keep. | Confirmed ("other users: ask"). |
-| D24 | **Dependents of a disabled account move to its replacement**: services (`ChangeServiceConfigW` with the replacement's name and new password), password-stored scheduled tasks (`UserId` + password), COM+ server identities. Requires the replacement's password from this run; otherwise the account isn't disabled and the conflict is reported. The retired accounts (`SP Admin`, `SYS Admin`, `SOP-Admin`) have no replacement: a dependent running as them is an operator decision (D13): move to `ApplicationUser` or keep the account enabled. | Confirmed "move to replacement"; the retired-account case is open (O5). |
+| D24 | **Dependents of a disabled account move to its replacement**: services (`ChangeServiceConfigW` with the replacement's name and new password), password-stored scheduled tasks (`UserId` + password), COM+ server identities. Requires the replacement's password from this run; otherwise the account isn't disabled and the conflict is reported.<br>• **Retired accounts** (`SP Admin`, `SYS Admin`, `SOP-Admin`) and **other accounts the operator disables** (D23): their dependents are **always moved to `ApplicationUser`** (v10.4), shown as high-impact before `YES`.<br>• **Exception, new SID:** if `ApplicationUser` is created in this run, the built-in Administrator's dependents are **not moved** and the Administrator **stays enabled**: a created account has no SQL login, ACLs or profile of the old one. This is reported for a manual migration. Without dependents the Administrator is disabled as usual. | Confirmed "move to replacement". O5 decided 2026-10-08: always move; D23 accounts the same; no move to a newly created `ApplicationUser`. |
 | D25 | **The operator's own account comes last.**<br>• The operator logs on as `BiCA Remote`, whose slot is processed last (§8). The RDP session survives the password set; the tool reminds the operator to update saved RDP credentials.<br>• If the running account is itself to be disabled (a retired account such as `SOP-Admin`, or one the operator chose to disable, D23), it is disabled as the very last step of the run. That happens only after `BiCA Remote` is enabled, verified on its new password in this run, and holds an effective remote-interactive logon right (`SeRemoteInteractiveLogonRight` granted and not denied, §7.3). The RDP session continues; the next logon is as `BiCA Remote`. | Confirmed. v10.2: the operator account is `BiCA Remote` again; the effective RDP right replaces v10's "member of Remote Desktop Users", which `BiCA Remote`'s role doesn't add. |
 
 ## 3. Execution model
@@ -153,7 +161,7 @@ There is no code signing. Each release publishes the **expected SHA-256 hashes**
 - Started with "Run as administrator" from `C:\temp\CredentialRotation-<version>\`; it finds the tool via `%~dp0`.
 - Calls every executable by its **absolute path** (`%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, `%SystemRoot%\sysnative\…`), because `cmd` searches the current folder first.
 - Starts 64-bit PowerShell via `%windir%\sysnative\` when needed, with `-NoProfile -ExecutionPolicy Bypass`.
-- A test switch `/PS2` adds `-Version 2`; all test machines have the PS 2.0 engine. Until a PS 2.0 test host exists (§11, O3), it's used for audit runs on both test sites and for the **first M2 apply on test site 102575**, so the write paths also run once on PS 2.0: adapters, LSA secret, `ChangePassword`, netapi32 group changes, task re-registration. The execution policy is `Undefined` at the machine and user scopes on all four test machines (`RemoteSigned` at `LocalMachine`).
+- A test switch `/PS2` adds `-Version 2`; all test machines have the PS 2.0 engine. Until a PS 2.0 test host exists (§11, O3), it's used for audit runs on both test sites and for **both applies on test site 102575**: the `-Only AppUser` re-apply (adapters, flags, netapi32 group changes, service/task/COM+ re-registration) and the full rotation (also `NetUserSetInfo` 1003, `ChangePassword`, `NetUserAdd` where an account is missing, the LSA secret and disabling). SQL isn't rotated in this version, so the `/PS2` SQL limitation (§10) doesn't matter there. The execution policy is `Undefined` at the machine and user scopes on all four test machines (`RemoteSigned` at `LocalMachine`).
 - Explains a local Group Policy execution policy that overrides `Bypass`.
 
 **Runtime:**
@@ -165,7 +173,7 @@ There is no code signing. Each release publishes the **expected SHA-256 hashes**
 - default: audit
 - `-Apply`
 - `-Only <slot names>`: a slot is always processed completely; a slot that doesn't apply on this machine is reported as "not applicable"
-- `-LogPath`
+- no log-path parameter: logs always go to `%ProgramData%\CredentialRotation` (§7.10). `-LogPath` was removed in v10.4, because it reset the ACL of whatever folder it named.
 
 ## 4. Architecture
 
@@ -297,6 +305,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
 - `Create` together with `AutoLogon` (the auto-logon accounts are never created)
 - an `AutoLogon` entry whose `AutoLogonUser` list doesn't name every account of the entry
 - an auto-logon account in `Replaces` or in a `Disable` entry (D18, D22)
+- a copy of the config file in a culture subfolder next to it (e.g. `en-US\CredentialRotation.psd1`): `Import-LocalizedData` would load that copy instead of the file whose hash is displayed (§9)
 
 **Runtime resolution:** all selection rules are resolved to SIDs first.
 - A duplicate SID across entries is an ambiguity (D13).
@@ -347,15 +356,15 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
    - Per slot: the new password twice (compared on BSTRs).
    - **Old password only for `ApplicationUser`** (`PasswordMode = 'Change'`, D9); all other Windows accounts are set, no old password asked. The prompt names the account and says whether it will be created.
    - **Auto-logon slot:** one prompt (new password twice) for every existing auto-logon account; the prompt lists them and marks disabled ones. With neither account present, the slot is not prompted.
-   - **Before the prompts** (D21, D23): the list of existing enabled local accounts, the planned creations, the accounts to be disabled with their replacements, and the dependents to be moved (D24); then the operator decides **per other enabled account**: disable or keep.
+   - **Before the prompts** (D21, D23): the list of existing enabled local accounts, the planned creations, the accounts to be disabled with their replacements, and the dependents to be moved (D24); then, only without `-Only` (§8), the operator decides **per other enabled account**: disable or keep.
    - **Checks** for each new password:
      - the site rules (D15)
-     - the local OS policy (`NetValidatePasswordPolicy`)
+     - the local OS policy (`NetValidatePasswordPolicy`). If the call itself fails, that is a warning, not a rejection: Windows still checks the policy when the password is set.
      - `MaxLength` 128 for SQL
      - the complexity emulation from D15 (name/full-name tokens, character categories)
    - A notice reminds the operator that machines with password history (24 on `IPT01-QS-K1`, 5 on both machines of 102575) reject previously used passwords, and the tool can't check this in advance. **Site passwords must never have been used before.**
    - An empty entry skips the slot after confirmation.
-   - **Re-apply mode (D20):** if an account's new password equals its entered old password (BSTR comparison, no plaintext), the plan marks that account "re-apply: password unchanged".
+   - **Re-apply mode (D20):** if an account's new password equals its entered old password (BSTR comparison, no plaintext), the plan marks that account "re-apply: password unchanged". The checks above apply to a re-apply too (confirmed 2026-10-08): a current password that breaks the site rules can't be re-applied.
 7. **Credential probe** — since D9 revised, **only for `ApplicationUser`'s old password** (set accounts aren't probed; they're verified after the set) (D12, D16):
    - **Logon type:** the first type the account is allowed (granted directly or via one of its groups, and not denied), in the order Network → Interactive → Batch → Service. Examples from the test sites:
      - `BiCA Remote` → Network (denied local logon, and batch/service on IPT01)
@@ -385,7 +394,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
     - **Exit codes:**
       - 0 = OK, nothing outstanding
       - 4 = applied, follow-up required (the normal result of a full rotation)
-      - 1 = partial failure
+      - 1 = partial failure, including a selected slot that was skipped or blocked, so nothing or not everything was applied
       - 2 = preflight failed
       - 3 = aborted
       - 10 = drift (audit)
@@ -500,10 +509,11 @@ The ambiguous cases are:
 **When:**
 - The auto-logon step runs after all slots and **after** the group removals of the enforcement phase (§8). Admin status is therefore judged after this run's removals, e.g. an admin `PUB-User` whose slot completed is no longer an admin when the step runs.
 - Under `-Only` it runs when the auto-logon slot or the slot of the current auto-logon account (e.g. `BiCAAdmin`) is selected, or when the current auto-logon account is disabled by this run (D22).
-- After an abort (exit 3) that follows completed slots, the step is still offered for those slots. If it's declined, it's reported as outstanding.
+- After an abort or crash the step doesn't run (v10.4: no in-run recovery). A re-run with the same passwords completes the slots (D11) and then runs the step. Until then a changed auto-logon account has a stale stored password ("auto-logon broken until re-run").
 
 **Actions,** in a crash-safe order:
 - **Standardize** (same user) and **switch** (new user):
+  0. **switch only** (v10.4): `AutoAdminLogon` = REG_SZ `"0"` first. A crash during the switch then leaves auto-logon off instead of on as the old account with a password that doesn't match it.
   1. the password is stored as the LSA secret `DefaultPassword` (write only)
   2. the plain-text `DefaultPassword` and `AutoLogonCount` are deleted
   3. `DefaultUserName` = the target user; `DefaultDomainName` = the current computer name. `AutoLogonSID` is left unchanged when standardizing; on a switch it is updated or deleted, depending on spike item 11.
@@ -543,7 +553,7 @@ No machine shows Sysinternals Autologon traces, a shell replacement, or an auto-
 - legal notice settings: a policy legal-notice **text** without a caption is set on `IPT01-QS-K1` and both 102575 machines, and auto-logon works there; reported, not blocking
 - `DevicePasswordLessBuildVersion = 2`, `ForceAutoLogon`, a `DefaultDomainName` mismatch
 
-Everything takes effect at the next logon. The tool never reboots. The auto-logon policy is built in M2 together with the rotation, so no apply on a test site leaves a rotated admin auto-logon behind; reboot verification on every OS/language is M4.
+Everything takes effect at the next logon. The tool never reboots. The auto-logon policy is built in M2 together with the rotation, so no apply on a test site leaves a rotated admin auto-logon behind, except by an explicit operator choice ("leave unchanged"), which is reported as outstanding; reboot verification on every OS/language is M4.
 
 ### 7.6 IIS (`IisReport.ps1`) — report only
 - Read-only discovery via `Microsoft.Web.Administration`, which loads on all test machines with IIS, in PS 5.1 and PS 2.0. It covers application pools with `SpecificUser` identity and "connect as" credentials whose user name resolves to a rotated account.
@@ -604,7 +614,7 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
 4. `SQLApplication`, 5. `SQLScript`, 6. `SQLService` (M5)
 7. **`BiCA Remote` last** — the operator's own account (D25)
 
-`BiCA Admin` first serves the Administrators rail: a second enabled admin is verified early. It is not a reconnect path, because `BiCA Admin` is denied RDP logon on three of the four test machines (both SM machines and `IPT01-102575`). The operator's own account goes last. The RDP session survives the password set; the tool reminds the operator to update saved RDP credentials.
+`BiCA Admin` first serves the Administrators rail: a second enabled admin is verified early. It is not a reconnect path, because `BiCA Admin` is denied RDP logon on three of the four test machines (both SM machines and `IPT01-102575`). The operator's own account goes last. The RDP session survives the password set. After the set, the tool reminds the operator to update saved RDP credentials (a FOLLOW-UP entry): an RDP client retrying the old saved password would lock `BiCA Remote`.
 
 **Steps within a slot:**
 
@@ -618,7 +628,7 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
                 required rights (before the dependents: a task registration logs on as a batch job), sysadmin ensured
 4  dependents   SCM -> tasks -> COM+   (auto-logon is a separate step after all slots, §7.5)
 5  restart      none (D17): services and COM+ applications are reported as "restart pending"
-6  verify       logon test per account (logon type per D16; a disabled account is not tested); LOGINS / IIS follow-ups
+6  verify       logon test per account (logon type per D16, within the D12 budget; a disabled account is not tested); LOGINS / IIS follow-ups
                 recorded. If the slot stops after step 2, the accounts already on the new secret are still tested.
 ```
 
@@ -632,10 +642,10 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 
 **Enforcement phase**, after all slots, in this order:
 1. exclusive-group removals for completed slots (respecting allow-lists)
-2. **dependent moves (D24):** services, password-stored tasks and COM+ identities of each account to be disabled are switched to its replacement (with the replacement's new password from this run, verified); an item that can't be moved keeps its account enabled and is reported
+2. **dependent moves (D24):** services, password-stored tasks and COM+ identities of each account to be disabled are switched to its replacement, or to `ApplicationUser` for retired and other accounts (with the new password from this run, verified); an item that can't be moved keeps its account enabled and is reported. No move to an `ApplicationUser` created in this run: the built-in Administrator then keeps its dependents and stays enabled.
 3. the **auto-logon step** (D18, §7.5): keep and standardize, switch to the selected user, or turn off. It judges admin status after step 1, and uses the auto-logon slot's new password, which is held only in memory.
 4. **disabling (D22, D23):**
-   - the built-in Administrator, if `ApplicationUser` is verified and all of its dependents were moved
+   - the built-in Administrator, if `ApplicationUser` is verified and all of its dependents were moved (none to move if `ApplicationUser` was created in this run and the Administrator has dependents: it stays enabled)
    - the retired accounts (`SP Admin`, `SYS Admin`, `SOP-Admin`)
    - the other accounts the operator chose to disable
    
@@ -646,12 +656,12 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 - Under `-Only`, only selected slots; the auto-logon step as described in §7.5. The following run only without `-Only`: check-mode accounts, retired accounts, and the D23 question on other enabled accounts. A replaced account (the built-in Administrator) is disabled when its replacement's slot is selected.
 - An unknown slot name in `-Only` is a fatal parameter error (exit 2), not an empty selection.
 - Rails apply.
-- After a crash between the auto-logon slot and the auto-logon step, a re-run with the same passwords finds the slot already on the new secret (D11) and then runs the step.
+- After a crash between the slots and the auto-logon step, a re-run with the same passwords sets the set accounts again to the same value and finds `ApplicationUser` already on the new secret (D11, journal), then runs the step. Setting the same value again depends on O6 (password history).
 
 **Failure handling** (no automatic revert):
 - **Failure before step 2:** pre-steps are undone; the slot is skipped.
-- **Failure at or after step 2:** the slot stops. The report shows what is on the new secret and what is pending. The tool offers a retry of the pending steps.
-- **Crash or abort:** re-run with the same passwords. The run journal, the probe order and D11 complete it.
+- **Failure at or after step 2:** the slot stops. The report shows what is on the new secret and what is pending. A re-run with the same passwords completes the pending steps; there is no retry within the run.
+- **Crash or abort:** the run stops (confirmed 2026-10-08: no in-run recovery); re-run with the same passwords. The run journal, the probe order and D11 complete it.
 - **Slots are independent.** Secrets are never printed or stored.
 
 **Per-site consistency:** a skipped, failed or mistyped machine diverges from its site. Mitigations:
@@ -734,7 +744,9 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
   - **policy profiles** from both test sites: QS-K1 SM (6 / no complexity / threshold 4), QS-K1 IPT01 (8 / complexity / history 24 / min age 1 / threshold 10), 102575 (6 or 7 / history 5 / threshold 4, 3 min)
   - **deny rights** as found on both test sites
 - **Scenarios:**
-  - `ApplicationUser` missing (created) and present; renamed built-in Administrator disabled, its dependents moved to `ApplicationUser`
+  - `ApplicationUser` present: renamed built-in Administrator disabled, its dependents moved to `ApplicationUser`
+  - `ApplicationUser` missing (created) while the built-in Administrator runs services: nothing moved, the Administrator stays enabled, manual migration reported (D24, v10.4); without dependents it is disabled
+  - a retired account and an operator-disabled other account with a service and a task: both moved to `ApplicationUser`, then disabled (D24, v10.4)
   - `SOP-Admin` present (retired like `SP Admin`, v10.2); `SOP-Admin` as the running account: disabled last, only if `BiCA Remote` is verified and allowed RDP logon (D25)
   - `BiCA Admin`/`BiCA Remote` missing: created (v10.3), "no SQL login" reported; present but disabled: set, stays disabled
   - `PUB-User` + `WinAutoUser` both present, one of them disabled: both set to the slot password, the disabled one stays disabled; neither present: slot not applicable, nothing created
@@ -767,7 +779,7 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 |---|---|---|
 | M0 | Inventory (**test sites QS-K1 and 102575 done** with v1.0, §13.2); **v1.3 on one Windows Embedded 7 and one Windows 10 machine** (`Add-Type` and netapi32 under PS 2.0, group members, write filter); further sites, esp. FR/IT and PS-2.0-only Windows 7; spike, schema freeze, VM matrix | inventory + spike results in `docs/`. The v1.3 results are the entry gate for the `Native.ps1` parts of M1; the rest of M1 can start before. |
 | M1 | Launcher, config, principals, selection + SID overlap, **effective rights**, preflight (policy via `NetUserModalsGet`, write filter D19), discovery incl. the D18 decision, audit | correct audit on VMs and both test sites, incl. one `/PS2` audit per test machine |
-| M2 | Prompting with **site rules**, probe + lockout budget + D16, run journal, adapters, rotation, check mode, groups with allow-lists and rails, **auto-logon policy (D18)**, verification, follow-up reports, exit codes | apply + re-audit clean; D9 confirmed; no apply leaves an admin or disabled account in auto-logon; the first apply on test site 102575 is a **re-apply (D20) with `-Only AppUser`** and `/PS2` (O9) |
+| M2 | Prompting with **site rules**, probe + lockout budget + D16, run journal, adapters, rotation, check mode, groups with allow-lists and rails, **auto-logon policy (D18)**, verification, follow-up reports, exit codes | apply + re-audit clean; D9 confirmed; no apply leaves an admin or disabled account in auto-logon without an explicit operator choice; the first apply on test site 102575 is a **re-apply (D20) with `-Only AppUser`** and `/PS2` (O9), the second the **full rotation without `-Only`**, also with `/PS2` (v10.4) |
 | M3 | Slot sequencing, services (incl. SQL Server as a dependent), tasks, COM+, IIS report, retry, idempotent re-run | after a reboot every dependent starts with the new password; kill-and-rerun passes |
 | M4 | Auto-logon reboot verification | standardize, switch and turn off each behave as planned after a reboot, on every OS/language |
 | M5 | SQL rotation 2005–2017 incl. `UNLOCK` | SQL slots rotate cleanly on 2008 R2 and 2017 |
@@ -836,6 +848,7 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 | **Auto-logon accounts (2026-10-07, v10.1)** | `PUB-User` **can't be enforced** (logon restrictions); back to the previous plan. If an active auto-logon (auto-logon on, account enabled) runs as `WinAutoUser` or `PUB-User`, it is kept for that account. **Every existing `WinAutoUser`/`PUB-User`, also disabled, gets the same password**, entered once (with the repetition as before) | D18, D21, D22 |
 | **No `SOP-Admin` (2026-10-07, v10.2)** | `SOP-Admin` as a new Windows admin creates issues with SQL Server. **Keep using `BiCA Admin` and `BiCA Remote` with new unique credentials. Don't create `SOP-Admin`; an existing one is handled like `SP Admin`** | D2, D21, D22, D25 |
 | **Open items O7–O9 (2026-10-07, v10.3)** | **Set** the new passwords of `BiCA Admin` and `BiCA Remote` (O8). An enabled `PUB-User`/`WinAutoUser` that isn't used for auto-logon stays enabled; a switch away from another account goes to `PUB-User` first, then `WinAutoUser`; **a missing `BiCA Admin`/`BiCA Remote` is created** (O7). The safe first write test is `-Only AppUser` (O9) | D9, D18, D20, D21 |
+| **Review round 12 decisions (2026-10-08, v10.4)** | First real rotation = **one full run** (no slot-by-slot runs); if `-Only` is used, AutoLogon before BiCAAdmin. `/PS2` for both applies on 102575. **Strict D12 budget.** Site rules also for the re-apply. Dependents of retired accounts **always moved** to `ApplicationUser` (O5); the same for other accounts the operator disables (D23). **No move to a newly created `ApplicationUser`**: the built-in Administrator keeps its dependents and stays enabled. Interrupted run: **stop, re-run only**. **Remove `-LogPath`.** Auto-logon switch: **turn off first**. `PUB-User` set **without a DPAPI warning** | D12, D20, D24, §3, §7.5, §8 |
 | Disable also | `SP Admin`, `SYS Admin`; since v10.2 also an existing `SOP-Admin` | D22 |
 | Keep | `WinUser1–3`, FTP users (check mode as before) | D21 |
 | Other enabled accounts | **Ask the operator** per account | D23 |
@@ -902,7 +915,7 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 ### 13.3 Open items
 - **O1** Inventory v1.3 on one Windows Embedded 7 machine (e.g. `SM-102575`) and one Windows 10 machine (e.g. `IPT01-QS-K1`): `Add-Type` and netapi32 under PS 2.0, group members, write filter. This is the entry gate for the `Native.ps1` parts of M1. Then further sites, especially FR/IT machines and a Windows 7 with PS 2.0 only.
 - **O2** `LOGINS` automation (deferred by the user).
-- **O5** A service, task or COM+ application running as a retired account (`SP Admin`, `SYS Admin`, `SOP-Admin`; no replacement): move it to `ApplicationUser`, or keep the account enabled? Until decided, the operator is asked per item (D13).
+- ~~O5~~ **Decided (2026-10-08):** a service, task or COM+ application running as a retired account is always moved to `ApplicationUser` (D24); the same for an other account the operator disables (D23).
 - **O6** Spike 7 extension: whether an admin set (`NetUserSetInfo` 1003) is checked against password history and policy on Windows 7 / 10 (affects D20 for set accounts).
 - ~~O7~~ **Decided (2026-10-07):**
   - (a) An enabled `PUB-User`/`WinAutoUser` that isn't the auto-logon account stays enabled.
@@ -952,7 +965,10 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 | Tampered script (no signing, unprotected `C:\temp`) | Accepted; published hashes, logged hashes |
 | A system image taken before the rotation is restored later (`SM-102575` runs daily/monthly system backups) and brings back old passwords | Out of the tool's scope; to be covered by the site procedure |
 | PS 2.0 incompatibility | Lint; `/PS2` audit runs on the test sites; a real PS 2.0 test host once available (O3), until then unit tests on PS 5.1 only (confirmed) |
-| Stale auto-logon after a partial run (one failed logon per boot, threshold 4 on 102575) | Password source per target account (§7.5); "auto-logon broken until re-run" as a high-impact item; the step is still offered after an abort |
+| Stale auto-logon after a partial run (one failed logon per boot, threshold 4 on 102575) | Password source per target account (§7.5); "auto-logon broken until re-run" as a high-impact item; a switch turns auto-logon off first; re-run with the same passwords |
+| Dependents moved to an account with a new SID lose its SQL login, ACLs and profile (a created `ApplicationUser`) | D24 v10.4: no move to an `ApplicationUser` created in this run; the built-in Administrator stays enabled; manual migration reported |
+| Moves of retired/other accounts' dependents to `ApplicationUser` change who they run as (SQL login, ACLs of the old account) | Shown as high-impact before `YES`; failures only show at the next start (D17); `ApplicationUser` is `sysadmin` on all test sites except `IPT01-102575` |
+| An RDP client retries `BiCA Remote`'s old saved password | FOLLOW-UP reminder after its set (§8); threshold 4 on 102575 |
 
 ---
 
@@ -971,6 +987,9 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 | 9 | v9 | 8 | 3 Major, 7 Minor | SQL restart before SQL slots, D15 weaker than Windows complexity, one old password for two accounts → resolved in v9.1 (D17 no restarts, complexity emulation, per-account old password, token-model SIDs, secedit for complexity, SQL re-run skip, auto-logon right check, deny conflicts reported only) |
 | 10 | v9.2 | 7.5 | 4 Major, 6 Minor | D18 table gaps (no usable target, admin `PUB-User`, `AutoLogonCount`, REG_DWORD, stale domain), password source per account, D19 vs journal/enforcement, no real PS 2.0 in CI → resolved in v9.3 (usable-target rule, per-account password source, crash-safe write order, readable audit definition, all of `-Apply` blocked on a protected system volume, `master` data + log files, `/PS2` audits, D18 moved into M2, FTP network-right/ACL warnings, absolute launcher paths, log-folder ownership, v1.3 gate) |
 | 11 | v9.3 | 8.5 | 4 Minor | removals vs auto-logon step order, standardize option when a switch fails, planted journal, `/PS2` only for audits → fixed in v9.3 (removals before the auto-logon step, third operator option, journal ignored after an ownership fix, `/PS2` for the first apply on 102575, PS 2.0 VMs marked pending) |
+| 12 | v10.3 + build 0.3.0 | 7.5 (plan), 7.5 (apply), 8 (safety), 8 (tests) | 0 Blocker, 10 Major, ~15 Minor | README slot order vs "off stays off", undefined final full run, D24 moves to a new SID, `/PS2` coverage of the write paths, re-apply vs site rules, exit 0 for a skipped slot, verification logons outside the D12 budget, `-LogPath` ACL reset, no RDP reminder, 2 unit tests vs D12 → user decisions in v10.4 (§13.1); code fixes in 0.4.0 |
+
+v10.4 records the user's decisions on review round 12 (2026-10-08). The round reviewed the plan and build 0.3.0 with four independent reviewers (plan, apply path, safety, unit tests); every Major was checked against the code. The first write test (`-Only AppUser` re-apply) was traced as harmless. The code fixes follow in version 0.4.0.
 
 The v10.3 build (version 0.3.0) was compared with this plan on 2026-10-07. The fixes went into the build and the plan; the remaining gaps are in §13.4.
 
