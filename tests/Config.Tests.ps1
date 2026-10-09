@@ -36,7 +36,7 @@ Describe 'Import-CrConfig' {
         $c.OtherEnabledAccounts | Should Be 'Ask'
     }
 
-    It 'has the v10.3 slots in Order, BiCARemote last (D25)' {
+    It 'has the v10.4 slots in Order, BiCARemote last (D25)' {
         $c = Import-CrConfig -Path $defaultPath
         $slots = @(); $orders = @()
         foreach ($cr in $c.Credentials) { $slots += $cr.Slot; $orders += $cr.Order }
@@ -44,7 +44,7 @@ Describe 'Import-CrConfig' {
         ($orders -join ',') | Should Be '10,20,30,40,50,60,90'
     }
 
-    It 'has the v10.3 managed BiCA accounts (created if missing; BiCA Remote is the operator)' {
+    It 'has the v10.4 managed BiCA accounts (created if missing; BiCA Remote is the operator)' {
         $c = Import-CrConfig -Path $defaultPath
         $admin = Get-TestAccount $c 'BiCAAdmin'
         $admin.Name | Should Be 'BiCA Admin'
@@ -433,7 +433,7 @@ Describe 'Test-CrConfig' {
         }
     }
 
-    Context 'managed-account keys (v10.3)' {
+    Context 'managed-account keys (v10.4)' {
         It 'a non-bool Create' {
             $c = New-CrTestConfig; (Get-TestAccount $c 'BiCAAdmin').Create = 'yes'
             Test-HasConfigError @(Test-CrConfig -Config $c) "BiCAAdmin': Create must be" | Should Be $true

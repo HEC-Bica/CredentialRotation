@@ -11,8 +11,8 @@ A PowerShell tool that rotates the local Windows and SQL Server credentials on s
 | Milestone | Content | State |
 |---|---|---|
 | M1 | Read-only audit | On branch `feature/m1-audit`; **tested on `SM-QS-K1`** (Windows 10) **and `SM-102575`** (Windows Embedded 7), PS 5.1 and PS 2.0 |
-| M2 | Password prompts, account model (PLAN v10.4), groups, flags, auto-logon policy | Code written (version 0.4.0); **not yet run** |
-| M3 | Services, scheduled tasks, COM+ updates and moves | Code and unit tests written; **not yet run** |
+| M2 | Password prompts, account model (PLAN v10.4), groups, flags, auto-logon policy | Code and unit tests written (version 0.4.0); **not yet run** |
+| M3 | Services, scheduled tasks, COM+ updates and moves | Code and unit tests written (version 0.4.0); **not yet run** |
 
 AppLocker blocks scripts on the development machine, so all runs happen on the test machines.
 
@@ -28,15 +28,15 @@ Fixed after the first runs:
 - PS 2.0 differences: `Get-Acl`/`Set-Acl`/`Export-Csv` have no `-LiteralPath`, and `Import-LocalizedData` needs `-BindingVariable`. The lint now flags both.
 - Words typed after the command (e.g. `echo %ERRORLEVEL%` on the same line) were taken as parameter values; the tool now refuses unnamed arguments.
 
-Known limitation of `/PS2` test runs: on machines with WMF 5.1 or Windows 10, `powershell.exe.config` contains a .NET 4 `<uri>` section that the PS 2.0 engine can't read, so SQL Server can't be reached and the SQL slots are blocked. Real runs use PS 5.1 wherever it is installed, so they are not affected. SQL under PS 2.0 has to be tested on a Windows 7 with PS 2.0 only.
+Known limitation of `/PS2` test runs: on `SM-QS-K1` (Windows 10), `powershell.exe.config` contains a .NET 4 `<uri>` section that the PS 2.0 engine can't read, so SQL Server can't be reached and the SQL slots are blocked. `SM-102575` (Windows 7 with WMF 5.1) reached SQL under `/PS2`. Real runs use PS 5.1 wherever it is installed, so they are not affected.
 
 ## Testing on a machine
 
-There are three test steps. The code for all three exists (version 0.4.0), but only step 1 has been run so far. Steps 2 and 3 are untested, and the unit tests of version 0.4.0 haven't been run yet.
+There are three test steps. The code for all three exists (version 0.4.0), but only step 1 has been run so far, with the M1 version. Steps 2 and 3 and the unit tests of version 0.4.0 haven't been run yet.
 
 ### Step 1: audit (read-only)
 
-Step 1 has been done with the M1 version. Repeat it with version 0.4.0 before step 2: the audit now reports the account model of PLAN v10.4.
+Repeat step 1 with version 0.4.0 before step 2: the audit now reports the account model of PLAN v10.4.
 
 The audit reads the machine and reports what `-Apply` would change. It changes nothing, apart from creating its log folder `%ProgramData%\CredentialRotation`.
 
@@ -46,7 +46,7 @@ The audit reads the machine and reports what `-Apply` would change. It changes n
 C:\temp\CredentialRotation\src\        Start-CredentialRotation.cmd, CredentialRotation.ps1, lib\
 C:\temp\CredentialRotation\config\     CredentialRotation.psd1
 C:\temp\CredentialRotation\tests\      only for a Windows 10 machine
-C:\temp\CredentialRotation\tools\      Get-CRInventory.ps1 (inventory v1.3)
+C:\temp\CredentialRotation\tools\      Get-CRInventory.ps1 (inventory v1.4)
 ```
 
 **2. Run the audit** in an elevated command prompt ("Run as administrator"), logged on as `BiCA Remote`. Type each command on its own line; anything after the command is taken as an argument and refused:
@@ -86,7 +86,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\temp\CredentialRotati
 
 ### Step 2: re-apply the current password of `ApplicationUser` (`-Apply -Only AppUser`, version 0.4.0)
 
-A safe first write test, done before any real rotation (PLAN D20, O9). Only `ApplicationUser` is changed with its old password, so only for it can the tool recognize a re-apply: when the new password you type equals its current password, it
+A safe first write test, done before any real rotation (PLAN D20). Only `ApplicationUser` is changed with its old password, so only for it can the tool recognize a re-apply. When the new password you type equals its current password, the tool
 - does not change the Windows password (no history rejection, DPAPI data untouched)
 - still rewrites its services, scheduled tasks and COM+ identities with that password (no restarts)
 - enforces groups, flags and logon rights, and runs every verification
@@ -124,8 +124,8 @@ After the apply it prints the slot results (done / error / pending steps), the *
 | Exit code | Meaning |
 |---|---|
 | 0 | Applied, nothing outstanding (the normal result of the `ApplicationUser` re-apply) |
-| 4 | Applied, follow-up required: `LOGINS` entries or IIS identities to update (the normal result of a rotation) |
-| 1 | Partial failure: a slot stopped at a step, or a selected slot or account was skipped or blocked; the report lists what is done and pending. Re-run with the same passwords to complete it |
+| 4 | Applied, follow-up required: `LOGINS` entries, saved RDP credentials of `BiCA Remote`, IIS identities, or a manual migration to do (the normal result of a rotation) |
+| 1 | Partial failure: a slot stopped at a step, a selected slot or account was skipped or blocked, or a new password couldn't be verified within the lockout budget. The report lists what is done and pending. Re-run with the same passwords to complete it |
 | 2 | Preflight failed, nothing changed (e.g. not elevated, a write filter protects `C:`) |
 | 3 | Aborted: not confirmed with `YES`, Ctrl+C, or an unexpected error (please send the output) |
 
@@ -142,8 +142,9 @@ If you ever split a run with `-Only`, run `-Only AutoLogon` before `-Only BiCAAd
 
 What each slot does (PLAN v10.4):
 - `BiCAAdmin` and `BiCARemote`: their passwords are **set**, each to its own new password. A missing account is created.
-- `AppUser`: changed with its old password. A missing account is created. It replaces the built-in Administrator, which is disabled and whose services and tasks move to `ApplicationUser`. Exception: if `ApplicationUser` is created in this run, nothing is moved and the Administrator stays enabled (manual migration, reported).
+- `AppUser`: changed with its old password. A missing account is created. It replaces the built-in Administrator, which is disabled and whose services, tasks and COM+ applications move to `ApplicationUser`.
 - Retired accounts, and other accounts you choose to disable: their services, tasks and COM+ applications move to `ApplicationUser`, then the account is disabled.
+- Exception: nothing is moved to an `ApplicationUser` the tool has just created (new SID: no SQL login, permissions or profile of the old account). An account whose dependents would move to it stays enabled, and the manual migration is listed as a follow-up.
 - `AutoLogon`: one password for every existing `PUB-User` and `WinAutoUser`, also a disabled one. Neither is ever created, enabled or disabled. An active auto-logon as either of them is kept. An auto-logon as any other account is turned off (SM machines) or switched to `PUB-User`, else `WinAutoUser`.
 
 `-Only` takes slot names (`BiCAAdmin`, `AppUser`, `AutoLogon`, `BiCARemote`), several separated by commas. An unknown slot name stops the tool with exit code 2. The auto-logon step runs when the `AutoLogon` slot or the slot of the current auto-logon account is selected. Check-mode, retired and other accounts are only processed without `-Only`. `BiCA Remote` is your own account: after its new password is set, update saved RDP credentials (the tool lists this as a follow-up); an RDP client retrying the old password locks the account.

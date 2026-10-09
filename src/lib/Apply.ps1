@@ -240,7 +240,7 @@ function Test-CrApplyBudget {
         $r['Reason'] = 'the account is locked (again)'
         return $r
     }
-    # An unknown threshold counts as 3, as in the probe (CONTRACTS "Secrets.ps1").
+    # An unknown threshold counts as 3, as in the probe (CONTRACTS 5.6).
     $threshold = 3
     $policy = $State['Policy']
     if ($policy -is [hashtable] -and -not $policy['Error'] -and $null -ne $policy['LockoutThreshold']) { $threshold = [int]$policy['LockoutThreshold'] }
@@ -293,7 +293,7 @@ function Get-CrApplyGroupMembers {
     return , @()
 }
 
-# A user record for an account created in this run (CONTRACTS "Users"), added to $State.Users.
+# A user record for an account created in this run (CONTRACTS 4.1), added to $State.Users.
 function Add-CrApplyCreatedUser {
     param($State, [string]$Name, [string]$Sid)
     $flags = 0x10241
@@ -536,7 +536,7 @@ function Get-CrApplyAccountPath {
     $outcome = [string]$Probe['Outcome']
     $choice = [string]$Probe['Path']
     if ($choice -eq 'Skip') { $r['Reason'] = 'Skipped by the operator'; return $r }
-    if ($choice -eq 'Set' -or $choice -eq 'Reset') {
+    if ($choice -eq 'Set') {
         $r['Path'] = 'Set'
         return $r
     }
@@ -632,7 +632,7 @@ function Get-CrApplyPreview {
             if ($e['Error']) { $hasError = $true }
             if (-not $e['NotApplicable'] -or $e['Create']) { [void]$applicable.Add($e) }
         }
-        if ($isSql) { $p['Status'] = 'Skipped'; $p['Unsupported'] = $true; $p['Reason'] = 'SQL rotation is not available in this version'; continue }
+        if ($isSql) { $p['Status'] = 'Skipped'; $p['Unsupported'] = $true; $p['Reason'] = 'SQL rotation not available in this version'; continue }
         if ($blocked.ContainsKey($slot)) { $p['Status'] = 'Blocked'; $p['Reason'] = [string]$blocked[$slot]; continue }
         if ($hasError) { $p['Status'] = 'Blocked'; $p['Reason'] = 'Account data could not be read'; continue }
         if ($applicable.Count -eq 0) { $p['Status'] = 'NotApplicable'; $p['Reason'] = 'No account of this slot exists on this machine'; continue }
@@ -684,6 +684,13 @@ function Get-CrApplyPreview {
     return , $list.ToArray()
 }
 
+# A disable item's reason without its leading "stays enabled: " (the callers say that already).
+function Get-CrApplyReasonText {
+    param([string]$Reason)
+    if ($Reason -and $Reason.StartsWith('stays enabled: ')) { return $Reason.Substring(15) }
+    return $Reason
+}
+
 # $true if the entry's account is created in this run (its preview slot has an account with Path 'Create').
 function Test-CrApplyEntryCreated {
     param($Preview, $Entry)
@@ -711,7 +718,7 @@ function Find-CrApplyPreviewSlot {
 #    Services; Tasks; ComPlus; OtherTasks; HasDependents;
 #    MoveEntry (where the dependents go); Planned ($true = disabled if the conditions hold at the time); Reason }.
 # Replaced accounts only for selected slots; Disable entries and operator-chosen others (D23) only without -Only.
-# Dependents of an account without replacement always move to the application account (D24, O5 decided in v10.4).
+# Dependents of an account without replacement always move to the application account (D24).
 # No move to an account created in this run (new SID): the account keeps its dependents and stays enabled.
 function Get-CrApplyDisablePlan {
     param($State, $Resolved, $Preview, [string]$RunningSid, [string[]]$Only, $OtherDecisions)
@@ -1427,7 +1434,7 @@ function Invoke-CrApplyMoves {
         if (-not $item['Planned']) { continue }
         $name = $item['Name']
         foreach ($t in (ConvertTo-CrArray $item['OtherTasks'])) {
-            Add-CrApplyFinding $Context 'HighImpact' 'Tasks' ('Scheduled task runs as this account without a stored password (LogonType ' + $t['LogonType'] + '); it is not moved and stops running once the account is disabled: ' + $t['Path']) $null $name
+            Add-CrApplyFinding $Context 'HighImpact' 'Tasks' ('Scheduled task runs as ' + $name + ' without a stored password (LogonType ' + $t['LogonType'] + '); it is not moved and stops running when the account is disabled: ' + $t['Path']) $null $name
         }
         if (-not $item['HasDependents']) { continue }
         $target = Get-CrApplyMoveTarget -Context $Context -Item $item
@@ -1698,7 +1705,7 @@ function Invoke-CrApplyDisables {
         if ($item['IsRunning']) { continue }
         if (-not $item['Planned']) {
             $item['Status'] = 'KeptEnabled'
-            Add-CrApplyFinding $Context 'Info' 'Accounts' ('Not disabled: ' + $item['Reason']) $item['ReplacementSlot'] $item['Name']
+            Add-CrApplyFinding $Context 'Info' 'Accounts' ('Not disabled: ' + (Get-CrApplyReasonText $item['Reason'])) $item['ReplacementSlot'] $item['Name']
             if ($item['MigrateManually']) {
                 # D24 (v10.4): reported for a manual migration (FOLLOW-UP REQUIRED, exit 4).
                 Add-CrApplyFinding $Context 'FollowUp' 'Accounts' ('Migrate the services, scheduled tasks and COM+ applications of this account manually, then disable it (D24)') $item['ReplacementSlot'] $item['Name']
@@ -1728,7 +1735,10 @@ function Invoke-CrApplyRunningAccountStep {
     if (-not $item['Planned']) {
         $item['Status'] = 'KeptEnabled'
         $out['Reason'] = $item['Reason']
-        Add-CrApplyFinding $Context 'Info' 'Accounts' ('Your own account stays enabled: ' + $item['Reason']) $item['ReplacementSlot'] $item['Name']
+        Add-CrApplyFinding $Context 'Info' 'Accounts' ('Your own account stays enabled: ' + (Get-CrApplyReasonText $item['Reason'])) $item['ReplacementSlot'] $item['Name']
+        if ($item['MigrateManually']) {
+            Add-CrApplyFinding $Context 'FollowUp' 'Accounts' ('Migrate the services, scheduled tasks and COM+ applications of this account manually, then disable it (D24)') $item['ReplacementSlot'] $item['Name']
+        }
         return $out
     }
     $why = $null
@@ -1816,7 +1826,7 @@ function Invoke-CrApplyCheckFixes {
 
 #region Public
 
-# Applies the confirmed plan (CONTRACTS "Apply.ps1 / entry point", v10). -Probes: hashtable SID -> probe result of the
+# Applies the confirmed plan (CONTRACTS 6.4). -Probes: hashtable SID -> probe result of the
 # Change accounts, optionally with Path = 'Set'|'Skip' (operator choice before YES). -OtherDecisions: SID ->
 # 'Disable'|'Keep' (Read-CrOtherAccountDecisions, D23). -AutoLogonChoice: the operator's choice for an ambiguous auto-logon made
 # before YES; -AutoLogonPrompt: called with the decision when the step turns out ambiguous at runtime (D13).
@@ -2057,6 +2067,8 @@ function Resolve-CrProbeDecisions {
                 }
                 if ($c -eq 'E') {
                     $again = Read-CrSecureHost -Prompt ('Current (old) password of {0}' -f $name)
+                    # An empty or cancelled entry counts as an empty password (as in Read-CrOneSlotSecret), not an abort.
+                    if ($null -eq $again) { $again = New-Object System.Security.SecureString }
                     $previous = $sa['OldSecret']
                     $sa['OldSecret'] = $again
                     $sa['Reapply'] = [bool](Test-CrSecretEqual -A $again -B $slotSecret['NewSecret'])
@@ -2141,7 +2153,7 @@ function Get-CrApplyDisableText {
     elseif ($Item['Kind'] -eq 'Disable') { $text = 'disable, retired without replacement' }
     else { $text = 'disable, your decision' }
     if ($Item['IsRunning']) { $text = $text + '; your own account: LAST, only when the operator account is ready (D25)' }
-    if (-not $Item['Planned']) { $text = 'not disabled: ' + $Item['Reason'] }
+    if (-not $Item['Planned']) { $text = 'not disabled: ' + (Get-CrApplyReasonText $Item['Reason']) }
     return $text
 }
 
@@ -2176,9 +2188,11 @@ function Write-CrApplySummary {
             $deps = New-Object System.Collections.ArrayList
             foreach ($x in (Join-CrApplyList (Join-CrApplyList $i['Services'] $i['Tasks']) $i['ComPlus'])) { [void]$deps.Add((Get-CrApplyItemLabel $x)) }
             if ($deps.Count -gt 0) {
-                $to = 'operator decides'
-                if ($i['MoveEntry'] -is [hashtable] -and $i['Planned']) { $to = Get-CrApplyEntryAccountName $i['MoveEntry'] }
-                Write-Host ('        dependents moved to {0} (D24): {1}' -f $to, (($deps.ToArray()) -join ', '))
+                if ($i['MoveEntry'] -is [hashtable] -and $i['Planned']) {
+                    Write-Host ('        dependents moved to {0} (D24): {1}' -f (Get-CrApplyEntryAccountName $i['MoveEntry']), (($deps.ToArray()) -join ', '))
+                } else {
+                    Write-Host ('        dependents not moved (D24): {0}' -f (($deps.ToArray()) -join ', '))
+                }
             }
         }
         Write-Host ''

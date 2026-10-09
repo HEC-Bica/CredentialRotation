@@ -9,7 +9,7 @@ function Get-CrGroupErrorText {
     return $ex.Message
 }
 
-# All local groups (CONTRACTS "Groups"); returns an array of @{ Name; Sid; MemberSids; Error }.
+# All local groups (CONTRACTS 4.1); returns an array of @{ Name; Sid; MemberSids; Error }.
 # Throws if the groups can't be enumerated at all. A group whose members can't be read has Error set and
 # MemberSids = @(); a group whose SID can't be resolved has Error set but keeps its members.
 function Get-CrLocalGroups {
@@ -34,7 +34,7 @@ function Get-CrLocalGroups {
     return , $list.ToArray()
 }
 
-#region Write side (M2, PLAN section 7.2; CONTRACTS "Write side of existing modules")
+#region Write side (M2, PLAN section 7.2; CONTRACTS 5.8)
 
 # Internal: the $State.Groups entry with this SID, or $null.
 function Find-CrGroupBySid {

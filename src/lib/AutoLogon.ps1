@@ -1,5 +1,5 @@
 # AutoLogon.ps1 - Winlogon auto-logon read side, the D18 decision and the auto-logon actions (docs/PLAN.md section 7.5,
-# v10.1: PUB-User and WinAutoUser are the managed auto-logon accounts; an active auto-logon as either is kept).
+# D18: PUB-User and WinAutoUser are the managed auto-logon accounts; an active auto-logon as either is kept).
 # Never reads the DefaultPassword value or the LSA secret (only whether the value exists); the LSA secret is write-only.
 
 #region Registry access (internal, mocked in tests)
@@ -292,7 +292,7 @@ function Get-CrAutoLogonState {
     return $state
 }
 
-# D18 decision, PLAN section 7.5 (v10.1). Read-only; the apply step acts on the result.
+# D18 decision, PLAN section 7.5. Read-only; the apply step acts on the result.
 # The managed auto-logon accounts are the AutoLogonUser list of the entry with the AutoLogon block (the default config:
 # PUB-User, WinAutoUser). An active auto-logon as one of them is kept and standardized on every machine; there is no
 # switch between them. Any other account is turned off on SM machines and switched to the selected user (the first
@@ -448,7 +448,7 @@ function Get-CrAutoLogonDecision {
             [void]$reasons.Add(('Auto-logon is on as {0} ({1}).' -f $current['Name'], $kind))
 
             if ($isManaged) {
-                # D18 (v10.1): an active auto-logon as a managed account is kept on every machine, no switch between them.
+                # D18: an active auto-logon as a managed account is kept on every machine, no switch between them.
                 $target = $current
                 if ($currentUsable['Usable']) {
                     $intended = 'Standardize'

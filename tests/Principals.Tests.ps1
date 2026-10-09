@@ -64,7 +64,7 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $e.Replaced.Count | Should Be 0
     }
 
-    It 'resolves a missing BiCA Admin to a placeholder (Create, D21 v10.3)' {
+    It 'resolves a missing BiCA Admin to a placeholder (Create, D21 v10.4)' {
         $s = New-CrTestState -Profile 'SM' -OmitUsers 'BiCA Admin'
         $e = Get-TestEntry (Resolve-CrAccounts -Config $config -State $s) 'BiCAAdmin'
         $e.Kind | Should Be 'Windows'

@@ -105,7 +105,7 @@ function Test-CrForceGuest {
 }
 
 # D16: first allowed of Network, Interactive, Batch, Service; otherwise Network with Fallback.
-# ForceGuest (CONTRACTS "v10", D16): Network is never chosen, because Windows may map a local network logon to Guest,
+# ForceGuest (CONTRACTS 5.9, D16): Network is never chosen, because Windows may map a local network logon to Guest,
 # which would accept any password. Then the next allowed type is used; if there is none, LogonType = $null with
 # Fallback = $true: the password can't be verified by a logon (callers treat it as unverifiable).
 function Select-CrProbeLogonType {

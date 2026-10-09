@@ -1,5 +1,5 @@
 # Secrets.ps1 - password prompts, checks, the D23 decisions and the credential probe
-# (docs/PLAN.md section 6 steps 6-7, D4, D9, D12, D15, D16, D20, D23; CONTRACTS "v10: account model").
+# (docs/PLAN.md section 6 steps 6-7, D4, D9, D12, D15, D16, D20, D23; CONTRACTS 5.6).
 # Secrets are SecureStrings only. This file never converts one to a managed string, never prints, logs or stores one;
 # comparisons, lengths, complexity and logon tests go through the Native.ps1 wrappers over BSTRs.
 
@@ -130,7 +130,7 @@ function Get-CrNewSecretProblems {
 # Asks the operator, one account at a time, whether each other enabled local account is disabled or kept (D23).
 # -Accounts: State user hashtables (Get-CrOtherEnabledAccounts) or resolved accounts; each needs Name and Sid.
 # Returns a hashtable SID -> 'Disable'|'Keep'. Anything but a clear yes keeps the account (Confirm-CrYesNo: three
-# unclear answers count as No). Asked before the password prompts (CONTRACTS "v10", entry point).
+# unclear answers count as No). Asked before the password prompts (CONTRACTS 6.3).
 function Read-CrOtherAccountDecisions {
     param($Accounts)
     $result = @{}
@@ -200,7 +200,7 @@ function Get-CrSlotEntries {
     return , $list.ToArray()
 }
 
-# PasswordMode of a resolved entry (CONTRACTS "v10"): 'Change' or 'Set' (default).
+# PasswordMode of a resolved entry (CONTRACTS 4.3): 'Change' or 'Set' (default).
 function Get-CrEntryPasswordMode {
     param($Entry)
     $mode = $null
@@ -350,7 +350,7 @@ function Read-CrOneSlotSecret {
 # -BlockedSlots: Preflight BlockedSlots (slot -> reason); those slots are returned as skipped without a prompt.
 # Per slot: @{ Slot; Label; Skipped; Reason; NewSecret; Findings; Accounts = @(@{ Sid ($null for an account created
 # in this run); Name; OldSecret ($null unless PasswordMode 'Change' and the account exists); Reapply; PasswordMode;
-# Create }) }. Accounts to be created are included (CONTRACTS "v10"), so their names count for the D15 tokens.
+# Create }) }. Accounts to be created are included (CONTRACTS 5.6), so their names count for the D15 tokens.
 function Read-CrSlotSecrets {
     param($Config, $Resolved, $State, [string[]]$Only, [hashtable]$BlockedSlots)
     $result = @{}
@@ -436,7 +436,7 @@ function Write-CrProbeLog {
 # Unverifiable, Locked, BudgetExceeded, Disabled. Get-CrUserInfo is re-read before every attempt.
 # Order: new first if an unfinished earlier run recorded this account's Secret step, else old first; the second
 # test only if the first failed. When old equals new (D20) a single test decides Reapply / BothFailed.
-# Only called for existing accounts with PasswordMode 'Change' (CONTRACTS "v10"); set accounts aren't probed.
+# Only called for existing accounts with PasswordMode 'Change' (CONTRACTS 5.6); set accounts aren't probed.
 # A logon type of $null (ForceGuest, no other allowed type) gives Unverifiable without an attempt.
 function Invoke-CrCredentialProbe {
     param($State, $Account, [System.Security.SecureString]$OldSecret, [System.Security.SecureString]$NewSecret, $Journal, [string]$RunId)
@@ -449,7 +449,7 @@ function Invoke-CrCredentialProbe {
     }
     $threshold = Get-CrProbeLockoutThreshold $State
 
-    # No account yet (created in this run): there is no old password to probe (CONTRACTS "v10": Change accounts only).
+    # No account yet (created in this run): there is no old password to probe (CONTRACTS 5.6: Change accounts only).
     if (-not $sid) {
         $result['Outcome'] = 'Unverifiable'
         $result['Message'] = 'the account does not exist yet; no logon attempt'

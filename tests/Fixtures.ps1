@@ -6,7 +6,7 @@
 #   Helpers: Get-CrTestUser, Get-CrTestUserSid, Get-CrTestGroup, Add-CrTestUser, Remove-CrTestUser,
 #            Add-CrTestGroup, Add-CrTestGroupMember, Remove-CrTestGroupMember, Set-CrTestRight, Add-CrTestRight
 #
-# Profiles (account model PLAN v10.3: D18, D21-D25):
+# Profiles (account model PLAN v10.4: D18, D21-D25):
 #   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no PUB-User; built-in Administrator renamed 'LocalAdm'
 #         (disabled; replaced by ApplicationUser); BiCA Admin, BiCA Remote (Administrators + Remote Desktop Users; the
 #         operator's account) - managed, set; WinAutoUser (enabled, password-stored task \KioskTask, updated in place by

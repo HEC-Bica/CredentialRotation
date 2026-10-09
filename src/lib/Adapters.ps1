@@ -50,7 +50,7 @@ function Clear-CrNewErrorRecords {
 
 # Re-registers a task definition with its principal and the new password:
 # Folder.RegisterTaskDefinition(TaskName, Definition, 4 = TASK_UPDATE, UserId, password, LogonType, Sddl).
-# UserId is the task's own one (password update) or the replacement account (move, D24).
+# UserId is the task's own one (password update) or the account it moves to (D24).
 # Returns @{ Success; Error; HResult } (HResult = $null on success or when COM wasn't called, so the
 # caller can tell credential errors from others without parsing text).
 function Invoke-CrTaskRegistrationAdapter {
@@ -96,7 +96,7 @@ function Invoke-CrTaskRegistrationAdapter {
 }
 
 # Sets the password of a COM+ application catalog object: Application.Value('Password') = password.
-# With Identity (move to the replacement account, D24) Application.Value('Identity') = Identity is
+# With Identity (move to another account, D24) Application.Value('Identity') = Identity is
 # set first, then the password. The caller calls SaveChanges on the collection; when this fails with
 # IdentitySet = $true the object holds the new identity without its password, so the caller must
 # not call SaveChanges (unsaved changes are discarded with the collection).

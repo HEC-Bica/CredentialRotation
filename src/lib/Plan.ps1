@@ -204,7 +204,7 @@ function Add-CrDependentFindings {
     if ($tasks.Count -gt 0) { Add-CrRightFinding $Plan $State $sid $name $Slot 'SeBatchLogonRight' 'SeDenyBatchLogonRight' $rights['Batch'] }
 
     foreach ($c in $complus) {
-        $sev = 'Info'; $msg = 'COM+ identity updated, restart pending (D17): '
+        $sev = 'Info'; $msg = 'COM+ identity update, restart pending (D17): '
         if (-not $managedComPlus) { $sev = 'HighImpact'; $msg = 'COM+ application runs as this account but the configuration does not manage it: ' }
         Add-CrPlanFinding $Plan $sev 'ComPlus' ($msg + $c['Name']) $Slot $name
     }
@@ -450,7 +450,7 @@ function Add-CrOtherAccountFindings {
 }
 
 function Add-CrSqlFindings {
-    param($Plan, $State, $Entry, $Login, [string]$Slot)
+    param($Plan, $Entry, $Login, [string]$Slot)
     $name = $Login['Name']
     Add-CrPlanFinding $Plan 'Info' 'SQL' 'Password rotation (ALTER LOGIN)' $Slot $name
     foreach ($role in (ConvertTo-CrArray $Entry['Config']['ServerRoles'])) {
@@ -515,7 +515,7 @@ function Get-CrOperatorAccountName {
 }
 
 # The application account (D24): the managed entry that replaces accounts (Replaces), i.e. ApplicationUser.
-# Dependents of retired and operator-disabled accounts always move there (v10.4, O5 decided).
+# Dependents of retired and operator-disabled accounts always move there.
 function Test-CrAppUserEntry {
     param($Entry)
     if (-not ($Entry -is [hashtable]) -or -not ($Entry['Config'] -is [hashtable])) { return $false }
@@ -634,7 +634,7 @@ function New-CrPlan {
         foreach ($acct in (ConvertTo-CrArray $entry['Accounts'])) {
             $u = $acct['User']
             if ($entry['Kind'] -eq 'SqlLogin') {
-                Add-CrSqlFindings -Plan $plan -State $State -Entry $entry -Login $u -Slot $slot
+                Add-CrSqlFindings -Plan $plan -Entry $entry -Login $u -Slot $slot
             } elseif ($acct['ToCreate']) {
                 # D21: created with the slot password, the role groups and flags (PLAN 8 step 0)
                 Add-CrPlanFinding $plan 'Drift' 'Accounts' ('Create ' + $acct['Name']) $slot $acct['Name'] 'D21: created with the slot password, its role groups and flags'

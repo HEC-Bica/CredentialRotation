@@ -81,7 +81,7 @@ function New-TestState {
     }
 }
 
-# v10.3 resolved entries (CONTRACTS "v10", Principals.ps1): BiCAAdmin; the AutoLogon entry with the AutoLogon block,
+# v10.4 resolved entries (CONTRACTS 4.3): BiCAAdmin; the AutoLogon entry with the AutoLogon block,
 # AutoLogonUser = PUB-User, WinAutoUser (only key: Name) and the existing ones of them as Accounts (they are never
 # created); the Retired entry (Mode Disable). -ListNames changes the order or the content of the AutoLogonUser list.
 function New-TestResolved {

@@ -4,7 +4,7 @@ foreach ($m in @('Compat', 'Config', 'Rights', 'Principals', 'AutoLogon', 'Plan'
 . (Join-Path $here 'Fixtures.ps1')
 
 # Pester 3.4 keeps a Mock for the whole Describe/Context it is defined in: every Mock lives in its own Context.
-# Account model PLAN v10.3 (D18, D21-D25): BiCA Admin, BiCA Remote (the operator's account), ApplicationUser (replaces
+# Account model PLAN v10.4 (D18, D21-D25): BiCA Admin, BiCA Remote (the operator's account), ApplicationUser (replaces
 # RID-500) and the auto-logon accounts PUB-User / WinAutoUser are managed; SP Admin, SYS Admin and SOP-Admin are retired.
 # v10.4 (D24): the dependents of retired and operator-disabled accounts always move to ApplicationUser; nothing moves to
 # an ApplicationUser created in this run (the account with dependents stays enabled).
@@ -25,7 +25,7 @@ function Get-CrTestFindings {
     })
 }
 
-Describe 'New-CrPlan on an SM-like machine (account model v10.3)' {
+Describe 'New-CrPlan on an SM-like machine (account model v10.4)' {
     Context 'audit run as BiCA Remote' {
         Mock Get-CrPathAllowSids { return , @('S-1-5-32-545', 'S-1-5-18', 'S-1-5-32-544') }
         $state = New-CrTestState -Profile SM
@@ -134,7 +134,7 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.3)' {
     }
 }
 
-Describe 'New-CrPlan on an IPT01-like machine (account model v10.3)' {
+Describe 'New-CrPlan on an IPT01-like machine (account model v10.4)' {
     $state = New-CrTestState -Profile IPT01
     $plan = New-CrTestPlan -State $state
 

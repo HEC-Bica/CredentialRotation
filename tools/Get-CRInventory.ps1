@@ -1,4 +1,3 @@
-#Requires -Version 2.0
 <#
 .SYNOPSIS
     Read-only M0 inventory for the Credential Rotation tool (docs/PLAN.md, section 12).
@@ -28,6 +27,7 @@
 .EXAMPLE
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\temp\Get-CRInventory.ps1
 #>
+#Requires -Version 2.0
 [CmdletBinding()]
 param(
     [string]$OutputDirectory

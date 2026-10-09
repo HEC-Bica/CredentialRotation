@@ -602,7 +602,7 @@ Describe 'Unlock-CrAccount' {
 }
 
 # ---------------------------------------------------------------------------------------------------------------
-# v10 account model (CONTRACTS "v10: account model"): create, set, disable, enable.
+# Account model (CONTRACTS 5.7): create, set, disable, enable.
 
 Describe 'New-CrManagedAccount' {
     $tcJournal = @{ Runs = @() }

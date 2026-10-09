@@ -275,7 +275,7 @@ function Test-CrConfigCredentials {
     return , $slots.ToArray()
 }
 
-# Keys of managed entries (CONTRACTS "v10: account model"): Create, Replaces, PasswordMode, Operator, EnableIfDisabled.
+# Keys of managed entries (CONTRACTS 4.2): Create, Replaces, PasswordMode, Operator, EnableIfDisabled.
 # $ReplacedBy maps upper-cased replaced names to the entry that replaces them (a name may be replaced once).
 function Test-CrConfigManagedKeys {
     param($Schema, $Account, [string]$Where, [bool]$IsRotate, $ReplacedBy, $Errors)

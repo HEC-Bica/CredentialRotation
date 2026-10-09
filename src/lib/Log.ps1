@@ -6,8 +6,8 @@ $script:CrLogDirectory = $null
 # Creates %ProgramData%\CredentialRotation\logs with a protected ACL (Administrators + SYSTEM, by SID).
 # JournalTrusted is $false when the folder had a foreign owner or loose ACL that had to be corrected.
 function Initialize-CrLog {
-    param([string]$Root, [string]$RunId)
-    if (-not $Root) { $Root = Join-Path $env:ProgramData 'CredentialRotation' }
+    param([string]$RunId)
+    $Root = Join-Path $env:ProgramData 'CredentialRotation'
     $trusted = $true
     $corrected = $false
     if (Test-Path -LiteralPath $Root) {

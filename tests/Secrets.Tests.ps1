@@ -271,7 +271,7 @@ Describe 'Confirm-CrYes' {
     }
 }
 
-# --- v10.3 account model (CONTRACTS "v10: account model"): synthetic config and resolved entries -------------------
+# --- v10.4 account model (CONTRACTS 4.2, 4.3): synthetic config and resolved entries -------------------
 # Built here instead of from config\CredentialRotation.psd1 + Resolve-CrAccounts, so these tests only depend on the
 # resolved-entry contract (Create, PasswordMode, EnableIfDisabled, Missing, ToCreate placeholders).
 
@@ -359,7 +359,7 @@ function New-CrTestV10Resolved {
     )
 }
 
-Describe 'New-CrSlotAccount (v10.3)' {
+Describe 'New-CrSlotAccount (v10.4)' {
     $setEntry = @{ Id = 'AutoLogon'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'AutoLogon'; PasswordMode = 'Set'; Create = $false; EnableIfDisabled = $false }
     $appEntry = @{ Id = 'AppUser'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'AppUser'; PasswordMode = 'Change'; Create = $true; EnableIfDisabled = $true }
 
@@ -412,7 +412,7 @@ Describe 'New-CrSlotAccount (v10.3)' {
     }
 }
 
-Describe 'Get-CrSlotAccountDisplay (v10.3)' {
+Describe 'Get-CrSlotAccountDisplay (v10.4)' {
     It 'names the account and marks creation and the disabled state' {
         (Get-CrSlotAccountDisplay -Account @{ Name = 'PUB-User'; Create = $false; Disabled = $false; Enable = $false }) | Should Be 'PUB-User'
         (Get-CrSlotAccountDisplay -Account @{ Name = 'BiCA Admin'; Create = $true; Disabled = $false; Enable = $false }) | Should Be 'BiCA Admin (will be created)'
@@ -421,7 +421,7 @@ Describe 'Get-CrSlotAccountDisplay (v10.3)' {
     }
 }
 
-Describe 'Read-CrSlotSecrets (v10.3)' {
+Describe 'Read-CrSlotSecrets (v10.4)' {
     $state = @{ Policy = @{ PasswordHistoryLength = 5; LockoutThreshold = 4 } }
     $config = New-CrTestV10Config
     $resolved = New-CrTestV10Resolved

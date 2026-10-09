@@ -961,7 +961,7 @@ function Assert-CrNativeReady {
     }
 }
 
-# The logon rights and deny rights read into $State.Rights (CONTRACTS "Rights").
+# The logon rights and deny rights read into $State.Rights (CONTRACTS 4.1).
 function Get-CrLsaRightNames {
     param()
     return , @(
@@ -1061,7 +1061,7 @@ function Get-CrLocalGroupMemberSids {
 }
 
 # =====================================================================================================================
-# M2/M3 write side (CONTRACTS "Native.ps1 additions", "Secret handling (D4)")
+# M2/M3 write side (CONTRACTS 5.3 and 2)
 #
 # Every public wrapper: Assert-CrNativeReady first (throws when the C# isn't available), then the arguments, then
 # ConvertTo-CrBstr / the call layer / Clear-CrBstr in finally. The call layer (Invoke-CrNative* / Get-CrNative* /

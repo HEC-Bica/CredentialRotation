@@ -11,7 +11,7 @@ $lib = Join-Path $here '..\src\lib'
 foreach ($m in @('Compat', 'Log', 'Config', 'Rights', 'Principals', 'AutoLogon', 'Preflight', 'Plan', 'Journal', 'Secrets', 'Apply')) { . (Join-Path $lib ($m + '.ps1')) }
 . (Join-Path $here 'Fixtures.ps1')
 
-# Stubs of the building blocks (CONTRACTS "M2/M3" and "v10"), defined after the libs so they replace the real ones.
+# Stubs of the building blocks (CONTRACTS 5 and 6.4), defined after the libs so they replace the real ones.
 function Get-CrUserInfo { param([string]$UserName) }
 function Invoke-CrLogonTest { param([string]$UserName, $Secret, [string]$LogonType) }
 function Unlock-CrAccount { param([string]$UserName) }
@@ -669,7 +669,7 @@ Describe 'Invoke-CrApply' {
             $d = Get-TestDisable $result 'LocalAdm'
             $d['Status'] | Should Be 'KeptEnabled'
             $d['Reason'] | Should Match '^stays enabled: ApplicationUser is created in this run'
-            @(Get-TestFindings $result 'Info' 'Accounts' 'LocalAdm' 'Not disabled: stays enabled: ApplicationUser is created in this run*').Count | Should Be 1
+            @(Get-TestFindings $result 'Info' 'Accounts' 'LocalAdm' 'Not disabled: ApplicationUser is created in this run*').Count | Should Be 1
             @(Get-TestFindings $result 'FollowUp' 'Accounts' 'LocalAdm' 'Migrate the services, scheduled tasks and COM+ applications of this account manually*').Count | Should Be 1
         }
         It 'also keeps the retired SP Admin with its task enabled' {

@@ -9,7 +9,7 @@ function Test-CrNativeReady { }
 
 . (Join-Path $here '..\src\lib\Preflight.ps1')
 
-# The account entries of the v10.3 config (CONTRACTS "v10: account model"), reduced to the keys Preflight reads.
+# The account entries of the v10.4 config (CONTRACTS 4.2), reduced to the keys Preflight reads.
 $TestConfig = @{
     Accounts = @(
         @{ Id = 'BiCAAdmin'; Kind = 'Windows'; Name = 'BiCA Admin'; Role = 'Admin'; Credential = 'BiCAAdmin'; Create = $true }

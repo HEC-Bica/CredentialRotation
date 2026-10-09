@@ -20,6 +20,7 @@
     }
 
     # One prompt per slot (new password twice), applied in ascending Order (D9: set; ApplicationUser: change).
+    # The SQL slots are not prompted or rotated in this version (M5).
     Credentials = @(
         @{ Slot = 'BiCAAdmin';      Order = 10; Label = 'BiCA Admin' }
         @{ Slot = 'AppUser';        Order = 20; Label = 'ApplicationUser' }
@@ -38,7 +39,8 @@
         @{ Id = 'BiCARemote'; Kind = 'Windows'; Name = 'BiCA Remote'; Role = 'AdminRemote'; Credential = 'BiCARemote'; Create = $true
            Operator = $true                                                      # the operator's account (D25)
            LoginsEntry = $true; Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
-        # Replaces = accounts disabled once this one is verified (D22), their dependents move here (D24).
+        # Replaces = accounts disabled once this one is verified (D22), their dependents move here (D24); nothing is
+        # moved to an ApplicationUser created in the same run (new SID): a replaced account with dependents stays enabled.
         @{ Id = 'AppUser';  Kind = 'Windows'; Name = 'ApplicationUser'; Role = 'Admin'; Credential = 'AppUser'; Create = $true
            EnableIfDisabled = $true                                              # it runs the application
            PasswordMode = 'Change'                                               # D9: keep DPAPI data
@@ -50,11 +52,13 @@
            AutoLogonUser = @( @{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' } )   # kept if active; switch target: first usable
            AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' }
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
-        # Retired without replacement (D22); their dependents move to ApplicationUser (D24, v10.4).
+        # Retired without replacement (D22): disabled only, the running account last (D25); their dependents move to
+        # ApplicationUser (D24). SOP-Admin is never created; an existing one is retired. Not processed under -Only.
         @{ Id = 'Retired';  Kind = 'Windows'; Names = @('SP Admin', 'SYS Admin', 'SOP-Admin'); Mode = 'Disable' }
-        # Kept and checked (no password change)
+        # Check mode (PLAN 7.1): flags and groups are fixed, the password is never touched. Not processed under -Only.
         @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1', 'WinUser2', 'WinUser3'); Role = 'WinUser'; Mode = 'Check' }
         @{ Id = 'FtpUsers'; Kind = 'Windows'; NamePattern = '^ftp|ftp$'; Role = 'Ftp'; Mode = 'Check' }
+        # SQL logins on the default instance, all sysadmin (D14); not rotated in this version (M5).
         @{ Id = 'SqlApp';     Kind = 'SqlLogin'; Name = 'SQLApplication'; ServerRoles = @('sysadmin'); Credential = 'SQLApplication'; LoginsEntry = $true }
         @{ Id = 'SqlScript';  Kind = 'SqlLogin'; Name = 'SQLScript';      ServerRoles = @('sysadmin'); Credential = 'SQLScript';      LoginsEntry = $true }
         @{ Id = 'SqlService'; Kind = 'SqlLogin'; Name = 'SQLService';     ServerRoles = @('sysadmin'); Credential = 'SQLService';     LoginsEntry = $true }

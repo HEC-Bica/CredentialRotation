@@ -1,5 +1,4 @@
-﻿#Requires -Version 2.0
-<#
+﻿<#
 .SYNOPSIS
     Credential Rotation tool - audit (default) and -Apply (docs/PLAN.md).
 
@@ -11,9 +10,9 @@
     password, shows the plan and, after YES, creates the missing admin accounts (BiCA Admin, BiCA Remote,
     ApplicationUser), sets the passwords of the managed accounts incl. every existing PUB-User/WinAutoUser
     (ApplicationUser: changed), enforces groups and flags, updates and moves the dependents, runs the auto-logon step,
-    disables the replaced, retired and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8).
-    BiCA Remote, the operator's account, is the last slot. SQL rotation is not part of this version.
-    Start it through Start-CredentialRotation.cmd ("Run as administrator").
+    disables the replaced, retired and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8); then it
+    audits again and reports the drift left. BiCA Remote, the operator's account, is the last slot. SQL rotation is not
+    part of this version. Start it through Start-CredentialRotation.cmd ("Run as administrator").
 
 .PARAMETER Apply
     Apply the changes after the audit; asks for the passwords and a final YES. Secrets are only ever typed at
@@ -26,8 +25,16 @@
 .PARAMETER ConfigPath
     The .psd1 configuration. Default: CredentialRotation.psd1 next to this script, or ..\config\ when unbundled.
 
+.PARAMETER UnexpectedArguments
+    Not for use: collects stray positional words (e.g. "echo %ERRORLEVEL%" typed on the same line); the tool then
+    stops with exit code 2.
+
+.NOTES
     Logs go to %ProgramData%\CredentialRotation (there is no log-path parameter, PLAN 3).
+    Exit codes (PLAN 6 step 11): 0 OK, 4 applied with follow-up required, 1 partial failure, 2 preflight failed,
+    3 aborted, 10 drift found (audit).
 #>
+#Requires -Version 2.0
 [CmdletBinding()]
 param(
     [switch]$Apply,
@@ -108,7 +115,7 @@ function Invoke-CrDiscoverySection {
     }
 }
 
-# Discovery of the machine state (CONTRACTS "The machine state"); also used for the re-audit after -Apply.
+# Discovery of the machine state (CONTRACTS 4.1); also used for the re-audit after -Apply.
 function Get-CrMachineState {
     param($Config)
     $state = @{ Errors = New-Object System.Collections.ArrayList }
@@ -237,7 +244,7 @@ function Invoke-CrMain {
     }
 }
 
-# -Apply (CONTRACTS "v10: account model", "Apply.ps1 / entry point"; PLAN 6 steps 6-11). Sets $script:CrResult.
+# -Apply (CONTRACTS 6.3; PLAN 6 steps 6-11). Sets $script:CrResult.
 # Order: accounts overview -> other accounts (D23) -> passwords -> probe (Change accounts) -> summary -> decisions ->
 # YES -> Invoke-CrApply -> report -> journal completion -> re-audit -> exit code. Nothing changes before YES.
 function Invoke-CrApplyFlow {
@@ -291,7 +298,7 @@ function Invoke-CrApplyFlow {
         Write-CrApplySummary -Preview $preview -DisablePlan $disablePlan -Plan $Plan -AutoLogonDecision $alDecision -Only $Only
 
         # Operator decisions (D13): ApplicationUser's old password not usable (set with DPAPI loss / skip), ambiguous
-        # auto-logon. Dependents of retired and operator-disabled accounts always move to ApplicationUser (D24, v10.4).
+        # auto-logon. Dependents of retired and operator-disabled accounts always move to ApplicationUser (D24).
         Resolve-CrProbeDecisions -State $State -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Journal $journal -RunId $RunId -Only $Only
         $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Only $Only
         $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions

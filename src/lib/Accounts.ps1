@@ -31,7 +31,7 @@ function Get-CrAdsiOptionalValue {
     try { return Get-CrAdsiValue -Entry $Entry -Name $Name } catch { return $null }
 }
 
-# Converts one ADSI user entry into the CONTRACTS "Users" hashtable (plus Error = $null). Throws if a required
+# Converts one ADSI user entry into the CONTRACTS 4.1 Users hashtable (plus Error = $null). Throws if a required
 # property (Name, objectSid, UserFlags) can't be read.
 function ConvertTo-CrUserRecord {
     param($Entry)
@@ -72,7 +72,7 @@ function ConvertTo-CrUserRecord {
     }
 }
 
-# All local users (CONTRACTS "Users"); returns an array. A user that can't be read is returned with Error set
+# All local users (CONTRACTS 4.1); returns an array. A user that can't be read is returned with Error set
 # and the other keys $null (Name if it could be read), so one failing user doesn't fail the others.
 function Get-CrLocalUsers {
     param()
@@ -102,13 +102,13 @@ function Get-CrLocalUsers {
     return , $list.ToArray()
 }
 
-#region Write side (M2, PLAN sections 7.1 and 8; CONTRACTS "Write side of existing modules")
+#region Write side (M2, PLAN sections 7.1 and 8; CONTRACTS 5.7)
 
 # UF_* bits used by the write side (lmaccess.h):
 # 0x2 UF_ACCOUNTDISABLE, 0x10 UF_LOCKOUT, 0x20 UF_PASSWD_NOTREQD, 0x40 UF_PASSWD_CANT_CHANGE (CCP),
 # 0x10000 UF_DONT_EXPIRE_PASSWD (PNE)
 #
-# v10 account model (D9, D21, D22; CONTRACTS "v10: account model"):
+# Account model (D9, D21, D22; CONTRACTS 5.7):
 #   New-CrManagedAccount    creates a missing managed account with the slot password (journal 'Created')
 #   Invoke-CrPasswordSet    sets the password (NetUserSetInfo 1003) of BiCA Admin / BiCA Remote / the auto-logon
 #                           accounts (journal 'Secret')
@@ -143,7 +143,7 @@ function Get-CrPasswordErrorText {
     return ('The password {0} failed (error {1}).' -f $verb, $Win32Error)
 }
 
-# Internal: the flags the role asks for (Admin, Operator, User, WinUser, Ftp ...). Only sets PNE / CCP and clears
+# Internal: the flags the role asks for (Admin, AdminRemote, User, WinUser, Ftp). Only sets PNE / CCP and clears
 # NOTREQD when the role says so; an empty or missing role leaves the flags as they are. Never touches
 # UF_ACCOUNTDISABLE (Enable-CrAccount / Disable-CrAccount) or UF_LOCKOUT (Unlock-CrAccount).
 function Get-CrDesiredUserFlags {
@@ -188,8 +188,8 @@ function Unlock-CrAccount {
 }
 
 # Sets the account flags the role asks for (PNE 0x10000 and CCP 0x40 set; NOTREQD 0x20 cleared when PasswordRequired).
-# Reads the current flags with Get-CrUserInfo and writes only when they differ. Works for every role (incl. the v10
-# Operator role); an empty role (no flag keys) or $null = no change. Returns @{ Changed; Success; Win32Error }.
+# Reads the current flags with Get-CrUserInfo and writes only when they differ. Works for every role; an empty role
+# (no flag keys) or $null = no change. Returns @{ Changed; Success; Win32Error }.
 function Set-CrAccountFlags {
     param($User, $Role)
     if (-not ($User -is [hashtable]) -or -not $User['Name']) { throw 'Set-CrAccountFlags: -User needs a Name.' }
@@ -261,9 +261,9 @@ function Complete-CrRotationResult {
     return $Result
 }
 
-# Pre-steps + password change/reset of one account (PLAN sections 7.1 and 8, steps 1-2; D9). Since v10 this is the
-# path for PasswordMode = 'Change' (ApplicationUser, and its operator-chosen fallback 'Reset'); set accounts use
-# Invoke-CrPasswordSet.
+# Pre-steps + password change/reset of one account (PLAN sections 7.1 and 8, steps 1-2; D9). Apply calls it with
+# -Path 'Change' only (PasswordMode = 'Change', ApplicationUser); every set, including ApplicationUser's
+# operator-chosen set (DPAPI loss), uses Invoke-CrPasswordSet.
 #   1. unlock if locked (journal 'Unlocked'); the lock state is then re-checked and a relock stops here
 #   2. change path only (PLAN section 8): clear CCP if set (journal 'CcpCleared'). 'PreSteps' is journaled by the caller.
 #   3. Invoke-CrNetPasswordChange (old + new) or Invoke-CrNetPasswordReset (new)
@@ -350,7 +350,7 @@ function Invoke-CrPasswordRotation {
 
 #endregion
 
-#region v10 account model (D9, D21, D22; CONTRACTS "v10: account model")
+#region Account model (D9, D21, D22; CONTRACTS 5.7)
 
 # Internal: text for a failed NetUserAdd. Win32 / NET_API_STATUS codes only (D4).
 function Get-CrCreateErrorText {
