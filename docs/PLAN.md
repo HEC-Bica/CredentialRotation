@@ -882,6 +882,8 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 
 ### 13.2 M0 inventories (script v1.0, 2026-10-06)
 
+*Changed since:* on 2026-10-07 an `-Apply` of the untested WIP build `d22b466` (v10 account model) ran on `SM-QS-K1`: it created `SOP-Admin`, set the passwords of `BiCA Admin`, `ApplicationUser`, `PUB-User`, `WinAutoUser` and `SOP-Admin`, and disabled `BiCA Remote` and `WinAutoUser` (inventory v1.4, 2026-10-19). `IPT01-QS-K1` and `PIT50-QS-K1` (new) show the same pattern in the 0.5.0 audits. The tables below are the state of 2026-10-06.
+
 **Test site QS-K1**
 
 | Fact | SM-QS-K1 | IPT01-QS-K1 |

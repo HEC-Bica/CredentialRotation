@@ -9,12 +9,12 @@ Design: [docs/PLAN.md](docs/PLAN.md) · Interfaces: [docs/dev/CONTRACTS.md](docs
 | Milestone | Content | State |
 |---|---|---|
 | M1 | Read-only audit | tested |
-| M2 | Password prompts, account model, groups, flags, auto-logon policy | code written; `-Apply` not yet run |
-| M3 | Services, scheduled tasks, COM+ updates and moves | code written; `-Apply` not yet run |
+| M2 | Password prompts, account model, groups, flags, auto-logon policy | code written; `-Apply` of 0.5.x not yet run (see machine state) |
+| M3 | Services, scheduled tasks, COM+ updates and moves | code written; `-Apply` of 0.5.x not yet run |
 
 | Machine | Audit (PS 5.1) | Audit (`/PS2`) | Unit tests, lint |
 |---|---|---|---|
-| `SM-QS-K1` (Windows 10 LTSC 2019) | 0.5.0 OK | 0.5.0 OK, see limitations | 1119 / 1119, 0 violations |
+| `SM-QS-K1` (Windows 10 LTSC 2019) | 0.5.1 OK, `Exit code: 10` | 0.5.1 OK, `Exit code: 10` (cmd: 0) | 0.5.1: 1119 / 1119, 0 violations; inventory v1.4 (2026-10-19) |
 | `IPT01-QS-K1` (Windows 10 LTSC 2019) | 0.5.0 OK | 0.5.0 OK, see limitations | 1119 / 1119, 0 violations |
 | `PIT50-QS-K1` (Windows 10 LTSC 2019) | 0.5.0 OK; auto-logon ambiguous (Sysinternals Autologon traces, open question) | 0.5.0 OK, see limitations | 1119 / 1119, 0 violations |
 | `SM-102575` (Windows Embedded 7) | M1 OK | M1 OK | no Pester |
@@ -24,6 +24,8 @@ Known limitations of `/PS2` runs on the Windows 10 test machines (real runs use 
 - cmd receives exit code 0 whatever the result. From 0.5.1 the tool prints `Exit code: <n>` as its last line; read that line.
 - The auto-logon finding lacks the legal-notice reason (reported only, never blocking).
 - SQL Server can't be read (the PS 2.0 engine can't parse `powershell.exe.config`); no effect, as there are no SQL slots (D27).
+
+Machine state: on `SM-QS-K1` an `-Apply` of the untested WIP build `d22b466` (v10 account model, 2026-10-07) created `SOP-Admin` (description "Managed by CredentialRotation (SOPAdmin)"), set the passwords of `BiCA Admin`, `ApplicationUser`, `PUB-User`, `WinAutoUser` and `SOP-Admin`, and disabled `BiCA Remote` and `WinAutoUser` as replaced accounts (inventory 2026-10-19). `IPT01-QS-K1` and `PIT50-QS-K1` look the same in the audit (`SOP-Admin` present; `BiCA Admin`, on PIT50 also `BiCA Remote` and `WinAutoUser`, disabled).
 
 AppLocker blocks scripts on the development machine, so all runs happen on the test machines.
 
