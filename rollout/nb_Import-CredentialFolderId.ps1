@@ -1,24 +1,32 @@
 <#
 .SYNOPSIS
-    Powershell Script to write the secretserver folder IDs of ss_Generate-Secret.ps1 into netbox
+    Powershell Script to write the secretserver folder IDs of ss_Generate-Secret.ps1 into the rollout workbook and netbox
 .DESCRIPTION
-    Reads the newest result CSV of ss_Generate-Secret.ps1 (ss_Generate-Secret_*.csv in this folder) and sets the
-    custom field Credential_Folder_ID of the netbox site with the same Job_Nummer to the FolderId of the row.
-    Rows without FolderId and JobNrs with no or more than one netbox site are skipped with a warning.
-    A site whose Credential_Folder_ID already holds another folder ID is not changed (warning).
+    Reads the newest result CSV of ss_Generate-Secret.ps1 (ss_Generate-Secret_*.csv in this folder) and writes the
+    FolderId of each row into
+    - column FolderId of the row with the same JobNr in sheet 'rollout' of rollout_CredentialRotation.xlsx in the
+      folder of the CSV (the workbook ss_Generate-Secret.ps1 read), and
+    - the custom field Credential_Folder_ID of the netbox site with the same Job_Nummer.
+    Rows without FolderId, and JobNrs with no or more than one workbook row or netbox site, are skipped with a warning.
+    A cell or site that already holds another folder ID is not changed (warning).
+    The workbook is saved before netbox is changed; if it can't be saved (e.g. open in Excel) the script aborts.
     Run with -WhatIf to see the changes without writing them.
+    Requires the PowerShell module ImportExcel (Excel itself is not needed).
     Uses the personal IPAM token stored for the current user by the module BiCANetboxMain
     (HKCU:\Software\BiCA\NetboxClient, as in CiRRUS_Configurator); asks for it once if none is stored.
     The token needs write permission on sites.
 .PARAMETER CsvPath
     Result CSV to import instead of the newest one.
+.PARAMETER ExcelPath
+    Workbook to write instead of rollout_CredentialRotation.xlsx in the folder of the CSV.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
-param([string]$CsvPath)
+param([string]$CsvPath, [string]$ExcelPath)
 
 [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
 [string]$NetboxApi = 'https://ipam.lantzerath-group.com/api'
+[string]$WorksheetName = 'rollout'
 
 if (!$CsvPath) { $CsvPath = (Get-ChildItem -Path "$PSScriptRoot\ss_Generate-Secret_*.csv" | Sort-Object LastWriteTime | Select-Object -Last 1).FullName }
 if (!$CsvPath -or !(Test-Path -Path $CsvPath)) {Write-Host "No result CSV of ss_Generate-Secret.ps1 found in $PSScriptRoot - Aborting Script" -ForegroundColor Red ; exit}
@@ -30,6 +38,77 @@ foreach ($Row in ($AllRows | Where-Object { "$($_.FolderId)" -notmatch '^\d+$' }
     Write-Host "JobNr $($Row.JobNr): no FolderId (Status $($Row.Status)) - skipped" -ForegroundColor Yellow
 }
 if (!$Rows) {Write-Host "No rows with FolderId in $CsvPath - Aborting Script" -ForegroundColor Red ; exit}
+
+# Workbook first, so that netbox stays unchanged if it can't be saved
+if (!$ExcelPath) { $ExcelPath = Join-Path (Split-Path -Path $CsvPath -Parent) 'rollout_CredentialRotation.xlsx' }
+if (!(Get-Module -ListAvailable -Name ImportExcel)) {Write-Host "PowerShell module ImportExcel not installed (Install-Module ImportExcel) - Aborting Script" -ForegroundColor Red ; exit}
+if (!(Test-Path -Path $ExcelPath)) {Write-Host "Excel not found: $ExcelPath - Aborting Script" -ForegroundColor Red ; exit}
+
+try { $Package = Open-ExcelPackage -Path $ExcelPath }
+catch {Write-Host "Excel $ExcelPath could not be opened: $($_.Exception.GetBaseException().Message) - Aborting Script" -ForegroundColor Red ; exit}
+$Sheet = $Package.Workbook.Worksheets[$WorksheetName]
+$JobNrColumn = $null
+$FolderIdColumn = $null
+if ($Sheet -and $Sheet.Dimension) {
+    for ($Column = 1; $Column -le $Sheet.Dimension.End.Column; $Column++) {
+        switch ("$($Sheet.Cells[1, $Column].Value)".Trim()) {
+            'JobNr'    { $JobNrColumn = $Column }
+            'FolderId' { $FolderIdColumn = $Column }
+        }
+    }
+}
+if (!$JobNrColumn -or !$FolderIdColumn) {
+    $Package.Dispose()
+    Write-Host "Sheet '$WorksheetName' in $ExcelPath has no columns JobNr and FolderId - Aborting Script" -ForegroundColor Red ; exit
+}
+
+# Workbook rows per JobNr
+$ExcelRows = @{}
+for ($RowNr = 2; $RowNr -le $Sheet.Dimension.End.Row; $RowNr++) {
+    $JobNr = "$($Sheet.Cells[$RowNr, $JobNrColumn].Value)".Trim()
+    if (!$JobNr) { continue }
+    if (!$ExcelRows.ContainsKey($JobNr)) { $ExcelRows[$JobNr] = @() }
+    $ExcelRows[$JobNr] += $RowNr
+}
+
+$ExcelChanged = $false
+foreach ($Row in $Rows) {
+    $FolderId = [int]$Row.FolderId
+    $RowNrs = @()
+    if ($ExcelRows.ContainsKey($Row.JobNr)) { $RowNrs = $ExcelRows[$Row.JobNr] }
+    if ($RowNrs.Count -ne 1) {
+        Write-Host "JobNr $($Row.JobNr): $($RowNrs.Count) rows with this JobNr in sheet '$WorksheetName' - skipped in Excel" -ForegroundColor Yellow
+        continue
+    }
+    $Cell = $Sheet.Cells[$RowNrs[0], $FolderIdColumn]
+
+    $CurrentId = "$($Cell.Value)".Trim()
+    if ($CurrentId -eq "$FolderId") {
+        Write-Host "Excel row $($RowNrs[0]) (JobNr $($Row.JobNr)): FolderId is already $FolderId"
+        continue
+    }
+    if ($CurrentId) {
+        Write-Host "Excel row $($RowNrs[0]) (JobNr $($Row.JobNr)): FolderId is $CurrentId, not $FolderId - skipped" -ForegroundColor Yellow
+        continue
+    }
+
+    if ($PSCmdlet.ShouldProcess("Excel row $($RowNrs[0]) (JobNr $($Row.JobNr))", "Set FolderId to $FolderId")) {
+        $Cell.Value = $FolderId
+        $ExcelChanged = $true
+        Write-Host "Excel row $($RowNrs[0]) (JobNr $($Row.JobNr)): FolderId set to $FolderId" -ForegroundColor Green
+    }
+}
+try {
+    if ($ExcelChanged) {
+        Close-ExcelPackage -ExcelPackage $Package
+        Write-Host "Saved $ExcelPath"
+    }
+    else { Close-ExcelPackage -ExcelPackage $Package -NoSave }
+}
+catch {
+    $Package.Dispose()
+    Write-Host "Excel $ExcelPath could not be saved (open in Excel?): $($_.Exception.GetBaseException().Message) - Aborting Script, netbox not changed" -ForegroundColor Red ; exit
+}
 
 # Personal netbox token from the registry via BiCANetboxMain (latest version from the public repo, removed again
 # right after use). -WhatIf:$false so that -WhatIf of this script doesn't skip extracting and cleaning up the module.
@@ -101,8 +180,8 @@ foreach ($Row in $Rows) {
 # SIG # Begin signature block
 # MIIu8AYJKoZIhvcNAQcCoIIu4TCCLt0CAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCtI4bLRohTZ7Jn
-# qL9lSx46zhRMRFH8jAoqb3mOzVxqXKCCE5wwggWQMIIDeKADAgECAhAFmxtXno4h
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDNMkc31ydJ1snm
+# l8fs7a08TNa9MYQ4nzyb4/hLg8giHKCCE5wwggWQMIIDeKADAgECAhAFmxtXno4h
 # MuI5B72nd3VcMA0GCSqGSIb3DQEBDAUAMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
 # EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNV
 # BAMTGERpZ2lDZXJ0IFRydXN0ZWQgUm9vdCBHNDAeFw0xMzA4MDExMjAwMDBaFw0z
@@ -212,23 +291,23 @@ foreach ($Row in $Rows) {
 # aWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0ExAhAPXrvxQ6T1tsiZa78xatEW
 # MA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAIoAKAAKECgAAwGQYJ
 # KoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQB
-# gjcCARUwLwYJKoZIhvcNAQkEMSIEIPNdGS/goQ4YHqsJ6YPSlplPjIFHerbieR4V
-# 6eXjiPaoMA0GCSqGSIb3DQEBAQUABIICAImfk2YY00uKeAOsmzNRIvDX4fF9l0l+
-# /dW9+E3kEKHjlZX1Bdcxr2cymVgT0oW34bkvuxQu7Bs1Q+3cP1iiImN9Himfdyxb
-# gfeFQPQgfLWOvSHg/2jR2VYUfa/+1AI+9OQPV4znWmjehjOZLPM3Jh0eEGTZS6/K
-# KL6XUC4Op+KfzhCKYkVAWXbjvBrzNhoTeHTbAUHqMhg/gci0/znaEzIGIe0IN0Xd
-# Z64H5mjxTe2VsyRsfZX28lLOmcywhgPwYonvynvV7cXHsRsGEfZdRKIo5QDjfZSF
-# GLc+3469WVs3Rtzc0IrtgtMtfaGhUTJuJombLapfWFKraD2SSkDrPcrxbD+fmoEY
-# AuwVoFG5l2NNn7EAqMzjUkZ3Caan+ZU2NWCkW7FrwM7s5WSK3irQk6VkH/8gx8ks
-# nP4CetC1+rObf8+yFLwH/Y1bpbmc/lqs5pYOy47P9bki/yU3T9XQ+YleHw/BNjrU
-# WbGG4e09qar98fpesrwnn3Q0JN2Zsx0oFjE0SJa8EZo9dXaplET/XuuTyWoicw9K
-# Xs9szEOb03bMwJD5lnfl0TOGNv64o1/mOAKNzHOIqRWEtzFNnzKSXgCYAXGf0bQl
-# EOAGvTcvAwZ2iUp2XMF5WN7vgMAMh/Nt3E3dldZykKs9NByxUJ7HspVUIhXICNRV
-# cBhPXfNLpCXJoYIXdzCCF3MGCisGAQQBgjcDAwExghdjMIIXXwYJKoZIhvcNAQcC
+# gjcCARUwLwYJKoZIhvcNAQkEMSIEIGl480RV3yji2mGmOyqX9wfpE6imjXKUKB6U
+# SQ5y8eHhMA0GCSqGSIb3DQEBAQUABIICAIPXlaF+Ige+MY3sEsTmhmjRbe6btX2O
+# acKjKASjfXmI8baSf5/TCIel+07mUG6GUiTohNB52XPrYH3wg6i9Z2ZsZyPAWS+A
+# aw2qBnvHooI5D+atGxGTA12oToQMNTElHS4V9gwEsI7Emit88XGjaDCSNVL4zm8m
+# 8WIsv4Vor+9JBoEjqoseoRsihdrMIOHZXGPDgVw3h+Ykd/Z3moEDbGwgDmiNhXmr
+# ukXTyH3O4pr/oErefwhZLvNLjuKA4/QTl3p9599LyuKUEHzlsu5ARbiEJ92Y1/Bf
+# PnRqs2eLiBvFA5ZRT4Ng4Wc4TB6LQewV8LaDetrys4Ln91vlEIK+un12b4hxHyOt
+# cCPxJxu1QfxERBSXQBFn1TSZramWq8uEzsoEY2lmYAYgOlleU79jMp7o2OxHUlpH
+# LB206V/luz9FwnZNikFxcqg+D5s3022ILneSIw1qF2l5Ax6Z5yH4N2G34gV9ypO/
+# WIsQPlYrvXUnnHI2s0DxP7jkq+HYmnv6bNZKv6ZBscvMNOuwRuhDD6MpCiR9trjn
+# Fl+ax9xR+arWuX7HcbjHrM8BNpEsiLk2dUt+UhIGjJA+8IBQJztb/WzuZgIifhkE
+# egW8zJJDFxRsVtL0rG9eFag9TZQT/1TrImm+M0mEQYnq/QkmZHWyaNOJi5PjPtiI
+# ZZ+llC9Uab9KoYIXdzCCF3MGCisGAQQBgjcDAwExghdjMIIXXwYJKoZIhvcNAQcC
 # oIIXUDCCF0wCAQMxDzANBglghkgBZQMEAgEFADB4BgsqhkiG9w0BCRABBKBpBGcw
-# ZQIBAQYJYIZIAYb9bAcBMDEwDQYJYIZIAWUDBAIBBQAEIHiqIqj1znm53zVW87TH
-# XB9yH+LNK05+OKuxhMBJIiSTAhEA4KtF0E6sFQuJ2ee3D2q6PhgPMjAyNjEwMTkx
-# MTIzMDhaoIITOjCCBu0wggTVoAMCAQICEAhP3DNPfkVO28MPj/mSGDUwDQYJKoZI
+# ZQIBAQYJYIZIAYb9bAcBMDEwDQYJYIZIAWUDBAIBBQAEIPJJMPL8ku7zB04lByc8
+# fr/DEK9ashzlaEJPjZvBomaCAhEAh8PgoOMLWnf5env765uqHBgPMjAyNjEwMTkx
+# NTMxMTBaoIITOjCCBu0wggTVoAMCAQICEAhP3DNPfkVO28MPj/mSGDUwDQYJKoZI
 # hvcNAQELBQAwaTELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMu
 # MUEwPwYDVQQDEzhEaWdpQ2VydCBUcnVzdGVkIEc0IFRpbWVTdGFtcGluZyBSU0E0
 # MDk2IFNIQTI1NiAyMDI1IENBMTAeFw0yNjA4MDUwMDAwMDBaFw0zNzExMDQyMzU5
@@ -335,19 +414,19 @@ foreach ($Row in $Rows) {
 # BAMTOERpZ2lDZXJ0IFRydXN0ZWQgRzQgVGltZVN0YW1waW5nIFJTQTQwOTYgU0hB
 # MjU2IDIwMjUgQ0ExAhAIT9wzT35FTtvDD4/5khg1MA0GCWCGSAFlAwQCAQUAoIHR
 # MBoGCSqGSIb3DQEJAzENBgsqhkiG9w0BCRABBDAcBgkqhkiG9w0BCQUxDxcNMjYx
-# MDE5MTEyMzA4WjArBgsqhkiG9w0BCRACDDEcMBowGDAWBBRR2avaA0lz2E9CZqyk
-# gkjms2nEOTAvBgkqhkiG9w0BCQQxIgQgfBJVKMRN/e2fpX6MBFhuFWXGPyiGkFB8
-# xEavcUxK/TMwNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQgLaCdp/QTH5/nLbbF5unJ
-# ZWdVrwQ/HqdCzA0hIOFB6/wwDQYJKoZIhvcNAQEBBQAEggIAEySHNQ0oxigH2mas
-# ITfq8bTTl8b6aUdRaYZF02Y4pMXzG5vSPgiIIPnhcWhKjr9SDmT04Nq4R5dNcycw
-# L6+CrJMKR5dI++1cHk7lAVFeB1L34gFh4RrDDsrpSpmhjEhxA6BWKH4iqF36jQt8
-# XhhXqrBpznq9ulR/7gnXi6TRH9yL5MbMMpu2Blekqo9a47AMCWYEYPjqsDFLmT0I
-# /uYl0TUpXjF4PqQoVsFJcGGUxKAu1dwJvdGwJryI5ebkx0qKtutTE46fhY8JtUDf
-# n3hB4p4jrBH/e9uQMAI/Yy0CwWd7Bb/duKv5TlSg4dz0BPuDuWAY7S539vf42+/h
-# T9OZ2MGSrVj5+C9B4HMxwIqbyWZAUgUaZXl8YcOfrKp/N06zLWMrSCxE4jCvWtcH
-# ZBXMruk/V+TYybPSPIN2wfPX8fcvXdGQhGikhpmhWb21M18m38WHcPoSth9XHJdz
-# SQUL+TOHlX4h4gNrxBxsVca3pm/oZ+X0NONkMx4FGII+L8pG7g4YFT94bVKE4E/1
-# LffGpn5thztHjr85qNu2E7sgV6Lb8qsfI/+i8xlgQVMVCov04fVvHd+qPW9wT4Xc
-# kMkQwZgmoEpUA+g2oGUJNo5gy1TkOmAatyirkgWfbEfTWZDNCtwiOIVM8DEjjNIH
-# tCTzcmO1922roBss/kWUlibrrmE=
+# MDE5MTUzMTEwWjArBgsqhkiG9w0BCRACDDEcMBowGDAWBBRR2avaA0lz2E9CZqyk
+# gkjms2nEOTAvBgkqhkiG9w0BCQQxIgQg6OW55/IGVggEwJtQD4mOyDqH/0emty1B
+# AUY+t9BS9rMwNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQgLaCdp/QTH5/nLbbF5unJ
+# ZWdVrwQ/HqdCzA0hIOFB6/wwDQYJKoZIhvcNAQEBBQAEggIAU/kW+DgP0nObCbWC
+# qQCtHyqYbwOJKobMeKw1i8r9OR+HCOywtVu0jpRpX3l9tNf+00SbOI/WMOMO0EH/
+# UD4Da/GHM9Vnqq0AWHZBeS7E7bYXuaXWpnyJT2gnbc+ttLeizxInzkVchiCsy9+/
+# wp+SxZ5657YaMBtmSbtsAr4AWR7sYtCLN3BttHjbgmtFMiKXpzbdZ+J2nGJu/4Lo
+# yosQE00cVVAAAbbcSRqodmCh6fJEY4EiQAHtnQT6v3agFn7eWW7bsx/QLZjmJAnY
+# lb4cW/X9TXU1PxYsgoPGeed63C4AJDQt6kbrKF0CFUdu6TJLbjsowjjjZ1aZzSPA
+# bPqDm24L/HkJ1cQHMPqpblI6EUIwDXEIKA/hlWQSiL1PlBViuUwJ96KJdCmhaYIk
+# RUev+vx33kV46amrrMifsC9lIBKzQFF31TL1VfDqk4r3JL0LXLgggNDDDVAaw4Gp
+# eMXjPbh7bFCQpTbyTG//c69aHl21RtD75viEwu8CC2z2CqX6yiExJ0x4iVpPCH7x
+# kZz4BMLXP5S1xnmtspXnxZ4OvKShFiVdaN6GJV8PC5FziQye5JXIv1hPL25kf4Vf
+# t5O6icTxwmgJlqzWQYCpmCcnpMk070YroW4Dxx6sTRV1Xdzf0JPtECuwQ6KT4ZVV
+# hurogP6Po4d/xRp1hyPxF7hzWms=
 # SIG # End signature block
