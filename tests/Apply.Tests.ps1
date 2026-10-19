@@ -1158,8 +1158,9 @@ Describe 'Clear-CrSlotSecrets' {
         $new = New-Object System.Security.SecureString
         $old = New-Object System.Security.SecureString
         Clear-CrSlotSecrets -SlotSecrets @{ S = @{ Slot = 'S'; Skipped = $false; NewSecret = $new; Accounts = @(@{ Sid = 'S-1-5-21-1000-2000-3000-1001'; OldSecret = $old }) } }
-        { $null = $new.Length } | Should Throw
-        { $null = $old.Length } | Should Throw
+        # A method call, not .Length: PowerShell swallows exceptions thrown by property getters.
+        { $null = $new.Copy() } | Should Throw
+        { $null = $old.Copy() } | Should Throw
     }
 }
 

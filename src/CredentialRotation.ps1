@@ -43,11 +43,12 @@ param(
 if ($UnexpectedArguments) {
     Write-Host ('Unexpected arguments: {0}' -f ($UnexpectedArguments -join ' '))
     Write-Host 'Parameters must be named, e.g. -Only AppUser. Run "echo %ERRORLEVEL%" as a separate command.'
+    Write-Host 'Exit code: 2'
     exit 2
 }
 
 $ErrorActionPreference = 'Stop'
-$script:CrToolVersion = '0.5.0'
+$script:CrToolVersion = '0.5.1'
 $script:CrScriptPath = $MyInvocation.MyCommand.Path
 $script:CrScriptDir = Split-Path -Parent $script:CrScriptPath
 
@@ -401,4 +402,6 @@ try {
     try { Write-CrLog ('Aborted: ' + $_.Exception.Message + ' at ' + $_.InvocationInfo.PositionMessage) 'Error' } catch { }
     $script:CrResult = $script:CrExitCodes['Aborted']
 }
+# Printed as well: on the Windows 10 test machines, /PS2 runs returned 0 to cmd instead of 10 (2026-10-19, cause open).
+Write-Host ('Exit code: {0}' -f $script:CrResult)
 exit $script:CrResult

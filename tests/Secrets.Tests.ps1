@@ -168,11 +168,13 @@ Describe 'Get-CrNewSecretProblems (local policy pre-check, PLAN 6 step 6)' {
     Mock Test-CrSiteRules { @{ Ok = $true; Reasons = @() } }
     Mock Write-Host { }
     Mock Write-CrLog { }
+    # The function returns its array with a leading comma: assign it directly, @() would nest it (an empty result
+    # would count as 1).
 
     Context 'policy verdict' {
         Mock Test-CrLocalPasswordPolicy { @{ Ok = $false; Status = 2245; Win32Error = 0 } }
         It 'rejects the password with the status and gives no warning' {
-            $p = @(Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition)
+            $p = Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition
             $p.Count | Should Be 1
             $p[0] | Should Be 'rejected by the local password policy for WinAutoUser (status 2245)'
             Assert-MockCalled Write-Host -Times 0 -Exactly
@@ -183,7 +185,7 @@ Describe 'Get-CrNewSecretProblems (local policy pre-check, PLAN 6 step 6)' {
     Context 'call failed: result without Status' {
         Mock Test-CrLocalPasswordPolicy { @{ Ok = $false; Status = $null; Win32Error = 1722 } }
         It 'is a warning on the console and in the log, not a problem' {
-            $p = @(Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition)
+            $p = Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition
             $p.Count | Should Be 0
             Assert-MockCalled Write-Host -Times 1 -Exactly -ParameterFilter { $Object -like 'Warning: the local password policy could not be pre-checked for WinAutoUser (error 1722)*' }
             Assert-MockCalled Write-CrLog -Times 1 -Exactly -ParameterFilter { $Level -eq 'Warning' -and $Message -like '*WinAutoUser*error 1722*' }
@@ -193,7 +195,7 @@ Describe 'Get-CrNewSecretProblems (local policy pre-check, PLAN 6 step 6)' {
     Context 'call failed: no hashtable' {
         Mock Test-CrLocalPasswordPolicy { $null }
         It 'is a warning with error 0, not a problem' {
-            $p = @(Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition)
+            $p = Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition
             $p.Count | Should Be 0
             Assert-MockCalled Write-Host -Times 1 -Exactly -ParameterFilter { $Object -like '*could not be pre-checked for WinAutoUser (error 0)*' }
             Assert-MockCalled Write-CrLog -Times 1 -Exactly -ParameterFilter { $Level -eq 'Warning' }
@@ -203,7 +205,7 @@ Describe 'Get-CrNewSecretProblems (local policy pre-check, PLAN 6 step 6)' {
     Context 'call threw' {
         Mock Test-CrLocalPasswordPolicy { throw 'policy check unavailable' }
         It 'is a warning with the exception message, not a problem' {
-            $p = @(Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition)
+            $p = Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $accounts -SlotDefinition $slotDefinition
             $p.Count | Should Be 0
             Assert-MockCalled Write-Host -Times 1 -Exactly -ParameterFilter { $Object -like '*could not be pre-checked for WinAutoUser (policy check unavailable)*' }
             Assert-MockCalled Write-CrLog -Times 1 -Exactly -ParameterFilter { $Level -eq 'Warning' -and $Message -like '*WinAutoUser*policy check unavailable*' }
@@ -213,7 +215,7 @@ Describe 'Get-CrNewSecretProblems (local policy pre-check, PLAN 6 step 6)' {
     Context 'one call fails, the other account is rejected' {
         Mock Test-CrLocalPasswordPolicy { if ($UserName -eq 'PUB-User') { @{ Ok = $false; Status = $null; Win32Error = 5 } } else { @{ Ok = $false; Status = 2245; Win32Error = 0 } } }
         It 'warns for the first and rejects for the second' {
-            $p = @(Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $twoAccounts -SlotDefinition $slotDefinition)
+            $p = Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $twoAccounts -SlotDefinition $slotDefinition
             $p.Count | Should Be 1
             $p[0] | Should Be 'rejected by the local password policy for WinAutoUser (status 2245)'
             Assert-MockCalled Write-Host -Times 1 -Exactly -ParameterFilter { $Object -like '*could not be pre-checked for PUB-User (error 5)*' }
@@ -224,7 +226,7 @@ Describe 'Get-CrNewSecretProblems (local policy pre-check, PLAN 6 step 6)' {
     Context 'one call fails, the other account passes' {
         Mock Test-CrLocalPasswordPolicy { if ($UserName -eq 'PUB-User') { throw 'policy check unavailable' } else { @{ Ok = $true; Status = 0; Win32Error = 0 } } }
         It 'accepts the password with a warning' {
-            $p = @(Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $twoAccounts -SlotDefinition $slotDefinition)
+            $p = Get-CrNewSecretProblems -NewSecret $secret -Config @{} -Accounts $twoAccounts -SlotDefinition $slotDefinition
             $p.Count | Should Be 0
             Assert-MockCalled Write-Host -Times 1 -Exactly
         }
