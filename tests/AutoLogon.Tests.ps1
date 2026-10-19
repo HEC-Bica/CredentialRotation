@@ -52,13 +52,14 @@ function New-TestAutoLogon {
         [switch]$PlainPassword, # lint-ignore: D4-PlainVariable
         [switch]$Count,
         [string[]]$Mechanisms = @(),
+        [string[]]$SysinternalsSids = @(),
         [switch]$LegalText
     )
     if ($null -eq $AutoAdminLogon) { $Kind = $null }
     return @{
         AutoAdminLogon = $AutoAdminLogon; AutoAdminLogonKind = $Kind; DefaultUserName = $UserName; DefaultDomainName = $Domain
         DefaultPasswordPresent = [bool]$PlainPassword; AutoLogonCountPresent = [bool]$Count; ForceAutoLogon = $null # lint-ignore: D4-PlainVariable
-        AutoLogonSidValue = $null; OtherMechanisms = $Mechanisms; LegalNoticeCaptionSet = $false
+        AutoLogonSidValue = $null; OtherMechanisms = $Mechanisms; SysinternalsAutologonSids = $SysinternalsSids; LegalNoticeCaptionSet = $false
         LegalNoticeTextSet = [bool]$LegalText; DevicePasswordLessBuildVersion = $null; Error = $null
     }
 }
@@ -172,10 +173,17 @@ Describe 'Get-CrAutoLogonDecision' {
             (Test-AnyMatch $d['Reasons'] 'plain-text DefaultPassword.*off') | Should Be $true
         }
         It 'is ambiguous when off but another mechanism exists' {
-            $s = New-TestState -AutoLogon (New-TestAutoLogon -AutoAdminLogon '0' -UserName 'PUB-User' -Mechanisms @('Sysinternals Autologon settings in the profile hive of S-1-5-21-1000-2000-3000-1010'))
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -AutoAdminLogon '0' -UserName 'PUB-User' -Mechanisms @('Winlogon Shell is not explorer.exe: C:\Kiosk\kiosk.exe'))
             $d = Invoke-TestDecision $s
             $d['Action'] | Should Be 'Ambiguous'
             ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+        }
+        It 'stays off with Sysinternals Autologon traces and only reports them (v10.5)' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -AutoAdminLogon '0' -UserName 'PUB-User' -SysinternalsSids @('S-1-5-21-1000-2000-3000-1010'))
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'LeaveOff'
+            @($d['OperatorOptions']).Count | Should Be 0
+            (Test-AnyMatch $d['Reasons'] 'Sysinternals Autologon was used in the profile of S-1-5-21-1000-2000-3000-1010') | Should Be $true
         }
     }
 
@@ -298,6 +306,16 @@ Describe 'Get-CrAutoLogonDecision' {
             $d['Action'] | Should Be 'Standardize'
             $d['TargetSid'] | Should Be $SidPub
             @($d['HighImpact']).Count | Should Be 0
+        }
+        It 'keeps and standardizes PUB-User with Sysinternals Autologon traces in two profiles, reported only (v10.5)' {
+            $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'PUB-User' -SysinternalsSids @('S-1-5-21-1000-2000-3000-1010', 'S-1-5-21-1000-2000-3000-1011'))
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Standardize'
+            $d['TargetSid'] | Should Be $SidPub
+            @($d['HighImpact']).Count | Should Be 0
+            @($d['OperatorOptions']).Count | Should Be 0
+            (Test-AnyMatch $d['Reasons'] 'Sysinternals Autologon was used in the profile of S-1-5-21-1000-2000-3000-1010, S-1-5-21-1000-2000-3000-1011') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'Non-Winlogon') | Should Be $false
         }
         It 'keeps an active WinAutoUser although PUB-User is usable: standardize, no switch (v10.1)' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
@@ -855,12 +873,12 @@ Describe 'Get-CrAutoLogonState' {
         }
     }
     Context 'reports Sysinternals Autologon traces' {
-        It 'reports Sysinternals Autologon traces' {
+        It 'lists them apart from the other mechanisms (v10.5: reported only)' {
             Mock Get-CrAutoLogonKeyValues -ParameterFilter { $Path -like '*\Winlogon' } { New-TestKeyValues @{ AutoAdminLogon = '0' } }
             Mock Get-CrSysinternalsAutologonSids { return , @('S-1-5-21-1000-2000-3000-1001') }
             $st = Get-CrAutoLogonState
-            @($st['OtherMechanisms']).Count | Should Be 1
-            @($st['OtherMechanisms'])[0] | Should Match 'Sysinternals'
+            @($st['OtherMechanisms']).Count | Should Be 0
+            (@($st['SysinternalsAutologonSids']) -join ',') | Should Be 'S-1-5-21-1000-2000-3000-1001'
         }
     }
     Context 'reads legal-notice settings from the policy key' {

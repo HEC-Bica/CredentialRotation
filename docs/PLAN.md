@@ -4,6 +4,7 @@ Status: draft v10.5 · 2026-10-19.
 - **v10.5:** user decisions (2026-10-19, D22, D26, D27):
   - `SYS-Admin` is the same account as `SYS Admin`, spelled with a hyphen on some machines. Both spellings are retired: always disabled (D22).
   - Existing `SOP-Admin` and `SP Admin` accounts are **kept untouched** (D26): no longer retired, never changed and not put to the operator. The config gets a new entry mode, `Mode = 'Keep'`.
+  - Sysinternals Autologon traces are reported only; an active auto-logon as `PUB-User`/`WinAutoUser` with such traces is kept and standardized (§7.5).
   - **No SQL credential updates** (D27): the SQL login slots and entries are removed, and M5 (SQL rotation) is dropped. Windows dependents such as the SQL Server service running as `ApplicationUser` are still updated.
 - **v10.4:** user decisions after review round 12 (§13.1, Appendix A):
   - The first real rotation is **one full run** without `-Only`, after the `-Only AppUser` re-apply. On test site 102575 both run with `/PS2`.
@@ -502,7 +503,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
 | **Ambiguous** (any of the following) | ask the operator (D13): turn off or leave unchanged | same |
 
 The ambiguous cases are:
-- a non-Winlogon mechanism
+- a non-Winlogon mechanism: a Winlogon `Shell` other than `explorer.exe` or an extra `Userinit` program. Sysinternals Autologon traces in a profile are **reported only** (v10.5): the tool writes the standard Winlogon settings that this step standardizes, and the auto-logon must stay active (confirmed 2026-10-19).
 - an account that can't be resolved
 - `AutoLogonCount` present (a count-limited auto-logon)
 - **no usable target** for a switch, or a kept account that isn't usable: disabled, locked or denied local logon. Example: `WinAutoUser` is denied local logon on both SM machines.
@@ -551,7 +552,7 @@ The secret is rewritten only under the "password source" rule above, so a standa
 | `SM-102575` | on as `BiCA Admin`, **plain-text password in the registry** | turn off |
 | `IPT01-102575` | on as `BiCA Admin` (written `Bica Admin`), **plain-text password in the registry** | switch to `WinAutoUser`. `PUB-User` doesn't exist there. `WinAutoUser` may log on locally there; it's only denied RDP. |
 
-No machine shows Sysinternals Autologon traces, a shell replacement, or an auto-logon tool in its Run entries or installed software.
+No machine of the 2026-10-06 inventories shows Sysinternals Autologon traces, a shell replacement, or an auto-logon tool in its Run entries or installed software. `PIT50-QS-K1` (audit 2026-10-19) has Sysinternals Autologon traces in two profiles and auto-logon on as `PUB-User`: kept and standardized, the traces reported (v10.5).
 
 **Consequences, shown before `YES`:**
 - After a switch, the console session runs as a standard user. `BiCA Admin`'s startup programs and per-user settings no longer apply, e.g. the POS and touch software on `IPT01-102575`.
@@ -882,7 +883,7 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 
 ### 13.2 M0 inventories (script v1.0, 2026-10-06)
 
-*Changed since:* on 2026-10-07 an `-Apply` of the untested WIP build `d22b466` (v10 account model) ran on `SM-QS-K1`: it created `SOP-Admin`, set the passwords of `BiCA Admin`, `ApplicationUser`, `PUB-User`, `WinAutoUser` and `SOP-Admin`, and disabled `BiCA Remote` and `WinAutoUser` (inventory v1.4, 2026-10-19). `IPT01-QS-K1` and `PIT50-QS-K1` (new) show the same pattern in the 0.5.0 audits. The tables below are the state of 2026-10-06.
+*Changed since:* on 2026-10-07 an intentional test `-Apply` of the untested WIP build `d22b466` (v10 account model) ran on `SM-QS-K1`: it created `SOP-Admin`, set the passwords of `BiCA Admin`, `ApplicationUser`, `PUB-User`, `WinAutoUser` and `SOP-Admin`, and disabled `BiCA Remote` and `WinAutoUser` (inventory v1.4, 2026-10-19). `IPT01-QS-K1` and `PIT50-QS-K1` (new) show the same pattern in the 0.5.0 audits. The tables below are the state of 2026-10-06.
 
 **Test site QS-K1**
 
@@ -960,6 +961,7 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 | `BiCA Remote` locked by the tool | Lockout budget per machine (D12), logon type per D16, rotated last, live session persists, auto-unlock |
 | Operator locked out when the running account is disabled (e.g. a retired `SYS-Admin`) | D25: disabled last, only after `BiCA Remote` is enabled, verified and holds an effective RDP logon right; the live session persists |
 | DPAPI data of `BiCA Admin`/`BiCA Remote` lost by the set | Accepted (O8); shown before `YES` |
+| Network logons as `PUB-User`/`WinAutoUser` between the machines of a site, probably MSMQ of the POS software (`WinAutoUser`: "WinPOS-User for MSMQ"; `SM-QS-K1` shows a `PUB-User` logon while its auto-logon is off, 2026-10-19). They need the same password on both machines, and a logged-on session keeps its old password until it logs on again. While a site is half rotated, they fail and count as bad passwords on the receiving machine (lockout threshold 4 on `SM-QS-K1`) | Rotate all machines of a site in one session with the same auto-logon password, then restart the machines with an active auto-logon (or log the account off and on), then check MSMQ; a lockout ends by itself after the lockout duration. The failures can also exhaust the lockout budget of the verification logons (D12) |
 | A created `BiCA Admin`/`BiCA Remote` has a new SID and no SQL Server login | Reported; only happens where the account was missing |
 | Services of the application user keep running on the old logon until restarted | D17: no restarts by the tool; "restart pending" in the report; the new password applies at the next start (verified beforehand via `LogonUser`) |
 | Site password rejected on one machine (complexity, length) | D15 strictest site rules checked on every machine |
@@ -1004,7 +1006,7 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 | 11 | v9.3 | 8.5 | 4 Minor | removals vs auto-logon step order, standardize option when a switch fails, planted journal, `/PS2` only for audits → fixed in v9.3 (removals before the auto-logon step, third operator option, journal ignored after an ownership fix, `/PS2` for the first apply on 102575, PS 2.0 VMs marked pending) |
 | 12 | v10.3 + build 0.3.0 | 7.5 (plan), 7.5 (apply), 8 (safety), 8 (tests) | 0 Blocker, 10 Major, ~15 Minor | README slot order vs "off stays off", undefined final full run, D24 moves to a new SID, `/PS2` coverage of the write paths, re-apply vs site rules, exit 0 for a skipped slot, verification logons outside the D12 budget, `-LogPath` ACL reset, no RDP reminder, 2 unit tests vs D12 → user decisions in v10.4 (§13.1); code fixes in 0.4.0 |
 
-v10.5 was a user decision (2026-10-19), not reviewed: `SYS-Admin` is retired as the hyphen spelling of `SYS Admin`; existing `SOP-Admin` and `SP Admin` accounts are kept untouched by the new `Mode = 'Keep'` (D26); SQL credentials are no longer updated and M5 is dropped (D27). Implemented in version 0.5.0; the unit tests are updated but not yet run.
+v10.5 was a user decision (2026-10-19), not reviewed: `SYS-Admin` is retired as the hyphen spelling of `SYS Admin`; existing `SOP-Admin` and `SP Admin` accounts are kept untouched by the new `Mode = 'Keep'` (D26); SQL credentials are no longer updated and M5 is dropped (D27). Implemented in version 0.5.0 (0.5.1: exit code printed; 0.5.2: Sysinternals Autologon traces reported only).
 
 v10.4 records the user's decisions on review round 12 (2026-10-08). The round reviewed the plan and build 0.3.0 with four independent reviewers (plan, apply path, safety, unit tests); every Major was checked against the code. The first write test (`-Only AppUser` re-apply) was traced as harmless. The code fixes follow in version 0.4.0.
 

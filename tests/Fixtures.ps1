@@ -372,7 +372,7 @@ function New-CrTestState {
     $autoLogon = @{
         AutoAdminLogon = '1'; AutoAdminLogonKind = 'String'; DefaultUserName = $autoLogonName; DefaultDomainName = $ComputerName
         DefaultPasswordPresent = $true; AutoLogonCountPresent = $false; ForceAutoLogon = $null; AutoLogonSidValue = $null
-        OtherMechanisms = @(); LegalNoticeCaptionSet = $false; LegalNoticeTextSet = $true; Error = $null
+        OtherMechanisms = @(); SysinternalsAutologonSids = @(); LegalNoticeCaptionSet = $false; LegalNoticeTextSet = $true; Error = $null
     }
 
     $state = @{

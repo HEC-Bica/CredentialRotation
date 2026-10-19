@@ -228,6 +228,7 @@ function Get-CrAutoLogonState {
         ForceAutoLogon                 = $null
         AutoLogonSidValue              = $null
         OtherMechanisms                = @()
+        SysinternalsAutologonSids      = @()
         LegalNoticeCaptionSet          = $false
         LegalNoticeTextSet             = $false
         DevicePasswordLessBuildVersion = $null
@@ -260,7 +261,8 @@ function Get-CrAutoLogonState {
         $pwLess = Get-CrAutoLogonKeyValues -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\PasswordLess\Device'
         $state['DevicePasswordLessBuildVersion'] = Get-CrAutoLogonText -Values $pwLess -Name 'DevicePasswordLessBuildVersion'
 
-        # Other mechanisms (PLAN section 7.5): shell replacement, extra Userinit programs, Sysinternals Autologon.
+        # Other mechanisms (PLAN section 7.5): shell replacement, extra Userinit programs. Sysinternals Autologon traces
+        # are kept apart and only reported (v10.5): the tool writes the standard Winlogon settings the step standardizes.
         $mech = New-Object System.Collections.ArrayList
         $shell = Get-CrAutoLogonText -Values $wl -Name 'Shell'
         if ($shell -and $shell.Trim()) {
@@ -281,11 +283,12 @@ function Get-CrAutoLogonState {
                 }
             }
         }
+        $sysinternals = New-Object System.Collections.ArrayList
         foreach ($sid in (ConvertTo-CrArray (Get-CrSysinternalsAutologonSids))) {
-            if (-not $sid) { continue }
-            [void]$mech.Add(('Sysinternals Autologon settings in the profile hive of {0}' -f $sid))
+            if ($sid) { [void]$sysinternals.Add([string]$sid) }
         }
         $state['OtherMechanisms'] = $mech.ToArray()
+        $state['SysinternalsAutologonSids'] = $sysinternals.ToArray()
     } catch {
         $state['Error'] = $_.Exception.Message
     }
@@ -358,6 +361,10 @@ function Get-CrAutoLogonDecision {
         [void]$reasons.Add('A legal-notice text without a caption is set (reported, not blocking).')
     } elseif ($al['LegalNoticeTextSet'] -or $al['LegalNoticeCaptionSet']) {
         [void]$reasons.Add('Legal-notice settings are present (reported, not blocking).')
+    }
+    $sysinternalsSids = ConvertTo-CrArray $al['SysinternalsAutologonSids']
+    if ($sysinternalsSids.Count -gt 0) {
+        [void]$reasons.Add(('Sysinternals Autologon was used in the profile of {0} (it writes the standard Winlogon settings; reported, not blocking).' -f ($sysinternalsSids -join ', ')))
     }
     if ($al['DevicePasswordLessBuildVersion'] -and ([string]$al['DevicePasswordLessBuildVersion']).Trim() -ne '0') {
         [void]$reasons.Add(('DevicePasswordLessBuildVersion = {0}.' -f $al['DevicePasswordLessBuildVersion']))

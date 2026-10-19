@@ -97,7 +97,7 @@ ComPlus: `@{ Name; Id; Activation ('Library'|'Server'); Identity; IdentitySid; I
 Login: `@{ Name; Type ('SQL_LOGIN'|'WINDOWS_LOGIN'|'WINDOWS_GROUP'); Sid (Windows principals: SID string; SQL logins: hex '0x…'); IsDisabled; IsPolicyChecked; IsExpirationChecked; IsLocked; BadPasswordCount; PasswordLastSetTime; IsSysadmin }`.
 
 ### AutoLogon
-`@{ AutoAdminLogon (string or $null); AutoAdminLogonKind ('String'|'DWord'|$null); DefaultUserName; DefaultDomainName; DefaultPasswordPresent; AutoLogonCountPresent; ForceAutoLogon; AutoLogonSidValue; OtherMechanisms = @(<text>); LegalNoticeCaptionSet; LegalNoticeTextSet; Error }`. Never reads the `DefaultPassword` value or the LSA secret.
+`@{ AutoAdminLogon (string or $null); AutoAdminLogonKind ('String'|'DWord'|$null); DefaultUserName; DefaultDomainName; DefaultPasswordPresent; AutoLogonCountPresent; ForceAutoLogon; AutoLogonSidValue; OtherMechanisms = @(<text>) (shell replacement, extra Userinit program); SysinternalsAutologonSids = @(<SID>) (profiles with Sysinternals Autologon traces, reported only, v10.5); LegalNoticeCaptionSet; LegalNoticeTextSet; Error }`. Never reads the `DefaultPassword` value or the LSA secret.
 
 ### WriteFilter
 `@{ Filters = @(@{ Type ('EWF'|'FBWF'|'UWF'); DriverInstalled; StateKnown; CurrentEnabled; NextEnabled; CommitPending; ProtectedVolumes = @('C:') ; Detail }) ; Error }`.

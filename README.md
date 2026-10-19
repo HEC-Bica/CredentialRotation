@@ -4,7 +4,7 @@ A PowerShell tool that rotates the local Windows credentials on standalone workg
 
 Design: [docs/PLAN.md](docs/PLAN.md) · Interfaces: [docs/dev/CONTRACTS.md](docs/dev/CONTRACTS.md) · Conventions and dev commands: [CLAUDE.md](CLAUDE.md)
 
-## Status (version 0.5.1, PLAN v10.5)
+## Status (version 0.5.2, PLAN v10.5)
 
 | Milestone | Content | State |
 |---|---|---|
@@ -16,7 +16,7 @@ Design: [docs/PLAN.md](docs/PLAN.md) · Interfaces: [docs/dev/CONTRACTS.md](docs
 |---|---|---|---|
 | `SM-QS-K1` (Windows 10 LTSC 2019) | 0.5.1 OK, `Exit code: 10` | 0.5.1 OK, `Exit code: 10` (cmd: 0) | 0.5.1: 1119 / 1119, 0 violations; inventory v1.4 (2026-10-19) |
 | `IPT01-QS-K1` (Windows 10 LTSC 2019) | 0.5.0 OK | 0.5.0 OK, see limitations | 1119 / 1119, 0 violations |
-| `PIT50-QS-K1` (Windows 10 LTSC 2019) | 0.5.0 OK; auto-logon ambiguous (Sysinternals Autologon traces, open question) | 0.5.0 OK, see limitations | 1119 / 1119, 0 violations |
+| `PIT50-QS-K1` (Windows 10 LTSC 2019) | 0.5.0 OK; auto-logon was ambiguous because of Sysinternals Autologon traces, reported only from 0.5.2 | 0.5.0 OK, see limitations | 1119 / 1119, 0 violations |
 | `SM-102575` (Windows Embedded 7) | M1 OK | M1 OK | no Pester |
 | `IPT01-102575` (Windows Embedded 7) | not run | not run | no Pester |
 
@@ -25,7 +25,7 @@ Known limitations of `/PS2` runs on the Windows 10 test machines (real runs use 
 - The auto-logon finding lacks the legal-notice reason (reported only, never blocking).
 - SQL Server can't be read (the PS 2.0 engine can't parse `powershell.exe.config`); no effect, as there are no SQL slots (D27).
 
-Machine state: on `SM-QS-K1` an `-Apply` of the untested WIP build `d22b466` (v10 account model, 2026-10-07) created `SOP-Admin` (description "Managed by CredentialRotation (SOPAdmin)"), set the passwords of `BiCA Admin`, `ApplicationUser`, `PUB-User`, `WinAutoUser` and `SOP-Admin`, and disabled `BiCA Remote` and `WinAutoUser` as replaced accounts (inventory 2026-10-19). `IPT01-QS-K1` and `PIT50-QS-K1` look the same in the audit (`SOP-Admin` present; `BiCA Admin`, on PIT50 also `BiCA Remote` and `WinAutoUser`, disabled).
+Machine state: on `SM-QS-K1` an intentional test `-Apply` of the untested WIP build `d22b466` (v10 account model, 2026-10-07) created `SOP-Admin` (description "Managed by CredentialRotation (SOPAdmin)"), set the passwords of `BiCA Admin`, `ApplicationUser`, `PUB-User`, `WinAutoUser` and `SOP-Admin`, and disabled `BiCA Remote` and `WinAutoUser` as replaced accounts (inventory 2026-10-19). `IPT01-QS-K1` and `PIT50-QS-K1` look the same in the audit (`SOP-Admin` present; `BiCA Admin`, on PIT50 also `BiCA Remote` and `WinAutoUser`, disabled). The QS-K1 machines stay in this test state for now; nothing is re-enabled.
 
 AppLocker blocks scripts on the development machine, so all runs happen on the test machines.
 
@@ -98,6 +98,7 @@ C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 -Apply -Only Ap
 - `BiCAAdmin`, `BiCARemote`: password set; a missing account is created. `BiCARemote` (your account) runs last; update saved RDP credentials afterwards.
 - `AppUser`: changed with its old password; created if missing. The built-in Administrator is disabled and its dependents move to `ApplicationUser`, unless `ApplicationUser` was just created (manual migration, reported).
 - `AutoLogon`: one password for every `PUB-User` and `WinAutoUser`. An active auto-logon as either is kept; any other is turned off (SM machines) or switched to `PUB-User`, else `WinAutoUser`.
+- Rotate all machines of a site in one session. `PUB-User`/`WinAutoUser` are probably used for MSMQ between the machines, which needs the same password on both sides; afterwards restart the machines with an active auto-logon so their sessions use the new password, then check MSMQ. Until then the failed attempts can briefly lock the account on the other machine.
 - `SYS Admin`, `SYS-Admin` and other accounts you choose to disable: their dependents move to `ApplicationUser`, then they are disabled. `SOP-Admin` and `SP Admin` are never touched. SQL logins aren't changed (D27); the SQL Server service gets the new password of `ApplicationUser`.
 - Afterwards update `HKLM\SOFTWARE\BICA\SYSTEM\LOGINS` manually (listed as FOLLOW-UP REQUIRED, exit code 4).
 - Interrupted or failed: re-run with the same passwords. When splitting with `-Only` (`BiCAAdmin`, `AppUser`, `AutoLogon`, `BiCARemote`), run `AutoLogon` before `BiCAAdmin`; retired, other and check-mode accounts are only processed without `-Only`.
