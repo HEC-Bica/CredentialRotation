@@ -2,26 +2,27 @@
 # Modelled on the two machine types of the test sites (docs/PLAN.md section 13.2), with synthetic names and SIDs only.
 #
 #   New-CrTestState -Profile 'SM'|'IPT01' [-ComputerName] [-OmitUsers] [-Parts] [-Customize]
-#   New-CrTestConfig [-Path]
+#   New-CrTestConfig [-Path], New-CrTestSqlConfig [-Path] (plus the SQL login slots and entries, D27)
 #   Helpers: Get-CrTestUser, Get-CrTestUserSid, Get-CrTestGroup, Add-CrTestUser, Remove-CrTestUser,
 #            Add-CrTestGroup, Add-CrTestGroupMember, Remove-CrTestGroupMember, Set-CrTestRight, Add-CrTestRight
 #
-# Profiles (account model PLAN v10.3: D18, D21-D25):
+# Profiles (account model PLAN v10.5: D18, D21-D25):
 #   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no PUB-User; built-in Administrator renamed 'LocalAdm'
 #         (disabled; replaced by ApplicationUser); BiCA Admin, BiCA Remote (Administrators + Remote Desktop Users; the
 #         operator's account) - managed, set; WinAutoUser (enabled, password-stored task \KioskTask, updated in place by
-#         the AutoLogon slot); ApplicationUser (runs SQL Server, app services, tasks, COM+); SP Admin (enabled admin,
+#         the AutoLogon slot); ApplicationUser (runs SQL Server, app services, tasks, COM+); SYS Admin (enabled admin,
 #         password-stored task \SpMaintenance; retired); WinUser1-3 (WinUser3 disabled; WinUser1 in RDU + hw_fn_*;
 #         WinUser2 in Power Users), FTP users TEST_FTP + ftpClient in CardCenters + Users; myftpuser (enabled, not an
 #         FTP user) and OtherAdmin (enabled admin) are the two "other enabled accounts" (D23); groups CardCenters,
 #         hw_fn_usbstor, hw_fn_cdrom, Offer Remote Assistance Helpers (BiCA Admin, BiCA Remote).
-#   IPT01 (IPT01-like, SQL Express): built-in 'Administrator' enabled (replaced by ApplicationUser); SOP-Admin exists
-#         (Administrators only; retired, v10.2); BiCA Admin (runs the service AppHelper, updated in place), BiCA Remote
-#         (Administrators + RDU), ApplicationUser (runs SQL Server), PUB-User and WinAutoUser; SYS Admin (enabled admin,
-#         runs the service LegacySync; retired); no other enabled accounts; no CardCenters, no Offer Remote Assistance
-#         Helpers.
+#   IPT01 (IPT01-like, SQL Express): built-in 'Administrator' enabled (replaced by ApplicationUser); SYS-Admin exists
+#         (Administrators only, no dependents; retired, the hyphen spelling of SYS Admin, v10.5); BiCA Admin (runs the
+#         service AppHelper, updated in place), BiCA Remote (Administrators + RDU), ApplicationUser (runs SQL Server),
+#         PUB-User and WinAutoUser; SYS Admin (enabled admin, runs the service LegacySync; retired); no other enabled
+#         accounts; no CardCenters, no Offer Remote Assistance Helpers.
 #   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword (SM: turned off; IPT01: switched to PUB-User);
-#         deny rights as on the test sites.
+#         deny rights as on the test sites. SOP-Admin and SP Admin (kept untouched, v10.5) are added by the tests that
+#         need them.
 
 $CrFixturesDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -205,7 +206,7 @@ function New-CrTestState {
     [void]$users.Add((New-CrTestUser -Name 'WinAutoUser' -Rid 1004 -MachineSid $machineSid -PasswordNeverExpires))
     if (-not $isSm) {
         [void]$users.Add((New-CrTestUser -Name 'PUB-User' -Rid 1005 -MachineSid $machineSid -PasswordNeverExpires))
-        [void]$users.Add((New-CrTestUser -Name 'SOP-Admin' -Rid 1006 -MachineSid $machineSid -PasswordNeverExpires -CannotChangePassword))
+        [void]$users.Add((New-CrTestUser -Name 'SYS-Admin' -Rid 1006 -MachineSid $machineSid -PasswordNeverExpires -CannotChangePassword))
     }
     if ($isSm) {
         [void]$users.Add((New-CrTestUser -Name 'WinUser1' -Rid 1010 -MachineSid $machineSid -PasswordNeverExpires))
@@ -217,19 +218,19 @@ function New-CrTestState {
     }
     if ($isSm) {
         [void]$users.Add((New-CrTestUser -Name 'OtherAdmin' -Rid 1030 -MachineSid $machineSid -PasswordNeverExpires))
-        [void]$users.Add((New-CrTestUser -Name 'SP Admin' -Rid 1031 -MachineSid $machineSid -PasswordNeverExpires))
+        [void]$users.Add((New-CrTestUser -Name 'SYS Admin' -Rid 1031 -MachineSid $machineSid -PasswordNeverExpires))
     } else {
         [void]$users.Add((New-CrTestUser -Name 'SYS Admin' -Rid 1032 -MachineSid $machineSid -PasswordNeverExpires))
     }
 
     $admin = & $s 500; $guest = & $s 501; $bicaAdmin = & $s 1001; $bicaRemote = & $s 1002; $appUser = & $s 1003
-    $winAuto = & $s 1004; $pubUser = & $s 1005; $sopAdmin = & $s 1006; $otherAdmin = & $s 1030; $spAdmin = & $s 1031; $sysAdmin = & $s 1032
+    $winAuto = & $s 1004; $pubUser = & $s 1005; $sysAdminHyphen = & $s 1006; $otherAdmin = & $s 1030; $sysAdminSm = & $s 1031; $sysAdmin = & $s 1032
     $winUser1 = & $s 1010; $winUser2 = & $s 1011; $winUser3 = & $s 1012; $ftp1 = & $s 1020; $ftp2 = & $s 1021; $myftp = & $s 1022
 
     # --- Groups (members as read by NetLocalGroupGetMembers level 0, D5) ---
     $groups = New-Object System.Collections.ArrayList
     if ($isSm) {
-        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $otherAdmin, $spAdmin); Error = $null })
+        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $otherAdmin, $sysAdminSm); Error = $null })
         [void]$groups.Add(@{ Name = 'Users'; Sid = 'S-1-5-32-545'; MemberSids = @('S-1-5-4', 'S-1-5-11', $winAuto, $winUser1, $winUser2, $winUser3, $ftp1, $ftp2, $myftp); Error = $null })
         [void]$groups.Add(@{ Name = 'Guests'; Sid = 'S-1-5-32-546'; MemberSids = @($guest); Error = $null })
         [void]$groups.Add(@{ Name = 'Power Users'; Sid = 'S-1-5-32-547'; MemberSids = @($winUser2); Error = $null })
@@ -240,7 +241,7 @@ function New-CrTestState {
         [void]$groups.Add(@{ Name = 'hw_fn_usbstor'; Sid = (& $s 1102); MemberSids = @($winUser1); Error = $null })
         [void]$groups.Add(@{ Name = 'hw_fn_cdrom'; Sid = (& $s 1103); MemberSids = @($winUser1); Error = $null })
     } else {
-        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $sopAdmin, $sysAdmin); Error = $null })
+        [void]$groups.Add(@{ Name = 'Administrators'; Sid = 'S-1-5-32-544'; MemberSids = @($admin, $bicaAdmin, $bicaRemote, $appUser, $sysAdminHyphen, $sysAdmin); Error = $null })
         [void]$groups.Add(@{ Name = 'Users'; Sid = 'S-1-5-32-545'; MemberSids = @('S-1-5-4', 'S-1-5-11', $winAuto, $pubUser); Error = $null })
         [void]$groups.Add(@{ Name = 'Guests'; Sid = 'S-1-5-32-546'; MemberSids = @($guest); Error = $null })
         [void]$groups.Add(@{ Name = 'Power Users'; Sid = 'S-1-5-32-547'; MemberSids = @(); Error = $null })
@@ -325,7 +326,7 @@ function New-CrTestState {
             # Dependents of a managed auto-logon account (updated in place) and of a retired one (moved to ApplicationUser,
             # D24, v10.4)
             @{ Path = '\KioskTask'; UserId = ('{0}\WinAutoUser' -f $ComputerName); UserSid = $winAuto; LogonType = 1; Enabled = $true; Error = $null },
-            @{ Path = '\SpMaintenance'; UserId = ('{0}\SP Admin' -f $ComputerName); UserSid = $spAdmin; LogonType = 1; Enabled = $true; Error = $null }
+            @{ Path = '\SpMaintenance'; UserId = ('{0}\SYS Admin' -f $ComputerName); UserSid = $sysAdminSm; LogonType = 1; Enabled = $true; Error = $null }
         )
         $comPlus = @(
             @{ Name = 'App Manager'; Id = '{00000000-0000-0000-0000-000000000001}'; Activation = 'Server'; Identity = 'ApplicationUser'; IdentitySid = $appUser; IsEnabled = $true; IsSystem = $false }
@@ -404,5 +405,25 @@ function New-CrTestConfig {
     $full = (Resolve-Path -LiteralPath $Path).ProviderPath
     $cfg = $null
     Import-LocalizedData -BindingVariable cfg -BaseDirectory (Split-Path -Parent $full) -FileName (Split-Path -Leaf $full) -UICulture en-US -ErrorAction Stop
+    return $cfg
+}
+
+# The default config plus the SQL login slots and entries it had until v10.5. The default config has no SQL credentials
+# any more (D27); these tests cover the SqlLogin handling the code still supports.
+function New-CrTestSqlConfig {
+    param([string]$Path)
+    $cfg = New-CrTestConfig -Path $Path
+    $credentials = New-Object System.Collections.ArrayList
+    foreach ($c in $cfg.Credentials) { if ($c.Slot -ne 'BiCARemote') { [void]$credentials.Add($c) } }
+    [void]$credentials.Add(@{ Slot = 'SQLApplication'; Order = 40; Label = 'SQL login SQLApplication'; MaxLength = 128 })
+    [void]$credentials.Add(@{ Slot = 'SQLScript';      Order = 50; Label = 'SQL login SQLScript';      MaxLength = 128 })
+    [void]$credentials.Add(@{ Slot = 'SQLService';     Order = 60; Label = 'SQL login SQLService';     MaxLength = 128 })
+    foreach ($c in $cfg.Credentials) { if ($c.Slot -eq 'BiCARemote') { [void]$credentials.Add($c) } }
+    $cfg.Credentials = $credentials.ToArray()
+    $cfg.Accounts = @($cfg.Accounts) + @(
+        @{ Id = 'SqlApp';     Kind = 'SqlLogin'; Name = 'SQLApplication'; ServerRoles = @('sysadmin'); Credential = 'SQLApplication'; LoginsEntry = $true },
+        @{ Id = 'SqlScript';  Kind = 'SqlLogin'; Name = 'SQLScript';      ServerRoles = @('sysadmin'); Credential = 'SQLScript';      LoginsEntry = $true },
+        @{ Id = 'SqlService'; Kind = 'SqlLogin'; Name = 'SQLService';     ServerRoles = @('sysadmin'); Credential = 'SQLService';     LoginsEntry = $true }
+    )
     return $cfg
 }

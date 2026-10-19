@@ -19,7 +19,7 @@ $TestConfig = @{
         @{ Id = 'AutoLogon'; Kind = 'Windows'; Names = @('PUB-User', 'WinAutoUser'); Role = 'User'; Credential = 'AutoLogon'
            AutoLogonUser = @(@{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' })
            AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' } }
-        @{ Id = 'Retired'; Kind = 'Windows'; Names = @('SP Admin', 'SYS Admin', 'SOP-Admin'); Mode = 'Disable' }
+        @{ Id = 'Retired'; Kind = 'Windows'; Names = @('SYS Admin', 'SYS-Admin'); Mode = 'Disable' }
         @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1'); Role = 'WinUser'; Mode = 'Check' }
         @{ Id = 'SqlApp'; Kind = 'SqlLogin'; Name = 'SQLApplication'; Credential = 'SQLApplication' }
         @{ Id = 'SqlScript'; Kind = 'SqlLogin'; Name = 'SQLScript'; Credential = 'SQLScript' }

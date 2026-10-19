@@ -841,6 +841,8 @@ function Get-CrApplyAccountFates {
                 } elseif ($e['Mode'] -eq 'Disable') {
                     $fate = 'disable'; $detail = 'retired without replacement (D22)'
                     if ($onlyGiven) { $fate = 'keep'; $detail = 'retired account, not processed under -Only' }
+                } elseif ($e['Mode'] -eq 'Keep') {
+                    $fate = 'keep'; $detail = 'kept untouched (config: Mode Keep)'
                 } elseif (Test-CrApplyManagedEntry $e) {
                     if (-not (Test-CrApplySlotSelected -Slot ([string]$e['Slot']) -Only $Only)) {
                         $fate = 'keep'; $detail = 'slot ' + $e['Slot'] + ' not selected'
@@ -1716,7 +1718,7 @@ function Invoke-CrApplyDisables {
     }
 }
 
-# 6 the running account last (D25), when it is itself to be disabled (e.g. a retired SOP-Admin): only if the operator's
+# 6 the running account last (D25), when it is itself to be disabled (e.g. a retired SYS-Admin): only if the operator's
 # account (the Operator entry, BiCA Remote) is enabled, in Administrators, verified in this run and holds an effective
 # remote-interactive logon right (granted, not denied). The RDP session continues; the next logon is as that account.
 function Invoke-CrApplyRunningAccountStep {

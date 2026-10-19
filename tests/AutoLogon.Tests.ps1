@@ -112,7 +112,7 @@ function New-TestResolved {
                AutoLogonUser = $list.ToArray(); Replaced = @() }
     $retired = @{ Id = 'Retired'; Kind = 'Windows'; Mode = 'Disable'; RoleName = $null; Slot = $null; Create = $false
                   PasswordMode = $null; Operator = $false; EnableIfDisabled = $false
-                  Accounts = @(); Missing = @('SP Admin', 'SYS Admin', 'SOP-Admin'); NotApplicable = $true
+                  Accounts = @(); Missing = @('SYS Admin', 'SYS-Admin'); NotApplicable = $true
                   AutoLogon = $null; AutoLogonUser = $null; Replaced = @() }
     return , @($bica, $auto, $retired)
 }

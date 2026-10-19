@@ -4,14 +4,15 @@ foreach ($m in @('Compat', 'Config', 'Rights', 'Principals', 'AutoLogon', 'Plan'
 . (Join-Path $here 'Fixtures.ps1')
 
 # Pester 3.4 keeps a Mock for the whole Describe/Context it is defined in: every Mock lives in its own Context.
-# Account model PLAN v10.3 (D18, D21-D25): BiCA Admin, BiCA Remote (the operator's account), ApplicationUser (replaces
-# RID-500) and the auto-logon accounts PUB-User / WinAutoUser are managed; SP Admin, SYS Admin and SOP-Admin are retired.
+# Account model PLAN v10.5 (D18, D21-D27): BiCA Admin, BiCA Remote (the operator's account), ApplicationUser (replaces
+# RID-500) and the auto-logon accounts PUB-User / WinAutoUser are managed; SYS Admin (also spelled SYS-Admin) is
+# retired; SOP-Admin and SP Admin are kept untouched (Mode Keep); the default config has no SQL login slots (D27).
 # v10.4 (D24): the dependents of retired and operator-disabled accounts always move to ApplicationUser; nothing moves to
 # an ApplicationUser created in this run (the account with dependents stays enabled).
 
 function New-CrTestPlan {
-    param($State, [string[]]$Only, $Preflight, [string]$RunningSid = 'S-1-5-21-9-9-9-9999')
-    $config = New-CrTestConfig
+    param($State, [string[]]$Only, $Preflight, [string]$RunningSid = 'S-1-5-21-9-9-9-9999', $Config)
+    if (-not $Config) { $Config = New-CrTestConfig }
     if (-not $Preflight) { $Preflight = @{ MachineBlocked = $false; BlockedSlots = @{}; Findings = @() } }
     $resolved = Resolve-CrAccounts -Config $config -State $State
     return New-CrPlan -State $State -Config $config -Resolved $resolved -Preflight $Preflight -Only $Only -RunningSid $RunningSid
@@ -62,7 +63,7 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.3)' {
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'LocalAdm' 'Already disabled (replaced by ApplicationUser)').Count | Should Be 1
         }
         It 'does not enforce groups or flags on retired or replaced accounts' {
-            foreach ($n in @('SP Admin', 'LocalAdm')) {
+            foreach ($n in @('SYS Admin', 'LocalAdm')) {
                 @(Get-CrTestFindings $plan $null 'Groups' $n).Count | Should Be 0
                 @(Get-CrTestFindings $plan $null 'Flags' $n).Count | Should Be 0
             }
@@ -77,18 +78,22 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.3)' {
         It 'has no D25 item: the running account BiCA Remote is managed, not disabled' {
             @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' $null 'The running account*').Count | Should Be 0
         }
-        It 'disables SP Admin (no replacement) and reports the missing SYS Admin and SOP-Admin' {
-            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SP Admin' 'Disable SP Admin (no replacement)').Count | Should Be 1
-            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Account not found (nothing to disable)*').Count | Should Be 1
-            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SOP-Admin' 'Account not found (nothing to disable)*').Count | Should Be 1
+        It 'disables SYS Admin (no replacement) and reports the missing SYS-Admin' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS Admin' 'Disable SYS Admin (no replacement)').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Account not found*').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS-Admin' 'Account not found (nothing to disable)*').Count | Should Be 1
         }
-        It 'moves the dependents of SP Admin to ApplicationUser (D24, v10.4)' {
-            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'SP Admin' 'Move scheduled task \SpMaintenance from SP Admin to ApplicationUser (D24)')
+        It 'says nothing about the missing SOP-Admin and SP Admin (Mode Keep, v10.5)' {
+            @(Get-CrTestFindings $plan $null $null 'SOP-Admin').Count | Should Be 0
+            @(Get-CrTestFindings $plan $null $null 'SP Admin').Count | Should Be 0
+        }
+        It 'moves the dependents of SYS Admin to ApplicationUser (D24, v10.4)' {
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'SYS Admin' 'Move scheduled task \SpMaintenance from SYS Admin to ApplicationUser (D24)')
             $f.Count | Should Be 1
-            $f[0]['Detail'] | Should Be 'Only to a verified ApplicationUser with its new password from this run; otherwise SP Admin stays enabled'
+            $f[0]['Detail'] | Should Be 'Only to a verified ApplicationUser with its new password from this run; otherwise SYS Admin stays enabled'
             $f[0]['Slot'] | Should BeNullOrEmpty
-            @(Get-CrTestFindings $plan 'Ambiguous' $null 'SP Admin').Count | Should Be 0
-            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SP Admin' 'Not disabled*').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS Admin').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled*').Count | Should Be 0
         }
         It 'puts every other enabled account to the operator (D23)' {
             $all = @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*')
@@ -114,18 +119,18 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.3)' {
         It 'turns off the admin auto-logon on an SM machine' {
             @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' $null 'Turn auto-logon off*').Count | Should Be 1
         }
-        It 'lists LOGINS follow-ups for BiCA Admin, BiCA Remote, ApplicationUser and the SQL logins' {
+        It 'lists LOGINS follow-ups for BiCA Admin, BiCA Remote and ApplicationUser, none for the SQL logins (D27)' {
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'BiCA Admin').Count | Should Be 1
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'BiCA Remote').Count | Should Be 1
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'ApplicationUser').Count | Should Be 1
-            @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'SQLApplication').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'SQLApplication').Count | Should Be 0
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'PUB-User').Count | Should Be 0
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'WinAutoUser').Count | Should Be 0
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'WinUser1').Count | Should Be 0
         }
         It 'puts the findings into HighImpact and FollowUps' {
             @($plan['HighImpact']).Count | Should BeGreaterThan 0
-            @($plan['FollowUps']).Count | Should Be 6
+            @($plan['FollowUps']).Count | Should Be 3
         }
         It 'never creates findings with an unknown severity' {
             $bad = @($plan['Findings'] | Where-Object { @('Drift', 'HighImpact', 'Blocked', 'Ambiguous', 'FollowUp', 'Info') -notcontains $_['Severity'] })
@@ -166,9 +171,9 @@ Describe 'New-CrPlan on an IPT01-like machine (account model v10.3)' {
         }
         @(Get-CrTestFindings $plan $null $null 'PUB-User' 'Create PUB-User').Count | Should Be 0
     }
-    It 'disables the retired SOP-Admin (no replacement, D22) without asking' {
-        @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Disable SOP-Admin (no replacement)').Count | Should Be 1
-        @(Get-CrTestFindings $plan 'Ambiguous' $null 'SOP-Admin').Count | Should Be 0
+    It 'disables the retired SYS-Admin (no replacement, D22) without asking' {
+        @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS-Admin' 'Disable SYS-Admin (no replacement)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS-Admin').Count | Should Be 0
     }
     It 'moves the service of SYS Admin to ApplicationUser (D24, v10.4)' {
         @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS Admin' 'Disable SYS Admin (no replacement)').Count | Should Be 1
@@ -258,7 +263,7 @@ Describe 'New-CrPlan: ApplicationUser is created in this run (D24, v10.4)' {
         $State.Services = @($State.Services) + @($svc)
     }
 
-    Context 'the built-in Administrator runs a service, SYS Admin runs LegacySync, SOP-Admin runs nothing' {
+    Context 'the built-in Administrator runs a service, SYS Admin runs LegacySync, SYS-Admin runs nothing' {
         Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
         $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
         Add-CrTestService -State $state -Name 'AdminJob' -Sid (Get-CrTestUserSid $state 'Administrator')
@@ -285,9 +290,9 @@ Describe 'New-CrPlan: ApplicationUser is created in this run (D24, v10.4)' {
             @(Get-CrTestFindings $plan $null $null 'SYS Admin' 'Move*').Count | Should Be 0
             @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS Admin').Count | Should Be 0
         }
-        It 'disables the retired SOP-Admin without dependents as usual' {
-            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Disable SOP-Admin (no replacement)').Count | Should Be 1
-            @(Get-CrTestFindings $plan $null $null 'SOP-Admin' 'Not disabled*').Count | Should Be 0
+        It 'disables the retired SYS-Admin without dependents as usual' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS-Admin' 'Disable SYS-Admin (no replacement)').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null $null 'SYS-Admin' 'Not disabled*').Count | Should Be 0
         }
         It 'has no D25 item when the running retired account stays enabled' {
             $running = New-CrTestPlan -State $state -RunningSid $sysAdminSid
@@ -440,9 +445,38 @@ Describe 'New-CrPlan account state findings' {
     }
     It 'reports a retired running account (D25): log on as BiCA Remote next time' {
         $state = New-CrTestState -Profile IPT01
-        $plan = New-CrTestPlan -State $state -RunningSid (Get-CrTestUserSid $state 'SOP-Admin')
-        @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SOP-Admin' 'The running account SOP-Admin is disabled at the end; log on as BiCA Remote next time (D25)').Count | Should Be 1
-        @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Disable SOP-Admin (no replacement)')[0]['Detail'] | Should Match 'last step \(D25\)'
+        $plan = New-CrTestPlan -State $state -RunningSid (Get-CrTestUserSid $state 'SYS-Admin')
+        @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS-Admin' 'The running account SYS-Admin is disabled at the end; log on as BiCA Remote next time (D25)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS-Admin' 'Disable SYS-Admin (no replacement)')[0]['Detail'] | Should Match 'last step \(D25\)'
+    }
+    It 'keeps an enabled admin SOP-Admin untouched (Mode Keep, v10.5): one Info, not disabled, not asked about' {
+        $state = New-CrTestState -Profile IPT01
+        [void](Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators') -PasswordNeverExpires)
+        $plan = New-CrTestPlan -State $state
+        $f = @(Get-CrTestFindings $plan $null $null 'SOP-Admin')
+        $f.Count | Should Be 1
+        $f[0]['Severity'] | Should Be 'Info'
+        $f[0]['Area'] | Should Be 'Accounts'
+        $f[0]['Message'] | Should Be 'Kept untouched (config: Mode Keep)'
+        $f[0]['Slot'] | Should BeNullOrEmpty
+        @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS-Admin' 'Disable SYS-Admin (no replacement)').Count | Should Be 1
+    }
+    It 'keeps SP Admin untouched like SOP-Admin (Mode Keep, v10.5)' {
+        $state = New-CrTestState -Profile IPT01
+        [void](Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators') -PasswordNeverExpires)
+        $plan = New-CrTestPlan -State $state
+        $f = @(Get-CrTestFindings $plan $null $null 'SP Admin')
+        $f.Count | Should Be 1
+        $f[0]['Severity'] | Should Be 'Info'
+        $f[0]['Message'] | Should Be 'Kept untouched (config: Mode Keep)'
+    }
+    It 'keeps SOP-Admin untouched also when it is the running account (no D25 item)' {
+        $state = New-CrTestState -Profile IPT01
+        $sop = Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators') -PasswordNeverExpires
+        $plan = New-CrTestPlan -State $state -RunningSid $sop.Sid
+        $f = @(Get-CrTestFindings $plan $null $null 'SOP-Admin')
+        $f.Count | Should Be 1
+        $f[0]['Message'] | Should Be 'Kept untouched (config: Mode Keep)'
     }
     It 'reports an already disabled retired account as Info only' {
         $state = New-CrTestState -Profile IPT01
@@ -482,7 +516,7 @@ Describe 'New-CrPlan with -Only' {
 
         It 'skips other slots, check-mode accounts, retired and other accounts' {
             @(Get-CrTestFindings $plan $null 'SQL').Count | Should Be 0
-            foreach ($n in @('BiCA Remote', 'ApplicationUser', 'WinAutoUser', 'WinUser1', 'SP Admin')) {
+            foreach ($n in @('BiCA Remote', 'ApplicationUser', 'WinAutoUser', 'WinUser1', 'SYS Admin')) {
                 @(Get-CrTestFindings $plan $null $null $n).Count | Should Be 0
             }
             @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*').Count | Should Be 0
@@ -496,10 +530,10 @@ Describe 'New-CrPlan with -Only' {
         }
     }
 
-    Context 'only a SQL slot' {
+    Context 'only a SQL slot (config with SQL entries, D27)' {
         Mock Get-CrPathAllowSids { return , @() }
         $state = New-CrTestState -Profile SM
-        $plan = New-CrTestPlan -State $state -Only @('SQLApplication')
+        $plan = New-CrTestPlan -State $state -Only @('SQLApplication') -Config (New-CrTestSqlConfig)
 
         It 'does not run the auto-logon step' {
             @(Get-CrTestFindings $plan $null 'AutoLogon').Count | Should Be 0

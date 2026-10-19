@@ -24,11 +24,11 @@ function Get-CrConfigSchema {
         DependentKeys        = @('Services', 'ScheduledTasks', 'ComPlus', 'IisReport')
         DependentValues      = @('Auto')
         Kinds                = @('Windows', 'SqlLogin')
-        ModeValues           = @('Check', 'Disable')
+        ModeValues           = @('Check', 'Disable', 'Keep')
         PasswordModeValues   = @('Set', 'Change')
-        # Keys of managed (rotated) entries; not valid on Check or Disable entries
+        # Keys of managed (rotated) entries; not valid on Check, Disable or Keep entries
         ManagedOnlyKeys      = @('Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled')
-        # A Disable entry only selects accounts by Name/Names (D22)
+        # A Disable (D22) or Keep (D26) entry only selects accounts by Name/Names
         DisableForbiddenKeys = @('NamePattern', 'Candidates', 'Role', 'Credential', 'LoginsEntry', 'Services', 'ScheduledTasks',
                                  'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon')
         CandidateKeys        = @('Name', 'Sid', 'Role', 'Credential')
@@ -355,22 +355,25 @@ function Test-CrConfigAccount {
 
     $isCheck = $false
     $isDisable = $false
+    $isKeep = $false
     if ($Account.ContainsKey('Mode')) {
         if ($Schema.ModeValues -notcontains [string]$Account['Mode']) {
-            [void]$Errors.Add(('{0}: Mode ''{1}'' is not valid (only ''Check'' or ''Disable''; omit Mode to rotate).' -f $Where, $Account['Mode']))
+            [void]$Errors.Add(('{0}: Mode ''{1}'' is not valid (only ''Check'', ''Disable'' or ''Keep''; omit Mode to rotate).' -f $Where, $Account['Mode']))
         } elseif ([string]$Account['Mode'] -eq 'Disable') {
             $isDisable = $true
+        } elseif ([string]$Account['Mode'] -eq 'Keep') {
+            $isKeep = $true
         } else {
             $isCheck = $true
         }
     }
     if ($isWindowsKind) {
-        Test-CrConfigManagedKeys -Schema $Schema -Account $Account -Where $Where -IsRotate (-not $isCheck -and -not $isDisable) `
+        Test-CrConfigManagedKeys -Schema $Schema -Account $Account -Where $Where -IsRotate (-not $isCheck -and -not $isDisable -and -not $isKeep) `
             -ReplacedBy $ReplacedBy -Errors $Errors
     }
-    if ($isDisable) {
+    if ($isDisable -or $isKeep) {
         foreach ($key in $Schema.DisableForbiddenKeys) {
-            if ($Account.ContainsKey($key)) { [void]$Errors.Add(('{0}: key ''{1}'' is not valid for Mode ''Disable''.' -f $Where, $key)) }
+            if ($Account.ContainsKey($key)) { [void]$Errors.Add(('{0}: key ''{1}'' is not valid for Mode ''{2}''.' -f $Where, $key, $Account['Mode'])) }
         }
     }
 
@@ -436,7 +439,7 @@ function Test-CrConfigAccount {
                 Test-CrConfigSlotRef -SlotName $candidate['Credential'] -Slots $Slots -Where $cWhere -Errors $Errors
             }
         }
-    } elseif (-not $isDisable) {
+    } elseif (-not $isDisable -and -not $isKeep) {
         if ($isWindowsKind) {
             Test-CrConfigRoleRef -Config $Config -RoleName $Account['Role'] -Where $Where -Errors $Errors
         }
@@ -556,6 +559,7 @@ function Test-CrConfig {
         $operatorEntries = 0
         $autoLogonNames = New-Object System.Collections.ArrayList
         $disableNames = New-Object System.Collections.ArrayList
+        $keepNames = New-Object System.Collections.ArrayList
         $index = 0
         foreach ($account in (ConvertTo-CrArray $Config['Accounts'])) {
             $index++
@@ -585,6 +589,10 @@ function Test-CrConfig {
                 if ($account['Name']) { [void]$disableNames.Add([string]$account['Name']) }
                 foreach ($n in (ConvertTo-CrArray $account['Names'])) { if ($n) { [void]$disableNames.Add([string]$n) } }
             }
+            if ([string]$account['Mode'] -eq 'Keep') {
+                if ($account['Name']) { [void]$keepNames.Add([string]$account['Name']) }
+                foreach ($n in (ConvertTo-CrArray $account['Names'])) { if ($n) { [void]$keepNames.Add([string]$n) } }
+            }
             Test-CrConfigAccount -Config $Config -Schema $schema -Account $account -Where $where -Slots $slots -Errors $errors -ReplacedBy $replacedBy
         }
         if ($autoLogonEntries -gt 1) { [void]$errors.Add('Accounts: only one entry may have an AutoLogon block.') }
@@ -596,6 +604,10 @@ function Test-CrConfig {
             }
             foreach ($d in $disableNames) {
                 if ($d -ieq $n) { [void]$errors.Add(('Accounts: the auto-logon account ''{0}'' must not be in a Disable entry.' -f $n)) }
+            }
+            # D26: the auto-logon accounts are managed, so they can't be kept untouched either.
+            foreach ($k in $keepNames) {
+                if ($k -ieq $n) { [void]$errors.Add(('Accounts: the auto-logon account ''{0}'' must not be in a Keep entry.' -f $n)) }
             }
         }
     }

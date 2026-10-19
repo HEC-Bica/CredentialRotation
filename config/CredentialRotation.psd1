@@ -20,13 +20,11 @@
     }
 
     # One prompt per slot (new password twice), applied in ascending Order (D9: set; ApplicationUser: change).
+    # No SQL login slots: SQL credentials are not updated (D27, v10.5).
     Credentials = @(
         @{ Slot = 'BiCAAdmin';      Order = 10; Label = 'BiCA Admin' }
         @{ Slot = 'AppUser';        Order = 20; Label = 'ApplicationUser' }
         @{ Slot = 'AutoLogon';      Order = 30; Label = 'Auto-logon users (PUB-User / WinAutoUser)' }
-        @{ Slot = 'SQLApplication'; Order = 40; Label = 'SQL login SQLApplication'; MaxLength = 128 }
-        @{ Slot = 'SQLScript';      Order = 50; Label = 'SQL login SQLScript';      MaxLength = 128 }
-        @{ Slot = 'SQLService';     Order = 60; Label = 'SQL login SQLService';     MaxLength = 128 }
         @{ Slot = 'BiCARemote';     Order = 90; Label = 'BiCA Remote (your own logon account)' }   # last (D25)
     )
 
@@ -51,13 +49,13 @@
            AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' }
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
         # Retired without replacement (D22); their dependents move to ApplicationUser (D24, v10.4).
-        @{ Id = 'Retired';  Kind = 'Windows'; Names = @('SP Admin', 'SYS Admin', 'SOP-Admin'); Mode = 'Disable' }
+        # 'SYS-Admin' is the same account as 'SYS Admin', spelled with a hyphen on some machines (v10.5).
+        @{ Id = 'Retired';  Kind = 'Windows'; Names = @('SYS Admin', 'SYS-Admin'); Mode = 'Disable' }
+        # Never changed and not put to the operator (D26, v10.5)
+        @{ Id = 'Untouched'; Kind = 'Windows'; Names = @('SOP-Admin', 'SP Admin'); Mode = 'Keep' }
         # Kept and checked (no password change)
         @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1', 'WinUser2', 'WinUser3'); Role = 'WinUser'; Mode = 'Check' }
         @{ Id = 'FtpUsers'; Kind = 'Windows'; NamePattern = '^ftp|ftp$'; Role = 'Ftp'; Mode = 'Check' }
-        @{ Id = 'SqlApp';     Kind = 'SqlLogin'; Name = 'SQLApplication'; ServerRoles = @('sysadmin'); Credential = 'SQLApplication'; LoginsEntry = $true }
-        @{ Id = 'SqlScript';  Kind = 'SqlLogin'; Name = 'SQLScript';      ServerRoles = @('sysadmin'); Credential = 'SQLScript';      LoginsEntry = $true }
-        @{ Id = 'SqlService'; Kind = 'SqlLogin'; Name = 'SQLService';     ServerRoles = @('sysadmin'); Credential = 'SQLService';     LoginsEntry = $true }
     )
 
     # D23: every other enabled local account is put to the operator (disable / keep).

@@ -6,13 +6,14 @@
 .DESCRIPTION
     Discovers the local accounts, groups, rights, dependents, auto-logon, write filter and SQL Server state,
     compares them with the configuration and reports what -Apply would change (audit, changes nothing).
-    With -Apply (account model v10.4, PLAN D18, D21-D25) it lists the enabled local accounts and what happens to each,
+    With -Apply (account model v10.5, PLAN D18, D21-D27) it lists the enabled local accounts and what happens to each,
     asks about the other enabled accounts, prompts for the passwords per credential slot, probes ApplicationUser's old
     password, shows the plan and, after YES, creates the missing admin accounts (BiCA Admin, BiCA Remote,
     ApplicationUser), sets the passwords of the managed accounts incl. every existing PUB-User/WinAutoUser
     (ApplicationUser: changed), enforces groups and flags, updates and moves the dependents, runs the auto-logon step,
     disables the replaced, retired and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8).
-    BiCA Remote, the operator's account, is the last slot. SQL rotation is not part of this version.
+    SOP-Admin and SP Admin are kept untouched (D26). BiCA Remote, the operator's account, is the last slot.
+    SQL login credentials are not updated (D27).
     Start it through Start-CredentialRotation.cmd ("Run as administrator").
 
 .PARAMETER Apply
@@ -46,7 +47,7 @@ if ($UnexpectedArguments) {
 }
 
 $ErrorActionPreference = 'Stop'
-$script:CrToolVersion = '0.4.0'
+$script:CrToolVersion = '0.5.0'
 $script:CrScriptPath = $MyInvocation.MyCommand.Path
 $script:CrScriptDir = Split-Path -Parent $script:CrScriptPath
 

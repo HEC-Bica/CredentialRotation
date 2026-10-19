@@ -28,20 +28,20 @@ Describe 'Import-CrConfig' {
         $c = Import-CrConfig -Path $defaultPath
         ($c -is [hashtable]) | Should Be $true
         $c.SchemaVersion | Should Be 1
-        @($c.Accounts).Count | Should Be 10
-        @($c.Credentials).Count | Should Be 7
+        @($c.Accounts).Count | Should Be 8
+        @($c.Credentials).Count | Should Be 4
         $c.Roles.ContainsKey('AdminRemote') | Should Be $true
         $c.Roles.ContainsKey('Operator') | Should Be $false
         $c.Roles.ContainsKey('RotateOnly') | Should Be $false
         $c.OtherEnabledAccounts | Should Be 'Ask'
     }
 
-    It 'has the v10.3 slots in Order, BiCARemote last (D25)' {
+    It 'has the slots in Order, BiCARemote last (D25), no SQL slots (D27)' {
         $c = Import-CrConfig -Path $defaultPath
         $slots = @(); $orders = @()
         foreach ($cr in $c.Credentials) { $slots += $cr.Slot; $orders += $cr.Order }
-        ($slots -join ',') | Should Be 'BiCAAdmin,AppUser,AutoLogon,SQLApplication,SQLScript,SQLService,BiCARemote'
-        ($orders -join ',') | Should Be '10,20,30,40,50,60,90'
+        ($slots -join ',') | Should Be 'BiCAAdmin,AppUser,AutoLogon,BiCARemote'
+        ($orders -join ',') | Should Be '10,20,30,90'
     }
 
     It 'has the v10.3 managed BiCA accounts (created if missing; BiCA Remote is the operator)' {
@@ -91,11 +91,26 @@ Describe 'Import-CrConfig' {
         $al.AutoLogon.RestrictedComputerPattern | Should Be '^SM'
     }
 
-    It 'retires SOP-Admin with SP Admin and SYS Admin (v10.2)' {
+    It 'retires SYS Admin in both spellings (v10.5)' {
         $c = Import-CrConfig -Path $defaultPath
         $r = Get-TestAccount $c 'Retired'
         $r.Mode | Should Be 'Disable'
-        (@($r.Names) -join ',') | Should Be 'SP Admin,SYS Admin,SOP-Admin'
+        (@($r.Names) -join ',') | Should Be 'SYS Admin,SYS-Admin'
+    }
+
+    It 'keeps SOP-Admin and SP Admin untouched with a Keep entry (v10.5)' {
+        $c = Import-CrConfig -Path $defaultPath
+        $k = Get-TestAccount $c 'Untouched'
+        $k.Mode | Should Be 'Keep'
+        $k.Kind | Should Be 'Windows'
+        (@($k.Names) -join ',') | Should Be 'SOP-Admin,SP Admin'
+        (@($k.Keys | Sort-Object) -join ',') | Should Be 'Id,Kind,Mode,Names'
+    }
+
+    It 'has no SQL login entries (D27, v10.5)' {
+        $c = Import-CrConfig -Path $defaultPath
+        foreach ($a in $c.Accounts) { $a.Kind | Should Be 'Windows' }
+        foreach ($cr in $c.Credentials) { ($cr.Slot -like 'SQL*') | Should Be $false }
     }
 
     It 'has no SqlSysadminLogin key and no single-Name SOP-Admin or PUB-User entry' {
@@ -257,11 +272,11 @@ Describe 'Test-CrConfig' {
             Test-HasConfigError @(Test-CrConfig -Config $c) "Account 'AutoLogon' AutoLogonUser: unknown key 'RequireEnabled'" | Should Be $true
         }
         It 'a key of the other Kind' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'SqlApp').Role = 'Admin'
+            $c = New-CrTestSqlConfig; (Get-TestAccount $c 'SqlApp').Role = 'Admin'
             Test-HasConfigError @(Test-CrConfig -Config $c) "key 'Role' is not valid for Kind 'SqlLogin'" | Should Be $true
         }
         It 'a v10 Windows key on a SQL login' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'SqlApp').PasswordMode = 'Change'
+            $c = New-CrTestSqlConfig; (Get-TestAccount $c 'SqlApp').PasswordMode = 'Change'
             Test-HasConfigError @(Test-CrConfig -Config $c) "key 'PasswordMode' is not valid for Kind 'SqlLogin'" | Should Be $true
         }
         It 'reports a missing top-level key' {
@@ -300,7 +315,7 @@ Describe 'Test-CrConfig' {
             Test-HasConfigError @(Test-CrConfig -Config $c) "BiCAAdmin': Role must be" | Should Be $true
         }
         It 'an unknown slot on an entry' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'SqlScript').Credential = 'SQLScripts'
+            $c = New-CrTestSqlConfig; (Get-TestAccount $c 'SqlScript').Credential = 'SQLScripts'
             Test-HasConfigError @(Test-CrConfig -Config $c) "Credential 'SQLScripts' does not refer to an existing slot" | Should Be $true
         }
         It 'an unknown slot on a candidate' {
@@ -420,12 +435,12 @@ Describe 'Test-CrConfig' {
             Test-HasConfigError @(Test-CrConfig -Config $c) 'candidate 0: needs exactly one of Name or Sid' | Should Be $true
         }
         It 'an invalid Kind' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'SqlApp').Kind = 'Sql'
+            $c = New-CrTestSqlConfig; (Get-TestAccount $c 'SqlApp').Kind = 'Sql'
             Test-HasConfigError @(Test-CrConfig -Config $c) "SqlApp': Kind must be one of" | Should Be $true
         }
-        It 'a Mode other than Check or Disable' {
+        It 'a Mode other than Check, Disable or Keep' {
             $c = New-CrTestConfig; (Get-TestAccount $c 'BiCAAdmin').Mode = 'Rotate'
-            Test-HasConfigError @(Test-CrConfig -Config $c) "Mode 'Rotate' is not valid \(only 'Check' or 'Disable'" | Should Be $true
+            Test-HasConfigError @(Test-CrConfig -Config $c) "Mode 'Rotate' is not valid \(only 'Check', 'Disable' or 'Keep'" | Should Be $true
         }
         It 'an unknown dependent value' {
             $c = New-CrTestConfig; (Get-TestAccount $c 'AppUser').Services = 'Always'
@@ -473,7 +488,7 @@ Describe 'Test-CrConfig' {
             @(Test-CrConfig -Config $c).Count | Should Be 0
         }
         It 'Operator or EnableIfDisabled on a SQL login' {
-            $c = New-CrTestConfig
+            $c = New-CrTestSqlConfig
             $s = Get-TestAccount $c 'SqlApp'; $s.Operator = $true; $s.EnableIfDisabled = $true
             $errors = @(Test-CrConfig -Config $c)
             Test-HasConfigError $errors "SqlApp': key 'Operator' is not valid for Kind 'SqlLogin'" | Should Be $true
@@ -571,7 +586,50 @@ Describe 'Test-CrConfig' {
             @(Test-CrConfig -Config $c).Count | Should Be 0
         }
         It 'Mode Disable on a SQL login' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'SqlApp').Mode = 'Disable'
+            $c = New-CrTestSqlConfig; (Get-TestAccount $c 'SqlApp').Mode = 'Disable'
+            Test-HasConfigError @(Test-CrConfig -Config $c) "key 'Mode' is not valid for Kind 'SqlLogin'" | Should Be $true
+        }
+    }
+
+    Context 'Keep entries (v10.5)' {
+        It 'a Keep entry with a Role or a Credential' {
+            $c = New-CrTestConfig
+            $k = Get-TestAccount $c 'Untouched'; $k.Role = 'Admin'; $k.Credential = 'BiCAAdmin'
+            $errors = @(Test-CrConfig -Config $c)
+            Test-HasConfigError $errors "Untouched': key 'Role' is not valid for Mode 'Keep'" | Should Be $true
+            Test-HasConfigError $errors "Untouched': key 'Credential' is not valid for Mode 'Keep'" | Should Be $true
+        }
+        It 'a Keep entry with dependents or LoginsEntry' {
+            $c = New-CrTestConfig
+            $k = Get-TestAccount $c 'Untouched'; $k.Services = 'Auto'; $k.LoginsEntry = $true
+            $errors = @(Test-CrConfig -Config $c)
+            Test-HasConfigError $errors "Untouched': key 'Services' is not valid for Mode 'Keep'" | Should Be $true
+            Test-HasConfigError $errors "Untouched': key 'LoginsEntry' is not valid for Mode 'Keep'" | Should Be $true
+        }
+        It 'a Keep entry with Create, Replaces or PasswordMode' {
+            $c = New-CrTestConfig
+            $k = Get-TestAccount $c 'Untouched'; $k.Create = $true; $k.Replaces = @('Kiosk'); $k.PasswordMode = 'Set'
+            $errors = @(Test-CrConfig -Config $c)
+            Test-HasConfigError $errors "Untouched': key 'Create' is not valid for Mode 'Keep'" | Should Be $true
+            Test-HasConfigError $errors "Untouched': key 'Replaces' is not valid for Mode 'Keep'" | Should Be $true
+            Test-HasConfigError $errors "Untouched': key 'PasswordMode' is not valid for Mode 'Keep'" | Should Be $true
+        }
+        It 'a Keep entry with a NamePattern' {
+            $c = New-CrTestConfig
+            Add-TestAccount $c @{ Id = 'PatKeep'; Kind = 'Windows'; NamePattern = '^sop'; Mode = 'Keep' }
+            Test-HasConfigError @(Test-CrConfig -Config $c) "PatKeep': key 'NamePattern' is not valid for Mode 'Keep'" | Should Be $true
+        }
+        It 'accepts a Keep entry with a single Name' {
+            $c = New-CrTestConfig
+            Add-TestAccount $c @{ Id = 'OneKeep'; Kind = 'Windows'; Name = 'Kiosk'; Mode = 'Keep' }
+            @(Test-CrConfig -Config $c).Count | Should Be 0
+        }
+        It 'an auto-logon account in a Keep entry (case-insensitive)' {
+            $c = New-CrTestConfig; (Get-TestAccount $c 'Untouched').Names = @('SOP-Admin', 'pub-user')
+            Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'PUB-User' must not be in a Keep entry" | Should Be $true
+        }
+        It 'Mode Keep on a SQL login' {
+            $c = New-CrTestSqlConfig; (Get-TestAccount $c 'SqlApp').Mode = 'Keep'
             Test-HasConfigError @(Test-CrConfig -Config $c) "key 'Mode' is not valid for Kind 'SqlLogin'" | Should Be $true
         }
     }
@@ -631,7 +689,7 @@ Describe 'Test-CrConfig' {
             Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'WinAutoUser' must not be replaced \(Account 'AppUser'\)" | Should Be $true
         }
         It 'an auto-logon account in a Disable entry with Names (case-insensitive)' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'Retired').Names = @('SP Admin', 'SYS Admin', 'SOP-Admin', 'pub-user')
+            $c = New-CrTestConfig; (Get-TestAccount $c 'Retired').Names = @('SYS Admin', 'SYS-Admin', 'pub-user')
             Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'PUB-User' must not be in a Disable entry" | Should Be $true
         }
         It 'an auto-logon account in a Disable entry with a single Name' {
@@ -645,10 +703,11 @@ Describe 'Test-CrConfig' {
 Describe 'Get-CrConfigSlotNames' {
     It 'returns the slot names in file order' {
         $names = Get-CrConfigSlotNames -Config (New-CrTestConfig)
-        $names.Count | Should Be 7
+        $names.Count | Should Be 4
         $names[0] | Should Be 'BiCAAdmin'
         $names[2] | Should Be 'AutoLogon'
-        $names[6] | Should Be 'BiCARemote'
+        $names[3] | Should Be 'BiCARemote'
+        ($names -contains 'SQLApplication') | Should Be $false
         ($names -contains 'SOPAdmin') | Should Be $false
         ($names -contains 'PubUser') | Should Be $false
     }
@@ -678,11 +737,17 @@ Describe 'Get-CrUnknownOnlySlots' {
     $c = New-CrTestConfig
 
     It 'returns nothing for known slots' {
-        (Get-CrUnknownOnlySlots -Config $c -Only @('AppUser', 'BiCAAdmin', 'AutoLogon', 'BiCARemote', 'SQLService')).Count | Should Be 0
+        (Get-CrUnknownOnlySlots -Config $c -Only @('AppUser', 'BiCAAdmin', 'AutoLogon', 'BiCARemote')).Count | Should Be 0
     }
 
     It 'compares case-insensitively' {
-        (Get-CrUnknownOnlySlots -Config $c -Only @('appuser', 'BICAREMOTE', 'sqlapplication')).Count | Should Be 0
+        (Get-CrUnknownOnlySlots -Config $c -Only @('appuser', 'BICAREMOTE', 'autologon')).Count | Should Be 0
+    }
+
+    It 'returns a removed SQL slot as unknown (D27)' {
+        $unknown = Get-CrUnknownOnlySlots -Config $c -Only @('AppUser', 'SQLService')
+        $unknown.Count | Should Be 1
+        $unknown[0] | Should Be 'SQLService'
     }
 
     It 'returns the unknown names in the given order (the removed v10 slots)' {

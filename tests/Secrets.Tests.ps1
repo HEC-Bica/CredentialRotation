@@ -279,9 +279,9 @@ $TcSidRemote  = 'S-1-5-21-1000-2000-3000-1002'
 $TcSidApp     = 'S-1-5-21-1000-2000-3000-1003'
 $TcSidPub     = 'S-1-5-21-1000-2000-3000-1005'
 $TcSidApp2    = 'S-1-5-21-1000-2000-3000-1006'
-$TcSidSp      = 'S-1-5-21-1000-2000-3000-1007'
+$TcSidSys     = 'S-1-5-21-1000-2000-3000-1007'
 $TcSidWinAuto = 'S-1-5-21-1000-2000-3000-1008'
-$TcSidSop     = 'S-1-5-21-1000-2000-3000-1009'
+$TcSidSysH    = 'S-1-5-21-1000-2000-3000-1009'
 $TcSidWu1     = 'S-1-5-21-1000-2000-3000-1010'
 
 function New-CrTestV10Config {
@@ -310,7 +310,7 @@ function New-CrTestAccount {
 
 # BiCA Admin is missing (created, Set); ApplicationUser exists (Change, EnableIfDisabled); PUB-User and WinAutoUser exist
 # (AutoLogon slot, Set, never created or enabled); BiCA Remote exists (the Operator entry; Set by default: no
-# PasswordMode key); SP Admin and SOP-Admin are retired (Disable); WinUser1 is checked.
+# PasswordMode key); SYS Admin and SYS-Admin are retired (Disable); WinUser1 is checked.
 # -NoPubUser: like an SM machine, only WinAutoUser exists and PUB-User is in the entry's Missing names.
 function New-CrTestV10Resolved {
     param([switch]$AppCreate, [switch]$SecondChangeAccount, [switch]$AppDisabled, [switch]$WinAutoDisabled, [switch]$NoPubUser)
@@ -351,7 +351,7 @@ function New-CrTestV10Resolved {
            EnableIfDisabled = $false; Operator = $true; Missing = @(); NotApplicable = $false
            Accounts = @(New-CrTestAccount 'BiCA Remote' $TcSidRemote 'Remote Support') },
         @{ Id = 'Retired'; Kind = 'Windows'; Mode = 'Disable'; Slot = $null; NotApplicable = $false
-           Accounts = @((New-CrTestAccount 'SP Admin' $TcSidSp), (New-CrTestAccount 'SOP-Admin' $TcSidSop)) },
+           Accounts = @((New-CrTestAccount 'SYS Admin' $TcSidSys), (New-CrTestAccount 'SYS-Admin' $TcSidSysH)) },
         @{ Id = 'WinUsers'; Kind = 'Windows'; Mode = 'Check'; Slot = $null; NotApplicable = $false
            Accounts = @(New-CrTestAccount 'WinUser1' $TcSidWu1) },
         @{ Id = 'SqlApp'; Kind = 'SqlLogin'; Mode = 'Rotate'; Slot = 'SQLApplication'; NotApplicable = $false
@@ -742,7 +742,7 @@ Describe 'Read-CrSlotSecrets (v10.3)' {
             ($io.SecurePrompts[7] -like 'New password*BiCA Remote*') | Should Be $true
             ($io.SecurePrompts[8] -like 'Repeat*BiCA Remote*') | Should Be $true
             $all = $io.SecurePrompts -join '|'
-            foreach ($n in @('SOP-Admin', 'SP Admin', 'WinUser1', 'SQLApplication')) { ($all -like ('*' + $n + '*')) | Should Be $false }
+            foreach ($n in @('SYS-Admin', 'SYS Admin', 'WinUser1', 'SQLApplication')) { ($all -like ('*' + $n + '*')) | Should Be $false }
             ($null -eq $r['BiCAAdmin'].Accounts[0].OldSecret) | Should Be $true
             @($r['AutoLogon'].Accounts).Count | Should Be 2
             foreach ($a in $r['AutoLogon'].Accounts) { ($null -eq $a.OldSecret) | Should Be $true }

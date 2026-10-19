@@ -117,9 +117,9 @@ Login: `@{ Name; Type ('SQL_LOGIN'|'WINDOWS_LOGIN'|'WINDOWS_GROUP'); Sid (Window
 
 ### Principals.ps1
 - `Resolve-CrAccounts -Config -State` → array of resolved entries:
-  `@{ Id; Kind ('Windows'|'SqlLogin'); Mode ('Rotate'|'Check'); RoleName; Role; Slot; LoginsEntry; Accounts = @(@{ Name; Sid; User }) ; Missing = @(<names>); Candidate (index or $null); NotApplicable ($true if nothing resolved) ; AutoLogon (the config's AutoLogon block or $null); AutoLogonUser (selection list or $null); Config (the original config entry hashtable, e.g. for `Services`, `ServerRoles`) }`.
+  `@{ Id; Kind ('Windows'|'SqlLogin'); Mode ('Rotate'|'Check'|'Disable'|'Keep'); RoleName; Role; Slot; LoginsEntry; Accounts = @(@{ Name; Sid; User }) ; Missing = @(<names>); Candidate (index or $null); NotApplicable ($true if nothing resolved) ; AutoLogon (the config's AutoLogon block or $null); AutoLogonUser (selection list or $null); Config (the original config entry hashtable, e.g. for `Services`, `ServerRoles`) }`.
   `User` = the `$State.Users` entry; for SQL logins `User` is the `$State.Sql.Logins` entry and `Sid` its hex SID.
-  `Mode` is `Check` when the config entry has `Mode='Check'`, otherwise `Rotate`. `Slot` = the entry's or matched candidate's `Credential`.
+  `Mode` is the config entry's `Mode` (`Check`, `Disable` or `Keep`), otherwise `Rotate`. `Slot` = the entry's or matched candidate's `Credential`.
 - `Find-CrSidOverlap -Resolved` → array of findings (Severity `Ambiguous`) for any SID claimed by two entries (D13); named accounts are excluded from `NamePattern` matches before this check.
 - `Resolve-CrGroupReference -Reference <'S-1-…'|'RID-500'|'Name:x'|'Name:x?'|'Pattern:re'> -State` → `@{ Sids = @(); Optional; Missing }`.
 
@@ -167,7 +167,7 @@ AppLocker blocks `.ps1` files under `C:\Repos`, and the user decided: **write co
 
 # M2/M3: apply (`-Apply`)
 
-PLAN §6 steps 6–11, §7.1–7.5, §7.7, §7.10, §8, D4, D9, D11, D12, D16, D18, D20. SQL rotation is M5: in this version SQL slots are never prompted and are reported as "SQL rotation not available in this version".
+PLAN §6 steps 6–11, §7.1–7.5, §7.7, §7.10, §8, D4, D9, D11, D12, D16, D18, D20. SQL rotation was M5, dropped in v10.5 (D27): the default config has no SQL slots; a configured SQL slot is never prompted and is reported as "SQL rotation not available in this version".
 
 ## Secret handling (D4) — applies to every M2 file
 
@@ -248,27 +248,27 @@ Stored as `<log root>\journal.clixml` (`Export-Clixml -Path` / `Import-Clixml -P
 
 # v10: account model (D18, D21–D25; PLAN v10.4) — supersedes the M2 parts above where they conflict
 
-PLAN v10.4: §1, §1.1, D9, D18, D20–D25, §5 config example, §6 steps 6–7, §7.5, §8 slot order and enforcement phase. History: v10 introduced `SOP-Admin`/`PUB-User` as created target accounts; v10.1 returned the auto-logon accounts to the v9 model; v10.2 dropped `SOP-Admin` and kept `BiCA Admin`/`BiCA Remote`; v10.3 creates missing BiCA accounts; v10.4 records the decisions on review round 12 (always move dependents to `ApplicationUser`, no move to a created account, strict budget, no `-LogPath`).
+PLAN v10.5: §1, §1.1, D9, D18, D20–D27, §5 config example, §6 steps 6–7, §7.5, §8 slot order and enforcement phase. History: v10 introduced `SOP-Admin`/`PUB-User` as created target accounts; v10.1 returned the auto-logon accounts to the v9 model; v10.2 dropped `SOP-Admin` and kept `BiCA Admin`/`BiCA Remote`; v10.3 creates missing BiCA accounts; v10.5 retires `SYS-Admin` (hyphen spelling of `SYS Admin`), keeps existing `SOP-Admin` and `SP Admin` accounts untouched with `Mode = 'Keep'` (D26) and removes the SQL login slots and entries (D27); v10.4 records the decisions on review round 12 (always move dependents to `ApplicationUser`, no move to a created account, strict budget, no `-LogPath`).
 
 ## Config (Config.ps1, config/CredentialRotation.psd1)
 
 - Roles: `Admin`, `AdminRemote` (Administrators + `Name:Offer Remote Assistance Helpers?`; Remote Desktop Users allowed, never added), `User`, `WinUser`, `Ftp`. `RotateOnly` and `Operator` are gone.
-- Slots, in `Order`: `BiCAAdmin` 10, `AppUser` 20, `AutoLogon` 30, the 3 SQL slots 40–60, `BiCARemote` 90 (last, D25).
+- Slots, in `Order`: `BiCAAdmin` 10, `AppUser` 20, `AutoLogon` 30, `BiCARemote` 90 (last, D25). No SQL slots and no `SqlLogin` entries since v10.5 (D27); `Kind = 'SqlLogin'` stays supported (tests use `New-CrTestSqlConfig`).
 - Account keys of managed (Rotate) Windows entries:
   - `Create` (bool; single `Name` only; not with `AutoLogon`)
   - `Replaces` (string[]: names or `RID-500`)
   - `PasswordMode` (`'Set'` default | `'Change'`)
   - `Operator` (bool; single `Name`; at most one entry: the operator's account, D25)
   - `EnableIfDisabled` (bool: an existing disabled account is enabled; in the default config only `AppUser`)
-- `Mode` values: `'Check'` | `'Disable'` (a `Disable` entry has `Name`/`Names`, no Role/Credential). `Candidates` stays supported but the default config doesn't use it.
+- `Mode` values: `'Check'` | `'Disable'` | `'Keep'` (a `Disable` or `Keep` entry has only `Id`, `Kind`, `Name`/`Names` and `Mode`; `Keep`: v10.5, D26). `Candidates` stays supported but the default config doesn't use it.
 - Top-level `OtherEnabledAccounts = 'Ask'` (only value).
 - The `AutoLogon` entry: `Names = @('PUB-User','WinAutoUser')`, `AutoLogonUser = @( @{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' } )` (only key: `Name`), the `AutoLogon` block, `Services`/`ScheduledTasks`/`ComPlus = 'Auto'`.
 - Validation:
   - `Replaces` entries are names or `RID-500`; a name may be replaced by one entry only.
-  - A `Disable` entry has no Role/Credential.
+  - A `Disable` or `Keep` entry has no Role/Credential, no dependents, no `NamePattern`/`Candidates` and no managed keys.
   - `PasswordMode` only on Windows entries with a Credential.
   - `AutoLogonUser` must list exactly the entry's `Name`/`Names`.
-  - An auto-logon account must not be in any `Replaces` or `Disable` entry.
+  - An auto-logon account must not be in any `Replaces`, `Disable` or `Keep` entry.
 - `Get-CrConfigSlotNames -Config` → slot names; `Get-CrUnknownOnlySlots -Config -Only` → the `-Only` names that are no slot (case-insensitive). The entry point exits 2 when there are any.
 
 ## Resolution (Principals.ps1)
@@ -278,7 +278,8 @@ Resolved entries gain:
 - `PasswordMode`, `Operator`, `EnableIfDisabled` (bools from the entry; `$false` for non-Rotate entries)
 - `Replaced = @(@{ Name; Sid; User; Enabled })` — existing accounts named in `Replaces` (RID-500 via the machine SID); a replaced account that is already disabled is listed with `Enabled = $false`
 - For `Mode = 'Disable'` entries: `Mode = 'Disable'`, `Accounts` = the existing ones
-- `Get-CrOtherEnabledAccounts -State -Resolved` → array of State users that are enabled and not selected by any entry (managed, replaced, disable, check). Built-in disabled accounts never appear (they're disabled).
+- For `Mode = 'Keep'` entries (D26): `Mode = 'Keep'`, `Accounts` = the existing ones. `New-CrPlan` adds one Info "Kept untouched (config: Mode Keep)" per account and nothing else (missing ones are not reported); `Get-CrApplyAccountFates` lists them as `keep`; no apply step touches them.
+- `Get-CrOtherEnabledAccounts -State -Resolved` → array of State users that are enabled and not selected by any entry (managed, replaced, disable, check, keep). Built-in disabled accounts never appear (they're disabled).
 
 Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved -Fallback` (the `Operator` entry's account), `Test-CrAppUserEntry -Entry` (`$true` for the entry with `Replaces`: the application account, target of the dependents of retired and operator-disabled accounts, D24), `Test-CrEntryCreated -Entry` (`$true` if the entry has a `ToCreate` placeholder), `Get-CrMovableDependentCount -State -Sid`.
 

@@ -63,6 +63,7 @@ function New-CrResolvedEntry {
     $mode = 'Rotate'
     if ([string]$Entry['Mode'] -eq 'Check') { $mode = 'Check' }
     if ([string]$Entry['Mode'] -eq 'Disable') { $mode = 'Disable' }
+    if ([string]$Entry['Mode'] -eq 'Keep') { $mode = 'Keep' }
     $autoLogonUser = $null
     if ($Entry.ContainsKey('AutoLogonUser') -and $null -ne $Entry['AutoLogonUser']) { $autoLogonUser = ConvertTo-CrArray $Entry['AutoLogonUser'] }
     # D9 (v10): Windows passwords are set unless the entry asks for a change
@@ -340,7 +341,7 @@ function Find-CrSidOverlap {
     return , $findings.ToArray()
 }
 
-# D23: the enabled local accounts that no entry selects (managed, replaced, Disable, Check).
+# D23: the enabled local accounts that no entry selects (managed, replaced, Disable, Check, Keep).
 # Disabled accounts (Guest, DefaultAccount, ...) never appear. Returns $State.Users entries (comma-returned).
 function Get-CrOtherEnabledAccounts {
     param($State, $Resolved)

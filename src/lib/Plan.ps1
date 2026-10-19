@@ -602,6 +602,14 @@ function New-CrPlan {
 
     foreach ($entry in (ConvertTo-CrArray $Resolved)) {
         $slot = $entry['Slot']
+        # D26 (v10.5): Mode = 'Keep' entries are never changed and not put to the operator (D23); one Info per account,
+        # also under -Only.
+        if ($entry['Mode'] -eq 'Keep') {
+            foreach ($acct in (ConvertTo-CrArray $entry['Accounts'])) {
+                Add-CrPlanFinding $plan 'Info' 'Accounts' 'Kept untouched (config: Mode Keep)' $null $acct['Name']
+            }
+            continue
+        }
         $isCheck = ($entry['Mode'] -eq 'Check')
         $isDisable = ($entry['Mode'] -eq 'Disable')
         # Check-mode fixes and the disabling of retired accounts run only without -Only (PLAN 8).
