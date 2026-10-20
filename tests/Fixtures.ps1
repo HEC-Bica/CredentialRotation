@@ -6,12 +6,13 @@
 #   Helpers: Get-CrTestUser, Get-CrTestUserSid, Get-CrTestGroup, Add-CrTestUser, Remove-CrTestUser,
 #            Add-CrTestGroup, Add-CrTestGroupMember, Remove-CrTestGroupMember, Set-CrTestRight, Add-CrTestRight
 #
-# Profiles (account model PLAN v10.6: D18, D21-D29):
-#   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no PUB-User; built-in Administrator renamed 'LocalAdm'
-#         (disabled; replaced by ApplicationUser); BiCA Admin, BiCA Remote (Administrators + Remote Desktop Users; the
-#         operator's account until v10.5) - replaced by SOP-Admin, which doesn't exist (created); both have a sysadmin
-#         Windows login (D29); WinAutoUser (enabled, password-stored task \KioskTask, updated in place by
-#         the AutoLogon slot); ApplicationUser (runs SQL Server, app services, tasks, COM+); SYS Admin (enabled admin,
+# Profiles (account model PLAN v10.8: D18, D21-D31):
+#   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no PUB-User (created); built-in Administrator renamed
+#         'LocalAdm' (disabled; replaced by ApplicationUser); BiCA Admin, BiCA Remote (Administrators + Remote Desktop
+#         Users; the operator's account until v10.5) - replaced by SOP-Admin, which doesn't exist (created); both have a
+#         sysadmin Windows login (D29); WinAutoUser (enabled, password-stored task \KioskTask; replaced by PUB-User,
+#         v10.8: as PUB-User is created in the run, the task is not moved and WinAutoUser stays enabled, D24);
+#         ApplicationUser (runs SQL Server, app services, tasks, COM+); SYS Admin (enabled admin,
 #         password-stored task \SpMaintenance; retired); WinUser1-3 (WinUser3 disabled; WinUser1 in RDU + hw_fn_*;
 #         WinUser2 in Power Users), FTP users TEST_FTP + ftpClient in CardCenters + Users; myftpuser (enabled, not an
 #         FTP user) and OtherAdmin (enabled admin) are the two "other enabled accounts" (D23); groups CardCenters,
@@ -19,11 +20,13 @@
 #   IPT01 (IPT01-like, SQL Express): built-in 'Administrator' enabled (replaced by ApplicationUser); SYS-Admin exists
 #         (Administrators only, no dependents; retired, the hyphen spelling of SYS Admin, v10.5); BiCA Admin (runs the
 #         service AppHelper, moved to SOP-Admin unless SOP-Admin is created in the run), BiCA Remote (Administrators +
-#         RDU), ApplicationUser (runs SQL Server), PUB-User and WinAutoUser; SYS Admin (enabled admin, runs the service
-#         LegacySync; retired); no other enabled accounts; no CardCenters, no Offer Remote Assistance Helpers.
-#   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword (SM: turned off; IPT01: switched to PUB-User);
-#         deny rights as on the test sites; the SQL connection runs as BiCA Remote (sysadmin). SOP-Admin (managed,
-#         v10.6) and SP Admin (managed, v10.7) don't exist (created); tests that need them existing add them.
+#         RDU), ApplicationUser (runs SQL Server), PUB-User and WinAutoUser (replaced by PUB-User, no dependents);
+#         SYS Admin (enabled admin, runs the service LegacySync; retired); no other enabled accounts; no CardCenters, no
+#         Offer Remote Assistance Helpers.
+#   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword, switched to PUB-User (v10.8: on SM machines
+#         too; Computer.IsSm is $false because the default config has no RestrictedComputerPattern); deny rights as on
+#         the test sites; the SQL connection runs as BiCA Remote (sysadmin). SOP-Admin (managed, v10.6) and SP Admin
+#         (managed, v10.7) don't exist (created); tests that need them existing add them.
 
 $CrFixturesDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -283,7 +286,7 @@ function New-CrTestState {
 
     # --- Computer, Policy, WriteFilter ---
     $computer = @{
-        Name = $ComputerName; IsSm = ($ComputerName -match '^SM'); OsVersion = '6.1.7601'
+        Name = $ComputerName; IsSm = $false; OsVersion = '6.1.7601'
         OsCaption = 'Microsoft Windows Embedded Standard'; Is64BitOs = $true; Is64BitProcess = $true
         PSVersion = '2.0'; ClrVersion = '2.0.50727.8806'; LanguageMode = 'FullLanguage'; IsElevated = $true
         PartOfDomain = $false; MachineSid = $machineSid; SystemDrive = 'C:'
@@ -423,9 +426,10 @@ function New-CrTestSqlConfig {
     $cfg = New-CrTestConfig -Path $Path
     $credentials = New-Object System.Collections.ArrayList
     foreach ($c in $cfg.Credentials) { if ($c.Slot -ne 'SOPAdmin') { [void]$credentials.Add($c) } }
-    [void]$credentials.Add(@{ Slot = 'SQLApplication'; Order = 40; Label = 'SQL login SQLApplication'; MaxLength = 128 })
-    [void]$credentials.Add(@{ Slot = 'SQLScript';      Order = 50; Label = 'SQL login SQLScript';      MaxLength = 128 })
-    [void]$credentials.Add(@{ Slot = 'SQLService';     Order = 60; Label = 'SQL login SQLService';     MaxLength = 128 })
+    # After SPAdmin (Order 40), before SOPAdmin (90): the Orders are unique (Test-CrConfig).
+    [void]$credentials.Add(@{ Slot = 'SQLApplication'; Order = 50; Label = 'SQL login SQLApplication'; MaxLength = 128 })
+    [void]$credentials.Add(@{ Slot = 'SQLScript';      Order = 60; Label = 'SQL login SQLScript';      MaxLength = 128 })
+    [void]$credentials.Add(@{ Slot = 'SQLService';     Order = 70; Label = 'SQL login SQLService';     MaxLength = 128 })
     foreach ($c in $cfg.Credentials) { if ($c.Slot -eq 'SOPAdmin') { [void]$credentials.Add($c) } }
     $cfg.Credentials = $credentials.ToArray()
     $cfg.Accounts = @($cfg.Accounts) + @(

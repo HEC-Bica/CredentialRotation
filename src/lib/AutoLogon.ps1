@@ -1,5 +1,6 @@
 # AutoLogon.ps1 - Winlogon auto-logon read side, the D18 decision and the auto-logon actions (docs/PLAN.md section 7.5,
-# v10.1: PUB-User and WinAutoUser are the managed auto-logon accounts; an active auto-logon as either is kept).
+# v10.8: PUB-User is the managed auto-logon account, created or enabled by its slot; every other active auto-logon,
+# e.g. WinAutoUser, is switched to it).
 # Never reads the DefaultPassword value or the LSA secret (only whether the value exists); the LSA secret is write-only.
 
 #region Registry access (internal, mocked in tests)
@@ -185,7 +186,8 @@ function Get-CrAutoLogonSelectionList {
 
 # PLAN section 7.5 usable-target rule: exists, enabled, not locked, interactive logon allowed (D16),
 # not an admin (unless this run removes it from Administrators before the auto-logon step).
-# The tool never enables an auto-logon account (D21), so a disabled account is never usable.
+# A disabled account is not usable: PUB-User is enabled by its slot before the auto-logon step (EnableIfDisabled, v10.8);
+# the audit judges it on the planned state (Get-CrPlannedAutoLogonState).
 function Test-CrAutoLogonUsable {
     param($State, $User, $RemovedAdminSids)
     $reasons = New-Object System.Collections.ArrayList
@@ -295,11 +297,12 @@ function Get-CrAutoLogonState {
     return $state
 }
 
-# D18 decision, PLAN section 7.5 (v10.1). Read-only; the apply step acts on the result.
+# D18 decision, PLAN section 7.5 (v10.1, v10.8). Read-only; the apply step acts on the result.
 # The managed auto-logon accounts are the AutoLogonUser list of the entry with the AutoLogon block (the default config:
-# PUB-User, WinAutoUser). An active auto-logon as one of them is kept and standardized on every machine; there is no
-# switch between them. Any other account is turned off on SM machines and switched to the selected user (the first
-# usable account of the list) on the others. Ambiguous cases go to the operator: turn off or leave unchanged (D13).
+# PUB-User only, v10.8). An active auto-logon as one of them is kept and standardized on every machine. Any other
+# account (e.g. WinAutoUser) is switched to the selected user (the first usable account of the list); only on machines
+# matching an optional RestrictedComputerPattern (Computer.IsSm; none in the default config since v10.8) it is turned
+# off instead. Ambiguous cases go to the operator: turn off or leave unchanged (D13).
 function Get-CrAutoLogonDecision {
     param(
         $State,
@@ -413,12 +416,12 @@ function Get-CrAutoLogonDecision {
             [void]$ambiguous.Add(('The auto-logon account "{0}" cannot be resolved to a local account.' -f $defUser))
         }
 
-        # Managed auto-logon accounts = the selection list (PUB-User, WinAutoUser); the selected user (switch target on
-        # non-SM machines) is its first usable account. The accounts are never created (D21).
+        # Managed auto-logon accounts = the selection list (PUB-User); the selected user (switch target on unrestricted
+        # machines) is its first usable account. PUB-User is created or enabled by its slot (v10.8).
         $selection = Get-CrAutoLogonSelectionList -Entry $entry -Config $Config
         $managedSids = New-Object System.Collections.ArrayList
         $selectionNames = New-Object System.Collections.ArrayList
-        # Only used on non-SM machines (SM machines keep or turn off, no selection).
+        # Only used where Computer.IsSm is false (a machine matching RestrictedComputerPattern keeps or turns off).
         $selected = $null
         $selectionNotes = New-Object System.Collections.ArrayList
         $selectionAmbiguous = New-Object System.Collections.ArrayList

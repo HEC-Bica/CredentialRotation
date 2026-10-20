@@ -160,6 +160,15 @@ Describe 'Get-CrComputerInfo' {
         $cfg = @{ Accounts = @(@{ Id = 'AutoLogon'; Kind = 'Windows'; AutoLogon = @{ RestrictedComputerPattern = 'SITEA$' } }) }
         (Get-CrComputerInfo -Config $cfg)['IsSm'] | Should Be $true
     }
+    It 'restricts no machine without a RestrictedComputerPattern (the default config since v10.8)' {
+        $cfg = @{ Accounts = @(@{ Id = 'AutoLogon'; Kind = 'Windows'; AutoLogon = @{ Mode = 'IfAlreadyOn' } }) }
+        Get-CrRestrictedComputerPattern -Config $cfg | Should BeNullOrEmpty
+        $c = Get-CrComputerInfo -Config $cfg
+        $c['Name'] | Should Be 'SM-SITEA'
+        $c['IsSm'] | Should Be $false
+        $c['Error'] | Should BeNullOrEmpty
+        (Get-CrComputerInfo -Config $null)['IsSm'] | Should Be $false
+    }
     Context 'reads a 32-bit OS' {
         It 'reads a 32-bit OS' {
             Mock Get-CrPreflightWmi -ParameterFilter { $Class -eq 'Win32_OperatingSystem' } {

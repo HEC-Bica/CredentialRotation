@@ -1,10 +1,11 @@
-# Pester 3.4 tests for src\lib\AutoLogon.ps1 (PLAN section 7.5, D18 v10.1). Synthetic SIDs and machine names only.
+# Pester 3.4 tests for src\lib\AutoLogon.ps1 (PLAN section 7.5, D18 v10.1, v10.8). Synthetic SIDs and machine names only.
 # Pester 3.4 keeps a Mock for the whole Describe/Context it is defined in: a Mock inside an It gets its own Context.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $lib = Join-Path $here '..\src\lib'
 # Rights.ps1 (Get-CrEffectiveLogonRights, Test-CrIsAdmin) is mocked for the hand-built states below and used as it is
-# with the machine fixtures (Fixtures.ps1), whose shipped config Principals.ps1 resolves.
-foreach ($m in @('Compat', 'Rights', 'Principals', 'AutoLogon')) { . (Join-Path $lib ($m + '.ps1')) }
+# with the machine fixtures (Fixtures.ps1), whose shipped config Principals.ps1 resolves. Plan.ps1 only provides
+# Get-CrPlannedAutoLogonState (v10.8) for the fixture decisions on the planned state.
+foreach ($m in @('Compat', 'Rights', 'Principals', 'AutoLogon', 'Plan')) { . (Join-Path $lib ($m + '.ps1')) }
 . (Join-Path $here 'Fixtures.ps1')
 
 # Write side: the real registry writers are kept aside (only their argument checks are tested, which run before any
@@ -64,7 +65,8 @@ function New-TestAutoLogon {
     }
 }
 
-# FixtureAdmins / FixtureNoInteractive drive the Rights.ps1 mocks.
+# FixtureAdmins / FixtureNoInteractive drive the Rights.ps1 mocks. Computer.IsSm is set as by a config with
+# RestrictedComputerPattern '^SM' (the default config has none since v10.8: then IsSm is always $false).
 function New-TestState {
     param(
         [string]$Computer = 'IPT01-SITEA',
@@ -85,6 +87,8 @@ function New-TestState {
 # v10.3 resolved entries (CONTRACTS "v10", Principals.ps1): BiCAAdmin; the AutoLogon entry with the AutoLogon block,
 # AutoLogonUser = PUB-User, WinAutoUser (only key: Name) and the existing ones of them as Accounts (they are never
 # created); the Retired entry (Mode Disable). -ListNames changes the order or the content of the AutoLogonUser list.
+# This is the generic mechanism with the v10.1-v10.7 list and pattern; the default config since v10.8 (PUB-User only, no
+# RestrictedComputerPattern, PUB-User created or enabled by its slot) is tested on the machine fixtures below.
 function New-TestResolved {
     param($State, [string[]]$ListNames = @('PUB-User', 'WinAutoUser'))
     $acc = New-Object System.Collections.ArrayList
@@ -187,7 +191,7 @@ Describe 'Get-CrAutoLogonDecision' {
         }
     }
 
-    Context 'SM machine' {
+    Context 'SM machine (a config with RestrictedComputerPattern: Computer.IsSm)' {
         It 'keeps and standardizes PUB-User' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'PUB-User')
             $d = Invoke-TestDecision $s
@@ -256,6 +260,16 @@ Describe 'Get-CrAutoLogonDecision' {
             $s = New-TestState -Computer 'IPT01-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
             $s['Computer']['IsSm'] = $true
             (Invoke-TestDecision $s)['Action'] | Should Be 'TurnOff'
+        }
+        It 'switches instead of turning off on an SM-named machine when Computer.IsSm is $false (no pattern, v10.8)' {
+            $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'WinUser1')
+            $s['Computer']['IsSm'] = $false
+            $d = Invoke-TestDecision $s
+            $d['Action'] | Should Be 'Switch'
+            $d['CurrentSid'] | Should Be $SidWinUser1
+            $d['TargetSid'] | Should Be $SidPub
+            (Test-AnyMatch $d['Reasons'] 'SM machine') | Should Be $false
+            (Test-AnyMatch $d['HighImpact'] 'waits at the logon screen') | Should Be $false
         }
         It 'is ambiguous when the kept PUB-User is denied interactive logon' {
             $s = New-TestState -Computer 'SM-SITEA' -AutoLogon (New-TestAutoLogon -UserName 'PUB-User') -NoInteractive @($SidPub)
@@ -450,7 +464,7 @@ Describe 'Get-CrAutoLogonDecision' {
             $d['Action'] | Should Be 'Switch'
             $d['TargetSid'] | Should Be $SidWinAuto
         }
-        It 'keeps only the listed accounts as managed auto-logon accounts' {
+        It 'keeps only the listed accounts as managed auto-logon accounts (the v10.8 list: WinAutoUser is switched)' {
             $s = New-TestState -AutoLogon (New-TestAutoLogon -UserName 'WinAutoUser')
             $d = Invoke-TestDecision $s -ListNames @('PUB-User')
             $d['Action'] | Should Be 'Switch'
@@ -611,7 +625,9 @@ Describe 'Get-CrAutoLogonDecision' {
         }
     }
 
-    Context 'Test-site examples (PLAN 7.5, synthetic names)' {
+    # The test sites with the v10.1-v10.7 list and pattern; with the default config since v10.8 every active auto-logon
+    # there is switched to PUB-User (machine fixture tests below).
+    Context 'Test-site examples with the v10.1-v10.7 list and pattern (PLAN 7.5, synthetic names)' {
         It 'IPT01 with PUB-User and LSA secret: standardize' {
             $al = New-TestAutoLogon -UserName 'PUB-User'
             $al['AutoLogonSidValue'] = 'S-1-5-21-1000-2000-3000-1010'
@@ -647,9 +663,14 @@ Describe 'Get-CrAutoLogonDecision' {
 
 # The D18 decision on the machine fixtures (Fixtures.ps1, modelled on the test sites, PLAN 13.2) with the shipped
 # config resolved by Resolve-CrAccounts and the real Rights.ps1 (no mocks: effective rights from the fixtures' rights
-# and groups). VerifiedSids = the existing accounts among -VerifiedNames (the audit passes the accounts it would set).
+# and groups). v10.8: the AutoLogon entry is PUB-User only (created or enabled by its slot, replaces WinAutoUser) and has
+# no RestrictedComputerPattern, so Computer.IsSm is $false on every fixture.
+# VerifiedSids = the existing accounts among -VerifiedNames (the audit passes the accounts it would set: not BiCA Admin
+# or WinAutoUser, which SOP-Admin and PUB-User replace). -Planned decides on the state the auto-logon step is expected
+# to see, as New-CrPlan does (Get-CrPlannedAutoLogonState): a PUB-User that its slot creates is added under the null SID
+# S-1-0-0 and counts as verified; a disabled one that its slot enables is shown enabled.
 function Invoke-TestFixtureDecision {
-    param($State, [string[]]$VerifiedNames = @('BiCA Admin', 'PUB-User', 'WinAutoUser'))
+    param($State, [string[]]$VerifiedNames = @('ApplicationUser', 'PUB-User'), [switch]$Planned)
     $config = New-CrTestConfig
     $resolved = Resolve-CrAccounts -Config $config -State $State
     $verified = New-Object System.Collections.ArrayList
@@ -657,29 +678,72 @@ function Invoke-TestFixtureDecision {
         $u = Get-CrTestUser -State $State -Name $n
         if ($u) { [void]$verified.Add([string]$u['Sid']) }
     }
+    $decisionState = $State
+    if ($Planned) {
+        $entry = Find-CrAutoLogonEntry -Resolved $resolved
+        $enable = New-Object System.Collections.ArrayList
+        foreach ($a in (ConvertTo-CrArray $entry['Accounts'])) {
+            if ($a['Sid'] -and ($a['User'] -is [hashtable]) -and $a['User']['Disabled'] -and $entry['EnableIfDisabled']) { [void]$enable.Add([string]$a['Sid']) }
+        }
+        $p = Get-CrPlannedAutoLogonState -State $State -Entry $entry -Create (Test-CrEntryCreated $entry) -EnableSids ($enable.ToArray())
+        $decisionState = $p['State']
+        if ($p['CreatedSid']) { [void]$verified.Add([string]$p['CreatedSid']) }
+    }
     $verifiedSids = $verified.ToArray()
-    return Get-CrAutoLogonDecision -State $State -Resolved $resolved -Config $config -VerifiedSids $verifiedSids -RemovedAdminSids @()
+    return Get-CrAutoLogonDecision -State $decisionState -Resolved $resolved -Config $config -VerifiedSids $verifiedSids -RemovedAdminSids @()
 }
 
-Describe 'Get-CrAutoLogonDecision on the machine fixtures (PLAN 7.5 test sites)' {
+Describe 'Get-CrAutoLogonDecision on the machine fixtures with the default config (PLAN 7.5 test sites, v10.8)' {
     Context 'SM-like machine' {
-        It 'turns off the auto-logon as BiCA Admin with a plain-text password' {
+        It 'is ambiguous for the auto-logon as BiCA Admin on the raw state: PUB-User does not exist yet (not turned off)' {
             $s = New-CrTestState -Profile SM
-            $d = Invoke-TestFixtureDecision $s
-            $d['Action'] | Should Be 'TurnOff'
-            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'BiCA Admin')
-            $d['TargetSid'] | Should BeNullOrEmpty
-            (Test-AnyMatch $d['Reasons'] 'plain-text DefaultPassword') | Should Be $true
-            (Test-AnyMatch $d['HighImpact'] 'waits at the logon screen') | Should Be $true
-        }
-        It 'is ambiguous for an auto-logon as WinAutoUser, which is denied local logon there' {
-            $s = New-CrTestState -Profile SM
-            $s['AutoLogon']['DefaultUserName'] = 'WinAutoUser'
             $d = Invoke-TestFixtureDecision $s
             $d['Action'] | Should Be 'Ambiguous'
-            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
-            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account WinAutoUser is not usable: is not allowed interactive logon') | Should Be $true
+            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'BiCA Admin')
+            $d['TargetSid'] | Should BeNullOrEmpty
+            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable auto-logon target: does not exist') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target \(PUB-User\) exists for a switch') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'plain-text DefaultPassword') | Should Be $true
             ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+            (Test-AnyMatch $d['HighImpact'] 'waits at the logon screen') | Should Be $false
+        }
+        It 'switches the auto-logon as BiCA Admin to the PUB-User that the run creates (planned state)' {
+            $s = New-CrTestState -Profile SM
+            $d = Invoke-TestFixtureDecision $s -Planned
+            $d['Action'] | Should Be 'Switch'
+            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'BiCA Admin')
+            $d['TargetSid'] | Should Be 'S-1-0-0'
+            $d['TargetName'] | Should Be 'PUB-User'
+            (Test-AnyMatch $d['Reasons'] 'on as BiCA Admin \(an admin\)') | Should Be $true
+            (Test-AnyMatch $d['HighImpact'] 'from BiCA Admin to PUB-User') | Should Be $true
+            (Test-AnyMatch $d['HighImpact'] 'waits at the logon screen') | Should Be $false
+        }
+        It 'switches an auto-logon as WinAutoUser (denied local logon there) to the created PUB-User (planned state)' {
+            $s = New-CrTestState -Profile SM
+            $s['AutoLogon']['DefaultUserName'] = 'WinAutoUser'
+            $raw = Invoke-TestFixtureDecision $s
+            $raw['Action'] | Should Be 'Ambiguous'
+            (Test-AnyMatch $raw['Reasons'] 'No usable auto-logon target \(PUB-User\) exists for a switch') | Should Be $true
+            $d = Invoke-TestFixtureDecision $s -Planned
+            $d['Action'] | Should Be 'Switch'
+            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
+            $d['TargetSid'] | Should Be 'S-1-0-0'
+            (Test-AnyMatch $d['Reasons'] 'on as WinAutoUser \(another account\)') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account') | Should Be $false
+        }
+        It 'switches instead of turning off on an SM-named machine: the default config has no RestrictedComputerPattern' {
+            $config = New-CrTestConfig
+            foreach ($e in @($config['Accounts'])) {
+                if ($e['AutoLogon']) { $e['AutoLogon'].ContainsKey('RestrictedComputerPattern') | Should Be $false }
+            }
+            $s = New-CrTestState -Profile SM
+            $pub = Add-CrTestUser -State $s -Name 'PUB-User' -Groups @('Users') -PasswordNeverExpires
+            $s['Computer']['Name'] | Should Match '^SM'
+            $s['Computer']['IsSm'] | Should Be $false
+            $d = Invoke-TestFixtureDecision $s
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetSid'] | Should Be $pub['Sid']
+            (Test-AnyMatch $d['Reasons'] 'SM machine') | Should Be $false
         }
         It 'keeps and standardizes an auto-logon as an existing PUB-User' {
             $s = New-CrTestState -Profile SM
@@ -689,7 +753,7 @@ Describe 'Get-CrAutoLogonDecision on the machine fixtures (PLAN 7.5 test sites)'
             $d['Action'] | Should Be 'Standardize'
             $d['TargetSid'] | Should Be $pub['Sid']
         }
-        It 'leaves off an auto-logon that is off, with a stale DefaultUserName and an old computer name' {
+        It 'leaves off an auto-logon that is off, with a stale DefaultUserName and an old computer name, also with the created PUB-User' {
             $s = New-CrTestState -Profile SM
             $s['AutoLogon']['AutoAdminLogon'] = '0'
             $s['AutoLogon']['DefaultUserName'] = 'WinUser1'
@@ -698,6 +762,7 @@ Describe 'Get-CrAutoLogonDecision on the machine fixtures (PLAN 7.5 test sites)'
             $d = Invoke-TestFixtureDecision $s
             $d['Action'] | Should Be 'LeaveOff'
             (Test-AnyMatch $d['Reasons'] 'SM-OLDNAME.*mismatch') | Should Be $true
+            (Invoke-TestFixtureDecision $s -Planned)['Action'] | Should Be 'LeaveOff'
         }
     }
 
@@ -715,42 +780,62 @@ Describe 'Get-CrAutoLogonDecision on the machine fixtures (PLAN 7.5 test sites)'
         }
         It 'asks the operator (TurnOff or LeaveUnchanged) when PUB-User is not verified' {
             $s = New-CrTestState -Profile IPT01
-            $d = Invoke-TestFixtureDecision $s -VerifiedNames @('BiCA Admin')
+            $d = Invoke-TestFixtureDecision $s -VerifiedNames @('ApplicationUser')
             $d['Action'] | Should Be 'Ambiguous'
             $d['TargetName'] | Should Be 'PUB-User'
             ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
-            (Test-AnyMatch $d['HighImpact'] 'broken until re-run') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'switch to PUB-User impossible') | Should Be $true
+            # BiCA Admin gets no new password (SOP-Admin replaces it): no "broken until re-run".
+            (Test-AnyMatch $d['HighImpact'] 'broken until re-run') | Should Be $false
         }
-        It 'switches to WinAutoUser (only denied RDP there) when PUB-User is disabled' {
+        It 'finds no usable target on the raw state when PUB-User is disabled (WinAutoUser is no switch target)' {
             $s = New-CrTestState -Profile IPT01
             (Get-CrTestUser $s 'PUB-User')['Disabled'] = $true
             $d = Invoke-TestFixtureDecision $s
-            $d['Action'] | Should Be 'Switch'
-            $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
-            $d['TargetName'] | Should Be 'WinAutoUser'
+            $d['Action'] | Should Be 'Ambiguous'
+            $d['TargetName'] | Should BeNullOrEmpty
+            (Test-AnyMatch $d['Reasons'] 'PUB-User is not a usable auto-logon target: is disabled') | Should Be $true
+            (Test-AnyMatch $d['Reasons'] 'No usable auto-logon target \(PUB-User\) exists for a switch') | Should Be $true
+            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
         }
-        It 'switches to WinAutoUser when PUB-User does not exist (a site where PUB-User is absent)' {
+        It 'switches to a disabled PUB-User that its slot enables (planned state)' {
+            $s = New-CrTestState -Profile IPT01
+            (Get-CrTestUser $s 'PUB-User')['Disabled'] = $true
+            $d = Invoke-TestFixtureDecision $s -Planned
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'PUB-User')
+            $d['TargetName'] | Should Be 'PUB-User'
+            (Get-CrTestUser $s 'PUB-User')['Disabled'] | Should Be $true
+        }
+        It 'switches to the PUB-User that the run creates where it does not exist (planned state; raw state: no usable target)' {
             $s = New-CrTestState -Profile IPT01 -OmitUsers 'PUB-User'
-            $d = Invoke-TestFixtureDecision $s
+            $raw = Invoke-TestFixtureDecision $s
+            $raw['Action'] | Should Be 'Ambiguous'
+            (Test-AnyMatch $raw['Reasons'] 'PUB-User is not a usable auto-logon target: does not exist') | Should Be $true
+            $d = Invoke-TestFixtureDecision $s -Planned
             $d['Action'] | Should Be 'Switch'
-            $d['TargetName'] | Should Be 'WinAutoUser'
+            $d['TargetSid'] | Should Be 'S-1-0-0'
+            $d['TargetName'] | Should Be 'PUB-User'
+            (Test-AnyMatch $d['HighImpact'] 'from BiCA Admin to PUB-User') | Should Be $true
         }
-        It 'keeps an active WinAutoUser auto-logon although PUB-User is usable (no switch, v10.1)' {
+        It 'switches an active WinAutoUser auto-logon to PUB-User (WinAutoUser is replaced, no longer kept)' {
             $s = New-CrTestState -Profile IPT01
             $s['AutoLogon']['DefaultUserName'] = 'WinAutoUser'
             $d = Invoke-TestFixtureDecision $s
-            $d['Action'] | Should Be 'Standardize'
-            $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
-            @($d['HighImpact']).Count | Should Be 0
+            $d['Action'] | Should Be 'Switch'
+            $d['CurrentSid'] | Should Be (Get-CrTestUserSid $s 'WinAutoUser')
+            $d['TargetSid'] | Should Be (Get-CrTestUserSid $s 'PUB-User')
+            (Test-AnyMatch $d['Reasons'] 'on as WinAutoUser \(another account\)') | Should Be $true
+            (Test-AnyMatch $d['HighImpact'] 'from WinAutoUser to PUB-User') | Should Be $true
         }
-        It 'is ambiguous for an auto-logon as a disabled WinAutoUser' {
+        It 'switches an auto-logon as a disabled WinAutoUser to PUB-User' {
             $s = New-CrTestState -Profile IPT01
             (Get-CrTestUser $s 'WinAutoUser')['Disabled'] = $true
             $s['AutoLogon']['DefaultUserName'] = 'WinAutoUser'
             $d = Invoke-TestFixtureDecision $s
-            $d['Action'] | Should Be 'Ambiguous'
-            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account WinAutoUser is not usable: is disabled') | Should Be $true
-            ($d['OperatorOptions'] -join ',') | Should Be 'TurnOff,LeaveUnchanged'
+            $d['Action'] | Should Be 'Switch'
+            $d['TargetName'] | Should Be 'PUB-User'
+            (Test-AnyMatch $d['Reasons'] 'kept auto-logon account') | Should Be $false
         }
     }
 }

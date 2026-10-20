@@ -490,7 +490,7 @@ function Copy-CrApplyDecision {
     return $c
 }
 
-# The slot of the entry that carries the AutoLogon block (PUB-User / WinAutoUser, PLAN 5).
+# The slot of the entry that carries the AutoLogon block (PUB-User, PLAN 5).
 function Get-CrApplyAutoLogonSlot {
     param($Resolved)
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
@@ -511,7 +511,8 @@ function Test-CrApplyAutoLogonSelected {
     $current = Find-CrApplyUserByName -State $State -Name ([string]$al['DefaultUserName'])
     if (-not $current) { return $false }
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
-        if (-not (Test-CrApplyManagedEntry $e)) { continue }
+        # The replaced accounts of an entry without its own account are retired, which -Only never processes (v10.8).
+        if (-not (Test-CrApplyManagedEntry $e) -or (Test-CrReplacedRetired $e)) { continue }
         if (-not (Test-CrApplySlotSelected -Slot ([string]$e['Slot']) -Only $Only)) { continue }
         foreach ($a in (Join-CrApplyList $e['Accounts'] $e['Replaced'])) {
             if ($a -is [hashtable] -and $a['Sid'] -and [string]$a['Sid'] -eq [string]$current['Sid']) { return $true }
@@ -664,7 +665,7 @@ function Get-CrApplyPreview {
                 } elseif ($mode -eq 'Change') {
                     $path = Get-CrApplyAccountPath -Probe $probe -SecretAccount $sa
                 }
-                # D21: only an entry with EnableIfDisabled (ApplicationUser) is enabled; other accounts stay disabled.
+                # D21: only an entry with EnableIfDisabled is enabled (all managed entries since v10.8); other accounts stay disabled.
                 $isDisabled = [bool](-not $toCreate -and ($user -is [hashtable]) -and $user['Disabled'] -and $path['Path'] -ne 'Skip')
                 $enable = [bool]($isDisabled -and $e['EnableIfDisabled'])
                 $outcome = $null
@@ -710,7 +711,10 @@ function Find-CrApplyPreviewSlot {
 #    Services; Tasks; ComPlus; OtherTasks; HasDependents;
 #    MoveEntry (where the dependents go); Planned ($true = disabled if the conditions hold at the time); Reason }.
 # Replaced accounts only for selected slots; Disable entries and operator-chosen others (D23) only without -Only.
-# Dependents of an account without replacement always move to the application account (D24, O5 decided in v10.4).
+# The accounts replaced by an entry whose own account does not exist and is not created (the built-in Administrator
+# without ApplicationUser, Test-CrReplacedRetired, v10.8) are retired like a Disable entry.
+# Dependents of an account without replacement move to the application account (D24, O5 decided in v10.4), or to the
+# operator's account where there is none (v10.8, Get-CrDependentTargetEntry).
 # No move to an account created in this run (new SID): the account keeps its dependents and stays enabled.
 # A replaced account also stays enabled when its replacement can't get their SQL Server access (D29) or, as the
 # operator's account, could not log on where it can (D28) (Get-CrReplacementBlocker; -Preflight for SqlWriteBlocked).
@@ -719,7 +723,7 @@ function Get-CrApplyDisablePlan {
     if (-not ($OtherDecisions -is [hashtable])) { $OtherDecisions = @{} }
     $items = New-Object System.Collections.ArrayList
     $seen = New-Object System.Collections.ArrayList
-    $appEntry = Get-CrApplyAppUserEntry -Resolved $Resolved
+    $targetEntry = Get-CrDependentTargetEntry -Resolved $Resolved
     $onlyGiven = Test-CrApplyOnlyGiven $Only
     # PLAN 6 step 2, D24: without the services, tasks or COM+ discovery the dependents are unknown; nothing is disabled.
     $depErrors = Get-CrDependentDiscoveryErrors -State $State
@@ -728,7 +732,7 @@ function Get-CrApplyDisablePlan {
 
     $candidates = New-Object System.Collections.ArrayList
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
-        if (-not (Test-CrApplyManagedEntry $e)) { continue }
+        if (-not (Test-CrApplyManagedEntry $e) -or (Test-CrReplacedRetired $e)) { continue }
         if (-not (Test-CrApplySlotSelected -Slot ([string]$e['Slot']) -Only $Only)) { continue }
         foreach ($r in (ConvertTo-CrArray $e['Replaced'])) {
             if (-not ($r -is [hashtable]) -or -not $r['Sid']) { continue }
@@ -737,10 +741,18 @@ function Get-CrApplyDisablePlan {
     }
     if (-not $onlyGiven) {
         foreach ($e in (ConvertTo-CrArray $Resolved)) {
-            if (-not ($e -is [hashtable]) -or $e['Mode'] -ne 'Disable' -or $e['Kind'] -ne 'Windows') { continue }
-            foreach ($a in (ConvertTo-CrArray $e['Accounts'])) {
+            if (-not ($e -is [hashtable]) -or $e['Kind'] -ne 'Windows') { continue }
+            $list = $null
+            $why = $null
+            if ($e['Mode'] -eq 'Disable') {
+                $list = $e['Accounts']
+            } elseif ((Test-CrApplyManagedEntry $e) -and (Test-CrReplacedRetired $e)) {
+                $list = $e['Replaced']
+                $why = 'its replacement ' + (Get-CrApplyEntryAccountName $e) + ' does not exist'
+            }
+            foreach ($a in (ConvertTo-CrArray $list)) {
                 if (-not ($a -is [hashtable]) -or -not $a['Sid']) { continue }
-                [void]$candidates.Add(@{ Kind = 'Disable'; Sid = [string]$a['Sid']; Name = [string]$a['Name']; User = $a['User']; Enabled = $null; Entry = $e })
+                [void]$candidates.Add(@{ Kind = 'Disable'; Sid = [string]$a['Sid']; Name = [string]$a['Name']; User = $a['User']; Enabled = $null; Entry = $e; Why = $why })
             }
         }
         foreach ($k in @($OtherDecisions.Keys)) {
@@ -768,7 +780,7 @@ function Get-CrApplyDisablePlan {
             Sid = $sid; Name = $name; User = $user; Kind = $c['Kind']; IsRunning = ($sid -eq $RunningSid)
             ReplacementEntry = $null; ReplacementName = $null; ReplacementSlot = $null
             Services = $services; Tasks = $tasks; ComPlus = $complus; OtherTasks = $otherTasks; HasDependents = $hasDeps
-            MoveEntry = $null; Planned = $true; Reason = $null
+            MoveEntry = $null; Planned = $true; Reason = $null; Why = $c['Why']
         }
         if ($c['Kind'] -eq 'Replaced') {
             $e = $c['Entry']
@@ -800,11 +812,11 @@ function Get-CrApplyDisablePlan {
                 $item['Planned'] = $false
                 $item['Reason'] = 'kept enabled by the operator (D23)'
             } elseif ($hasDeps) {
-                if ($appEntry) {
-                    $item['MoveEntry'] = $appEntry
+                if ($targetEntry) {
+                    $item['MoveEntry'] = $targetEntry
                 } else {
                     $item['Planned'] = $false
-                    $item['Reason'] = 'stays enabled: it runs services, scheduled tasks or COM+ applications and there is no application account to move them to (D24)'
+                    $item['Reason'] = 'stays enabled: it runs services, scheduled tasks or COM+ applications and there is no application or operator account to move them to (D24)'
                 }
             }
         }
@@ -866,7 +878,16 @@ function Get-CrApplyAccountFates {
                 foreach ($r in (ConvertTo-CrArray $e['Replaced'])) {
                     if ($found -or -not ($r -is [hashtable]) -or [string]$r['Sid'] -ne $sid) { continue }
                     $found = $true
-                    if (Test-CrApplySlotSelected -Slot ([string]$e['Slot']) -Only $Only) {
+                    if (Test-CrReplacedRetired $e) {
+                        # v10.8: the replacement does not exist (ApplicationUser), so the account is retired.
+                        $target = Get-CrDependentTargetEntry -Resolved $Resolved
+                        $targetName = 'no account'
+                        if ($target) { $targetName = Get-CrApplyEntryAccountName $target }
+                        $fate = 'disable'
+                        $detail = 'its replacement ' + (Get-CrApplyEntryAccountName $e) + ' does not exist: retired (D22); its dependents move to ' + $targetName + ' (D24)'
+                        if ($sid -eq $RunningSid) { $detail = $detail + '; your own account, disabled last (D25)' }
+                        if ($onlyGiven) { $fate = 'keep'; $detail = 'retired account, not processed under -Only' }
+                    } elseif (Test-CrApplySlotSelected -Slot ([string]$e['Slot']) -Only $Only) {
                         $fate = 'disable'
                         $detail = 'replaced by ' + (Get-CrApplyEntryAccountName $e) + ' (D22); its dependents move there (D24)'
                         if ($sid -eq $RunningSid) { $detail = $detail + '; your own account, disabled last (D25)' }
@@ -1107,7 +1128,7 @@ function Invoke-CrApplySlotSteps {
         Stop-CrApplySlot $Context $Result $Items 'Secret' $errors; return
     }
 
-    # 3 enable an existing disabled account of an entry with EnableIfDisabled (ApplicationUser; PLAN 1.1, D21).
+    # 3 enable an existing disabled account of an entry with EnableIfDisabled (PLAN 1.1, D21; all managed entries, v10.8).
     foreach ($it in $Items) {
         if (-not $it['Enable']) { continue }
         try {
@@ -1527,6 +1548,15 @@ function Get-CrApplyMoveTarget {
     }
     $u = Find-CrApplyUser -State $Context['State'] -Sid $sid
     if (-not $u -or $u['Disabled']) { $r['Reason'] = '{0} is not enabled' -f $name; return $r }
+    # v10.8: dependents moved to the operator's account (no ApplicationUser) need its SQL Server access (D29).
+    if (Test-CrSqlAccessEntry $e) {
+        $sa = $null
+        if ($Context['SqlAccess'] -is [hashtable]) { $sa = $Context['SqlAccess'][[string]$e['Id']] }
+        if (-not ($sa -is [hashtable]) -or -not $sa['Ok']) {
+            $r['Reason'] = '{0} does not have its SQL Server access in this run (D29)' -f $name
+            return $r
+        }
+    }
     $slotSecret = $Context['SlotSecrets'][[string]$e['Slot']]
     if (-not ($slotSecret -is [hashtable]) -or -not $slotSecret['NewSecret']) {
         $r['Reason'] = 'the password of {0} is not available in this run' -f $name
@@ -1540,8 +1570,8 @@ function Get-CrApplyMoveTarget {
 }
 
 # 2 dependent moves (D24): services, password-stored tasks and COM+ identities of each account to be disabled go to
-# its replacement, or for retired and operator-disabled accounts to the application account. A failure keeps the
-# account enabled.
+# its replacement, or for retired and operator-disabled accounts to the application account, or without it to the
+# operator's account (v10.8). A failure keeps the account enabled.
 function Invoke-CrApplyMoves {
     param($Context, $DisablePlan)
     $State = $Context['State']
@@ -1825,7 +1855,10 @@ function Get-CrApplyReplacementReason {
 function Invoke-CrApplyDisableOne {
     param($Context, $Item)
     $why = 'replaced by ' + $Item['ReplacementName'] + ' (D22)'
-    if ($Item['Kind'] -eq 'Disable') { $why = 'retired without replacement (D22)' }
+    if ($Item['Kind'] -eq 'Disable') {
+        $why = 'retired without replacement (D22)'
+        if ($Item['Why']) { $why = 'retired, ' + $Item['Why'] + ' (D22)' }
+    }
     if ($Item['Kind'] -eq 'Other') { $why = 'operator decision (D23)' }
     try {
         $res = Disable-CrAccount -User $Item['User'] -Journal $Context['Journal'] -RunId $Context['RunId']
@@ -2234,12 +2267,20 @@ function Get-CrApplyAutoLogonPreview {
     if (-not ($al -is [hashtable]) -or $al['Error']) { return $null }
     $verified = New-Object System.Collections.ArrayList
     $removed = New-Object System.Collections.ArrayList
+    # v10.8: the auto-logon account (PUB-User) that its slot creates or enables counts as present, enabled and verified.
+    $alEntry = Find-CrAutoLogonEntry -Resolved $Resolved
+    $alCreate = $false
+    $alEnable = New-Object System.Collections.ArrayList
     foreach ($p in (ConvertTo-CrArray $Preview)) {
         if ($p['Status'] -ne 'Apply') { continue }
         $complete = $true
         foreach ($a in (ConvertTo-CrArray $p['Accounts'])) {
             if ($a['Path'] -eq 'Skip') { $complete = $false; continue }
-            # Created accounts are admins (never auto-logon targets); disabled ones stay disabled and can't be verified.
+            $isAutoLogonEntry = [bool]($alEntry -and ($a['Entry'] -is [hashtable]) -and [string]$a['Entry']['Id'] -eq [string]$alEntry['Id'])
+            if ($a['Path'] -eq 'Create' -and $isAutoLogonEntry) { $alCreate = $true }
+            if ($a['Enable'] -and $isAutoLogonEntry -and $a['Sid']) { [void]$alEnable.Add([string]$a['Sid']) }
+            # Created accounts have no SID yet (the auto-logon account is added below); disabled ones that stay disabled
+            # can't be verified.
             if ($a['Path'] -ne 'Create' -and $a['Sid'] -and -not $a['StaysDisabled']) { [void]$verified.Add([string]$a['Sid']) }
         }
         if (-not $complete) { continue }
@@ -2251,7 +2292,9 @@ function Get-CrApplyAutoLogonPreview {
             if (-not $gp['Skip'] -and ((ConvertTo-CrArray $gp['Remove']) -contains 'S-1-5-32-544')) { [void]$removed.Add([string]$a['Sid']) }
         }
     }
-    return (Get-CrAutoLogonDecision -State $State -Resolved $Resolved -Config $Config -VerifiedSids ($verified.ToArray()) -RemovedAdminSids ($removed.ToArray()))
+    $planned = Get-CrPlannedAutoLogonState -State $State -Entry $alEntry -Create $alCreate -EnableSids ($alEnable.ToArray()) -RunningSid $RunningSid
+    if ($planned['CreatedSid']) { [void]$verified.Add($planned['CreatedSid']) }
+    return (Get-CrAutoLogonDecision -State $planned['State'] -Resolved $Resolved -Config $Config -VerifiedSids ($verified.ToArray()) -RemovedAdminSids ($removed.ToArray()))
 }
 
 # Asks the operator for an ambiguous auto-logon decision (D13). Returns 'TurnOff'|'LeaveUnchanged'.
@@ -2294,6 +2337,7 @@ function Get-CrApplyDisableText {
     param($Item)
     $text = 'disable'
     if ($Item['Kind'] -eq 'Replaced') { $text = 'disable, replaced by ' + $Item['ReplacementName'] }
+    elseif ($Item['Kind'] -eq 'Disable' -and $Item['Why']) { $text = 'disable, retired: ' + $Item['Why'] }
     elseif ($Item['Kind'] -eq 'Disable') { $text = 'disable, retired without replacement' }
     else { $text = 'disable, your decision' }
     if ($Item['IsRunning']) { $text = $text + '; your own account: LAST, only when the operator account is ready (D25)' }

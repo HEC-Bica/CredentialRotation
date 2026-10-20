@@ -4,13 +4,16 @@ foreach ($m in @('Compat', 'Config', 'Rights', 'Principals', 'Sql', 'AutoLogon',
 . (Join-Path $here 'Fixtures.ps1')
 
 # Pester 3.4 keeps a Mock for the whole Describe/Context it is defined in: every Mock lives in its own Context.
-# Account model PLAN v10.6 (D18, D21-D29): SOP-Admin (the operator's account; replaces BiCA Admin and BiCA Remote and gets
-# their SQL Server access), ApplicationUser (replaces RID-500) and the auto-logon accounts PUB-User / WinAutoUser are
-# managed; SP Admin is managed too (v10.7, D30: created if missing, Administrators only, nothing else); SYS Admin (also
-# spelled SYS-Admin) is retired; no account is kept untouched (Mode Keep); the default config has no SQL login slots (D27).
-# The fixtures have neither SOP-Admin nor SP Admin, so they are created unless a test adds them.
-# v10.4 (D24): the dependents of retired and operator-disabled accounts always move to ApplicationUser; nothing moves to
-# an account created in this run (the account with dependents stays enabled).
+# Account model PLAN v10.8 (D18, D21-D31): SOP-Admin (the operator's account; replaces BiCA Admin and BiCA Remote and gets
+# their SQL Server access), ApplicationUser (replaces RID-500; never created since v10.8), SP Admin (v10.7, D30: created
+# if missing, Administrators only, nothing else) and the auto-logon account PUB-User (v10.8: created if missing, replaces
+# WinAutoUser) are managed and enabled if disabled; SYS Admin (also spelled SYS-Admin) is retired; no account is kept
+# untouched (Mode Keep); the default config has no SQL login slots (D27).
+# The fixtures have neither SOP-Admin nor SP Admin, and SM has no PUB-User, so they are created unless a test adds them.
+# Every active auto-logon is switched to PUB-User, on SM machines too (no RestrictedComputerPattern since v10.8).
+# v10.4 (D24): the dependents of retired and operator-disabled accounts move to ApplicationUser, or to SOP-Admin without
+# it (v10.8); nothing moves to an account created in this run (the account with dependents stays enabled). Without
+# ApplicationUser the built-in Administrator is disabled like a retired account (v10.8).
 
 function New-CrTestPlan {
     param($State, [string[]]$Only, $Preflight, [string]$RunningSid = 'S-1-5-21-9-9-9-9999', $Config)
@@ -28,7 +31,7 @@ function Get-CrTestFindings {
     })
 }
 
-Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
+Describe 'New-CrPlan on an SM-like machine (account model v10.8)' {
     Context 'audit run as BiCA Remote' {
         Mock Get-CrPathAllowSids { return , @('S-1-5-32-545', 'S-1-5-18', 'S-1-5-32-544') }
         $state = New-CrTestState -Profile SM
@@ -37,16 +40,24 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
         It 'reports drift' {
             $plan['Drift'] | Should Be $true
         }
-        It 'creates SOP-Admin (D28) and SP Admin (D30); PUB-User is never created (D21)' {
-            @(Get-CrTestFindings $plan 'Drift' 'Accounts' $null 'Create*').Count | Should Be 2
+        It 'creates SOP-Admin (D28), SP Admin (D30) and PUB-User (v10.8), each in its slot' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' $null 'Create*').Count | Should Be 3
             $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Create SOP-Admin')
             $f.Count | Should Be 1
             $f[0]['Slot'] | Should Be 'SOPAdmin'
             $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SP Admin' 'Create SP Admin')
             $f.Count | Should Be 1
             $f[0]['Slot'] | Should Be 'SPAdmin'
-            @(Get-CrTestFindings $plan $null $null 'PUB-User' 'Create PUB-User').Count | Should Be 0
-            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'PUB-User' 'Account not found (never created): PUB-User').Count | Should Be 1
+            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'PUB-User' 'Create PUB-User')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'AutoLogon'
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' $null 'Account not found (never created)*').Count | Should Be 0
+        }
+        It 'creates PUB-User in Users only, without a password finding; it has no Windows login in SQL Server (PLAN 1.1)' {
+            @(Get-CrTestFindings $plan 'Drift' 'Groups' 'PUB-User' 'Add to Users').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Drift' 'Groups' 'PUB-User').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null 'Password' 'PUB-User').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Info' 'SQL' 'PUB-User' '*no Windows login in SQL Server*').Count | Should Be 1
         }
         It 'adds SOP-Admin to Administrators, Remote Desktop Users and Offer Remote Assistance Helpers' {
             foreach ($g in @('Administrators', 'Remote Desktop Users', 'Offer Remote Assistance Helpers')) {
@@ -62,9 +73,8 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
             @(Get-CrTestFindings $plan $null 'SQL' 'SOP-Admin' '*no Windows login in SQL Server*').Count | Should Be 0
             @(Get-CrTestFindings $plan 'HighImpact' 'SQL').Count | Should Be 0
         }
-        It 'sets the password of WinAutoUser without a probe (D9); the BiCA accounts get none' {
-            @(Get-CrTestFindings $plan 'Info' 'Password' 'WinAutoUser' 'Password set (D9: no old password)').Count | Should Be 1
-            foreach ($n in @('BiCA Admin', 'BiCA Remote')) {
+        It 'gives the replaced accounts BiCA Admin, BiCA Remote and WinAutoUser no new password, groups or flags (D22)' {
+            foreach ($n in @('BiCA Admin', 'BiCA Remote', 'WinAutoUser')) {
                 @(Get-CrTestFindings $plan $null 'Password' $n).Count | Should Be 0
                 @(Get-CrTestFindings $plan $null 'Groups' $n).Count | Should Be 0
                 @(Get-CrTestFindings $plan $null 'Flags' $n).Count | Should Be 0
@@ -89,17 +99,18 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'LocalAdm' 'Already disabled (replaced by ApplicationUser)').Count | Should Be 1
         }
         It 'does not enforce groups or flags on retired or replaced accounts' {
-            foreach ($n in @('SYS Admin', 'LocalAdm', 'BiCA Admin', 'BiCA Remote')) {
+            foreach ($n in @('SYS Admin', 'LocalAdm', 'BiCA Admin', 'BiCA Remote', 'WinAutoUser')) {
                 @(Get-CrTestFindings $plan $null 'Groups' $n).Count | Should Be 0
                 @(Get-CrTestFindings $plan $null 'Flags' $n).Count | Should Be 0
             }
         }
-        It 'updates the password-stored task of WinAutoUser in place (no move) and grants the batch right' {
-            $f = @(Get-CrTestFindings $plan 'Info' 'Tasks' 'WinAutoUser' 'Scheduled task re-registered with the new password: \KioskTask*')
+        It 'keeps WinAutoUser and its password-stored task \KioskTask: PUB-User is created in this run (D24, v10.8)' {
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'WinAutoUser' 'Not disabled: PUB-User is created in this run, so the services, scheduled tasks and COM+ applications of WinAutoUser are not moved to it; migrate them manually (D24)')
             $f.Count | Should Be 1
             $f[0]['Slot'] | Should Be 'AutoLogon'
-            @(Get-CrTestFindings $plan $null $null $null 'Move scheduled task \KioskTask*').Count | Should Be 0
-            @(Get-CrTestFindings $plan 'Drift' 'Rights' 'WinAutoUser' 'Grant SeBatchLogonRight*').Count | Should Be 1
+            $f[0]['Detail'] | Should Be 'A created account has a new SID: no SQL login, ACLs or profile of WinAutoUser'
+            @(Get-CrTestFindings $plan $null $null 'WinAutoUser').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null $null $null '*\KioskTask*').Count | Should Be 0
         }
         It 'disables SYS Admin (no replacement) and reports the missing SYS-Admin' {
             @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS Admin' 'Disable SYS Admin (no replacement)').Count | Should Be 1
@@ -143,8 +154,12 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
         It 'flags SQL Server running as the application user' {
             @(Get-CrTestFindings $plan 'HighImpact' 'Services' $null 'SQL Server runs as this account*').Count | Should Be 1
         }
-        It 'turns off the admin auto-logon on an SM machine' {
-            @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' $null 'Turn auto-logon off*').Count | Should Be 1
+        It 'switches the admin auto-logon to the PUB-User it creates, on an SM machine too (D18, v10.8)' {
+            $f = @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' 'BiCA Admin' 'Switch auto-logon from BiCA Admin to PUB-User (D18)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'AutoLogon'
+            @(Get-CrTestFindings $plan $null 'AutoLogon' $null 'Turn auto-logon off*').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Ambiguous' 'AutoLogon').Count | Should Be 0
         }
         It 'lists LOGINS follow-ups for SOP-Admin (in place of the BiCA entries) and ApplicationUser, none for the SQL logins (D27)' {
             $f = @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'SOP-Admin')
@@ -169,7 +184,7 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
     }
 }
 
-Describe 'New-CrPlan on an IPT01-like machine (account model v10.6)' {
+Describe 'New-CrPlan on an IPT01-like machine (account model v10.8)' {
     $state = New-CrTestState -Profile IPT01
     $plan = New-CrTestPlan -State $state
 
@@ -182,11 +197,11 @@ Describe 'New-CrPlan on an IPT01-like machine (account model v10.6)' {
         @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin' 'Add to Remote Desktop Users').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin').Count | Should Be 2
     }
-    It 'sets the passwords of the auto-logon accounts without a probe (D9)' {
-        foreach ($n in @('PUB-User', 'WinAutoUser')) {
-            @(Get-CrTestFindings $plan 'Info' 'Password' $n 'Password set (D9: no old password)').Count | Should Be 1
-            @(Get-CrTestFindings $plan $null 'Probe' $n).Count | Should Be 0
-        }
+    It 'sets the password of PUB-User without a probe (D9); the replaced WinAutoUser gets none' {
+        @(Get-CrTestFindings $plan 'Info' 'Password' 'PUB-User' 'Password set (D9: no old password)').Count | Should Be 1
+        @(Get-CrTestFindings $plan $null 'Probe' 'PUB-User').Count | Should Be 0
+        @(Get-CrTestFindings $plan $null 'Password' 'WinAutoUser').Count | Should Be 0
+        @(Get-CrTestFindings $plan $null 'Probe' 'WinAutoUser').Count | Should Be 0
     }
     It 'disables the enabled built-in Administrator (replaced by ApplicationUser)' {
         $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (replaced by ApplicationUser)')
@@ -204,11 +219,18 @@ Describe 'New-CrPlan on an IPT01-like machine (account model v10.6)' {
     It 'disables BiCA Remote (no dependents), replaced by SOP-Admin (D28)' {
         @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'BiCA Remote' 'Disable BiCA Remote (replaced by SOP-Admin)').Count | Should Be 1
     }
-    It 'disables none of the managed accounts and creates no PUB-User' {
-        foreach ($n in @('PUB-User', 'WinAutoUser', 'ApplicationUser')) {
+    It 'disables none of the managed accounts and creates no PUB-User (it exists)' {
+        foreach ($n in @('PUB-User', 'ApplicationUser')) {
             @(Get-CrTestFindings $plan 'Drift' 'Accounts' $n ('Disable ' + $n + '*')).Count | Should Be 0
         }
         @(Get-CrTestFindings $plan $null $null 'PUB-User' 'Create PUB-User').Count | Should Be 0
+    }
+    It 'disables WinAutoUser (no dependents), replaced by PUB-User once it is verified (D22, v10.8)' {
+        $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'WinAutoUser' 'Disable WinAutoUser (replaced by PUB-User)')
+        $f.Count | Should Be 1
+        $f[0]['Slot'] | Should Be 'AutoLogon'
+        $f[0]['Detail'] | Should Be 'D22: disabled only after PUB-User is verified in this run; groups and password stay unchanged'
+        @(Get-CrTestFindings $plan $null $null 'WinAutoUser').Count | Should Be 1
     }
     It 'grants SOP-Admin the SQL Server login on the Express instance (D29)' {
         @(Get-CrTestFindings $plan 'Drift' 'SQL' 'SOP-Admin' 'SQL Server: create the Windows login IPT01-TEST01\SOP-Admin, add it to the server role sysadmin').Count | Should Be 1
@@ -228,8 +250,8 @@ Describe 'New-CrPlan on an IPT01-like machine (account model v10.6)' {
     It 'has no D25 item when the running account is not disabled' {
         @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' $null 'The running account*').Count | Should Be 0
     }
-    It 'switches the admin auto-logon to PUB-User on a non-SM machine' {
-        @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' $null 'Switch auto-logon from * to PUB-User*').Count | Should Be 1
+    It 'switches the admin auto-logon to the existing PUB-User (D18)' {
+        @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' 'BiCA Admin' 'Switch auto-logon from BiCA Admin to PUB-User (D18)').Count | Should Be 1
     }
     It 'finds no SID overlap' {
         @(Get-CrTestFindings $plan 'Ambiguous' 'Principals').Count | Should Be 0
@@ -240,6 +262,8 @@ Describe 'New-CrPlan: created and disabled accounts and the auto-logon step' {
     Context 'SOP-Admin is missing: it is created (D21, D28)' {
         Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
         $state = New-CrTestState -Profile IPT01
+        $appSid = Get-CrTestUserSid $state 'ApplicationUser'
+        $pubSid = Get-CrTestUserSid $state 'PUB-User'
         $plan = New-CrTestPlan -State $state
 
         It 'creates SOP-Admin in its slot' {
@@ -258,18 +282,10 @@ Describe 'New-CrPlan: created and disabled accounts and the auto-logon step' {
             @(Get-CrTestFindings $plan $null 'Flags' 'SOP-Admin').Count | Should Be 0
             @(Get-CrTestFindings $plan 'FollowUp' 'LOGINS' 'SOP-Admin').Count | Should Be 1
         }
-        It 'passes only existing accounts as verified to the auto-logon decision' {
-            Assert-MockCalled Get-CrAutoLogonDecision -Times 1 -Exactly -Scope Context -ParameterFilter { @($VerifiedSids).Count -eq 3 -and @($VerifiedSids) -notcontains '' }
-        }
-    }
-
-    Context 'ApplicationUser is missing: the created account still reports that it has no SQL Server login' {
-        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
-        $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
-        $plan = New-CrTestPlan -State $state
-
-        It 'reports that the created ApplicationUser has no Windows login in SQL Server (PLAN 1.1)' {
-            @(Get-CrTestFindings $plan 'Info' 'SQL' 'ApplicationUser' '*no Windows login in SQL Server*').Count | Should Be 1
+        It 'passes only existing accounts as verified to the auto-logon decision (ApplicationUser, PUB-User; not the created SOP-Admin and SP Admin)' {
+            Assert-MockCalled Get-CrAutoLogonDecision -Times 1 -Exactly -Scope Context -ParameterFilter {
+                @($VerifiedSids).Count -eq 2 -and @($VerifiedSids) -contains $appSid -and @($VerifiedSids) -contains $pubSid
+            }
         }
     }
 
@@ -322,7 +338,7 @@ Describe 'New-CrPlan: created and disabled accounts and the auto-logon step' {
         }
     }
 
-    Context 'WinAutoUser is disabled: it stays disabled and is not counted as verified (D21)' {
+    Context 'WinAutoUser is disabled already: replaced by PUB-User, it gets nothing (D22, v10.8)' {
         Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
         $state = New-CrTestState -Profile IPT01
         (Get-CrTestUser $state 'WinAutoUser')['Disabled'] = $true
@@ -330,11 +346,75 @@ Describe 'New-CrPlan: created and disabled accounts and the auto-logon step' {
         $winAutoSid = Get-CrTestUserSid $state 'WinAutoUser'
         $plan = New-CrTestPlan -State $state
 
-        It 'passes PUB-User but not the disabled WinAutoUser as verified' {
+        It 'passes PUB-User but not WinAutoUser as verified' {
             Assert-MockCalled Get-CrAutoLogonDecision -Times 1 -Exactly -Scope Context -ParameterFilter { @($VerifiedSids) -contains $pubSid -and @($VerifiedSids) -notcontains $winAutoSid }
         }
-        It 'never disables WinAutoUser' {
-            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'WinAutoUser' 'Disable*').Count | Should Be 0
+        It 'reports it as Info only: no password, no enable, no disable' {
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'WinAutoUser' 'Already disabled (replaced by PUB-User)').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null $null 'WinAutoUser').Count | Should Be 1
+        }
+    }
+
+    Context 'PUB-User is disabled: its slot enables it, so the auto-logon decision sees it enabled (D21, v10.8)' {
+        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
+        $state = New-CrTestState -Profile IPT01
+        $pub = Get-CrTestUser $state 'PUB-User'
+        $pub['Disabled'] = $true
+        $pub['Flags'] = $pub['Flags'] -bor 0x2
+        $pubSid = $pub['Sid']
+        $plan = New-CrTestPlan -State $state
+
+        It 'enables it and sets its password' {
+            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'PUB-User' 'Enable the account (D21)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'AutoLogon'
+            @(Get-CrTestFindings $plan 'Info' 'Password' 'PUB-User' 'Password set (D9: no old password)').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'PUB-User' '*stays disabled*').Count | Should Be 0
+        }
+        It 'passes it enabled and verified to the auto-logon decision' {
+            Assert-MockCalled Get-CrAutoLogonDecision -Times 1 -Exactly -Scope Context -ParameterFilter {
+                @($VerifiedSids) -contains $pubSid -and
+                @($State['Users'] | Where-Object { $_['Sid'] -eq $pubSid -and -not $_['Disabled'] }).Count -eq 1
+            }
+        }
+        It 'leaves the discovered account disabled' {
+            $pub['Disabled'] | Should Be $true
+            ($pub['Flags'] -band 0x2) | Should Be 2
+        }
+    }
+
+    Context 'PUB-User is missing (SM): the PUB-User its slot creates counts for the auto-logon decision (v10.8)' {
+        Mock Get-CrPathAllowSids { return , @() }
+        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'BiCA Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
+        $state = New-CrTestState -Profile SM
+        $usersBefore = @($state.Users).Count
+        $null = New-CrTestPlan -State $state
+
+        It 'passes it under the null SID S-1-0-0, enabled, in Users and verified' {
+            Assert-MockCalled Get-CrAutoLogonDecision -Times 1 -Exactly -Scope Context -ParameterFilter {
+                @($VerifiedSids) -contains 'S-1-0-0' -and
+                @($State['Users'] | Where-Object { $_['Name'] -eq 'PUB-User' -and $_['Sid'] -eq 'S-1-0-0' -and -not $_['Disabled'] }).Count -eq 1 -and
+                @(@($State['Groups'] | Where-Object { $_['Sid'] -eq 'S-1-5-32-545' })[0]['MemberSids']) -contains 'S-1-0-0'
+            }
+        }
+        It 'leaves the discovered state unchanged' {
+            @($state.Users).Count | Should Be $usersBefore
+            $null -eq (Get-CrTestUser $state 'PUB-User') | Should Be $true
+            (@((Get-CrTestGroup $state 'Users').MemberSids) -contains 'S-1-0-0') | Should Be $false
+        }
+    }
+
+    Context 'PUB-User is missing (SM) and the AutoLogon slot is blocked' {
+        Mock Get-CrPathAllowSids { return , @() }
+        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'BiCA Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
+        $state = New-CrTestState -Profile SM
+        $pf = @{ MachineBlocked = $false; BlockedSlots = @{ AutoLogon = 'test' }; Findings = @() }
+        $null = New-CrTestPlan -State $state -Preflight $pf
+
+        It 'neither adds nor verifies the PUB-User to create' {
+            Assert-MockCalled Get-CrAutoLogonDecision -Times 1 -Exactly -Scope Context -ParameterFilter {
+                @($VerifiedSids) -notcontains 'S-1-0-0' -and @($State['Users'] | Where-Object { $_['Name'] -eq 'PUB-User' }).Count -eq 0
+            }
         }
     }
 
@@ -469,8 +549,9 @@ Describe 'New-CrPlan: SQL Server access and logon rights of SOP-Admin (D28, D29)
     }
 }
 
-Describe 'New-CrPlan: ApplicationUser is created in this run (D24, v10.4)' {
-    # A created account has a new SID: nothing is moved to it, so an account with movable dependents stays enabled.
+Describe 'New-CrPlan: ApplicationUser is missing: never created, the built-in Administrator is retired (D22, D24, v10.8)' {
+    # Without ApplicationUser the dependents of disabled accounts move to SOP-Admin. A created SOP-Admin has a new SID:
+    # nothing is moved to it, so an account with movable dependents stays enabled.
     function Add-CrTestService {
         param($State, [string]$Name, [string]$Sid)
         $svc = @{ Name = $Name; DisplayName = $Name; StartName = '.\synthetic'; StartNameSid = $Sid; StartMode = 'Auto'; State = 'Running'
@@ -478,29 +559,37 @@ Describe 'New-CrPlan: ApplicationUser is created in this run (D24, v10.4)' {
         $State.Services = @($State.Services) + @($svc)
     }
 
-    Context 'the built-in Administrator runs a service, SYS Admin runs LegacySync, SYS-Admin runs nothing' {
+    Context 'the built-in Administrator runs a service, SYS Admin runs LegacySync, SYS-Admin runs nothing; SOP-Admin is created' {
         Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
         $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
         Add-CrTestService -State $state -Name 'AdminJob' -Sid (Get-CrTestUserSid $state 'Administrator')
         $plan = New-CrTestPlan -State $state
         $sysAdminSid = Get-CrTestUserSid $state 'SYS Admin'
 
-        It 'creates ApplicationUser (D21)' {
-            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'ApplicationUser' 'Create ApplicationUser').Count | Should Be 1
-        }
-        It 'keeps the replaced Administrator enabled with one HighImpact item and no move' {
-            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'Administrator' 'Not disabled: ApplicationUser is created in this run, so the services, scheduled tasks and COM+ applications of Administrator are not moved to it; migrate them manually (D24)')
+        It 'does not create ApplicationUser: it is not found and its entry is not applicable (v10.8)' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'ApplicationUser' 'Create*').Count | Should Be 0
+            $f = @(Get-CrTestFindings $plan 'Info' 'Accounts' 'ApplicationUser' 'Account not found (never created): ApplicationUser')
             $f.Count | Should Be 1
             $f[0]['Slot'] | Should Be 'AppUser'
-            $f[0]['Detail'] | Should Be 'A created account has a new SID: no SQL login, ACLs or profile of Administrator'
+            $f = @(Get-CrTestFindings $plan 'Info' 'Accounts' $null 'Not applicable on this machine: AppUser')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'AppUser'
+            @(Get-CrTestFindings $plan $null $null 'ApplicationUser').Count | Should Be 1
+        }
+        It 'keeps the Administrator enabled with one HighImpact item and no move: SOP-Admin is created in this run (D24)' {
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'Administrator' 'Not disabled: SOP-Admin is created in this run, so the services, scheduled tasks and COM+ applications of Administrator are not moved to it; migrate them manually (D24)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should BeNullOrEmpty
+            $f[0]['Detail'] | Should Be 'A created account has a new SID: no ACLs or profile of Administrator; its SQL Server login is created in this run (D29). A later run moves them'
             @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable*').Count | Should Be 0
             @(Get-CrTestFindings $plan $null $null 'Administrator' 'Move*').Count | Should Be 0
             @(Get-CrTestFindings $plan $null $null 'Administrator').Count | Should Be 1
         }
         It 'keeps the retired SYS Admin enabled with one HighImpact item and no move' {
-            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled: ApplicationUser is created in this run, so the services, scheduled tasks and COM+ applications of SYS Admin are not moved to it; migrate them manually (D24)')
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled: SOP-Admin is created in this run, so the services, scheduled tasks and COM+ applications of SYS Admin are not moved to it; migrate them manually (D24)')
             $f.Count | Should Be 1
             $f[0]['Slot'] | Should BeNullOrEmpty
+            $f[0]['Detail'] | Should Be 'A created account has a new SID: no ACLs or profile of SYS Admin; its SQL Server login is created in this run (D29). A later run moves them'
             @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS Admin' 'Disable*').Count | Should Be 0
             @(Get-CrTestFindings $plan $null $null 'SYS Admin' 'Move*').Count | Should Be 0
             @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS Admin').Count | Should Be 0
@@ -521,14 +610,59 @@ Describe 'New-CrPlan: ApplicationUser is created in this run (D24, v10.4)' {
         $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
         $plan = New-CrTestPlan -State $state
 
-        It 'disables it as usual (replaced by ApplicationUser)' {
-            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (replaced by ApplicationUser)')
+        It 'disables it like a retired account: its replacement ApplicationUser does not exist (D22, v10.8)' {
+            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (its replacement ApplicationUser does not exist)')
             $f.Count | Should Be 1
-            $f[0]['Slot'] | Should Be 'AppUser'
+            $f[0]['Slot'] | Should BeNullOrEmpty
+            $f[0]['Detail'] | Should Be 'D22: groups and password stay unchanged'
             @(Get-CrTestFindings $plan $null $null 'Administrator' 'Not disabled*').Count | Should Be 0
+            @(Get-CrTestFindings $plan $null $null 'Administrator').Count | Should Be 1
+        }
+        It 'disables the running Administrator last (D25): log on as SOP-Admin next time' {
+            $running = New-CrTestPlan -State $state -RunningSid (Get-CrTestUserSid $state 'Administrator')
+            $f = @(Get-CrTestFindings $running 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (its replacement ApplicationUser does not exist)')
+            $f.Count | Should Be 1
+            $f[0]['Detail'] | Should Match 'last step \(D25\)'
+            @(Get-CrTestFindings $running 'HighImpact' 'Accounts' 'Administrator' 'The running account Administrator is disabled at the end; log on as SOP-Admin next time (D25)').Count | Should Be 1
         }
         It 'still keeps SYS Admin (service LegacySync) enabled' {
-            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled: ApplicationUser is created in this run*').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled: SOP-Admin is created in this run*').Count | Should Be 1
+        }
+    }
+
+    Context 'SOP-Admin exists: the dependents of the Administrator and of SYS Admin move to SOP-Admin (D24, v10.8)' {
+        Mock Get-CrAutoLogonDecision { return @{ Action = 'NoChange'; CurrentSid = $null; CurrentName = 'Bica Admin'; TargetSid = $null; TargetName = $null; Reasons = @(); OperatorOptions = @(); HighImpact = @() } }
+        $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
+        [void](Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators', 'Remote Desktop Users') -PasswordNeverExpires -CannotChangePassword)
+        Add-CrTestService -State $state -Name 'AdminJob' -Sid (Get-CrTestUserSid $state 'Administrator')
+        $plan = New-CrTestPlan -State $state
+
+        It 'disables the Administrator and moves its service AdminJob to SOP-Admin' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'Administrator' 'Disable Administrator (its replacement ApplicationUser does not exist)').Count | Should Be 1
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'Services' 'Administrator' 'Move service AdminJob from Administrator to SOP-Admin (D24)')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should BeNullOrEmpty
+            $f[0]['Detail'] | Should Be 'Only to a verified SOP-Admin with its new password from this run; otherwise Administrator stays enabled'
+            @(Get-CrTestFindings $plan $null $null 'Administrator' 'Not disabled*').Count | Should Be 0
+        }
+        It 'disables SYS Admin and moves its service LegacySync to SOP-Admin' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS Admin' 'Disable SYS Admin (no replacement)').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'HighImpact' 'Services' 'SYS Admin' 'Move service LegacySync from SYS Admin to SOP-Admin (D24)').Count | Should Be 1
+        }
+    }
+
+    Context 'the renamed built-in Administrator LocalAdm is disabled already (SM)' {
+        Mock Get-CrPathAllowSids { return , @() }
+        $state = New-CrTestState -Profile SM -OmitUsers 'ApplicationUser'
+        $plan = New-CrTestPlan -State $state
+
+        It 'reports it as Info only (D22)' {
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'LocalAdm' 'Already disabled (its replacement ApplicationUser does not exist, D22)').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null $null 'LocalAdm').Count | Should Be 1
+        }
+        It 'keeps SYS Admin and its task \SpMaintenance: SOP-Admin is created in this run (D24)' {
+            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS Admin' 'Not disabled: SOP-Admin is created in this run, so the services, scheduled tasks and COM+ applications of SYS Admin are not moved to it; migrate them manually (D24)').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null $null $null 'Move scheduled task \SpMaintenance*').Count | Should Be 0
         }
     }
 
@@ -638,6 +772,146 @@ Describe 'Test-CrAppUserEntry / Test-CrOperatorEntry / Test-CrSqlAccessEntry (v1
     }
 }
 
+Describe 'Get-CrDependentTargetEntry / Get-CrEntryDisplayName (D24, v10.8)' {
+    $withApp = Resolve-CrAccounts -Config (New-CrTestConfig) -State (New-CrTestState -Profile IPT01)
+    $withoutApp = Resolve-CrAccounts -Config (New-CrTestConfig) -State (New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser')
+
+    It 'is the ApplicationUser entry when the account exists' {
+        $e = Get-CrDependentTargetEntry -Resolved $withApp
+        $e['Id'] | Should Be 'AppUser'
+        Get-CrEntryDisplayName $e | Should Be 'ApplicationUser'
+    }
+    It 'is the operator entry SOP-Admin when ApplicationUser does not exist, also while SOP-Admin is still to be created' {
+        $e = Get-CrDependentTargetEntry -Resolved $withoutApp
+        $e['Id'] | Should Be 'SOPAdmin'
+        Get-CrEntryDisplayName $e | Should Be 'SOP-Admin'
+        Test-CrEntryCreated $e | Should Be $true
+    }
+    It 'takes an application entry whose account is created, even after the operator entry' {
+        $resolved = @(
+            @{ Id = 'Op'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'S1'; Operator = $true; NotApplicable = $false; Accounts = @() },
+            @{ Id = 'App'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'S2'; Application = $true; NotApplicable = $false
+               Accounts = @(@{ Name = 'New App'; Sid = $null; User = $null; ToCreate = $true }) }
+        )
+        (Get-CrDependentTargetEntry -Resolved $resolved)['Id'] | Should Be 'App'
+    }
+    It 'ignores application entries that are not managed, have no slot or no account, and is $null without an operator entry' {
+        $resolved = @(
+            @{ Id = 'AppCheck'; Kind = 'Windows'; Mode = 'Check'; Slot = 'S1'; Application = $true; NotApplicable = $false },
+            @{ Id = 'AppNoSlot'; Kind = 'Windows'; Mode = 'Rotate'; Slot = $null; Application = $true; NotApplicable = $false },
+            @{ Id = 'AppMissing'; Kind = 'Windows'; Mode = 'Rotate'; Slot = 'S2'; Application = $true; NotApplicable = $true }
+        )
+        $null -eq (Get-CrDependentTargetEntry -Resolved $resolved) | Should Be $true
+        $null -eq (Get-CrDependentTargetEntry -Resolved @()) | Should Be $true
+    }
+    It 'names an entry by its first account, else by its configured Name, else by its Id' {
+        Get-CrEntryDisplayName @{ Id = 'X'; Accounts = @(@{ Name = 'First' }, @{ Name = 'Second' }); Config = @{ Name = 'Configured' } } | Should Be 'First'
+        Get-CrEntryDisplayName @{ Id = 'X'; Accounts = @(); Config = @{ Name = 'Configured' } } | Should Be 'Configured'
+        Get-CrEntryDisplayName @{ Id = 'X'; Accounts = @(); Config = @{ Names = @('A', 'B') } } | Should Be 'X'
+        $null -eq (Get-CrEntryDisplayName $null) | Should Be $true
+    }
+    It 'names the not applicable ApplicationUser entry by its configured Name' {
+        $app = $null
+        foreach ($e in $withoutApp) { if ($e['Id'] -eq 'AppUser') { $app = $e } }
+        $app['NotApplicable'] | Should Be $true
+        Get-CrEntryDisplayName $app | Should Be 'ApplicationUser'
+    }
+}
+
+Describe 'Test-CrReplacedRetired (v10.8)' {
+    $resolved = Resolve-CrAccounts -Config (New-CrTestConfig) -State (New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser')
+    $full = Resolve-CrAccounts -Config (New-CrTestConfig) -State (New-CrTestState -Profile IPT01)
+    $byId = @{}
+    foreach ($e in $resolved) { $byId[$e['Id']] = $e }
+    $fullApp = $null
+    foreach ($e in $full) { if ($e['Id'] -eq 'AppUser') { $fullApp = $e } }
+
+    It 'is true for the ApplicationUser entry without its account while the built-in Administrator exists' {
+        Test-CrReplacedRetired $byId['AppUser'] | Should Be $true
+    }
+    It 'is false for an entry whose account exists or is created, and for the retired entry' {
+        @($fullApp['Replaced']).Count | Should Be 1
+        Test-CrReplacedRetired $fullApp | Should Be $false
+        @($byId['SOPAdmin']['Replaced']).Count | Should Be 2
+        Test-CrReplacedRetired $byId['SOPAdmin'] | Should Be $false
+        Test-CrReplacedRetired $byId['Retired'] | Should Be $false
+    }
+    It 'is false without replaced accounts, with unreadable account data, or without an entry' {
+        Test-CrReplacedRetired @{ Kind = 'Windows'; Mode = 'Rotate'; NotApplicable = $true; Replaced = @() } | Should Be $false
+        Test-CrReplacedRetired @{ Kind = 'Windows'; Mode = 'Rotate'; NotApplicable = $true; Error = 'access denied'
+                                  Replaced = @(@{ Name = 'Administrator'; Sid = 'S-1-5-21-1000-2000-4000-500' }) } | Should Be $false
+        Test-CrReplacedRetired $null | Should Be $false
+    }
+}
+
+Describe 'Get-CrPlannedAutoLogonState (v10.8)' {
+    Context 'PUB-User is created (SM)' {
+        $state = New-CrTestState -Profile SM
+        $entry = Find-CrAutoLogonEntry -Resolved (Resolve-CrAccounts -Config (New-CrTestConfig) -State $state)
+        $usersBefore = @($state.Users).Count
+        $r = Get-CrPlannedAutoLogonState -State $state -Entry $entry -Create $true -EnableSids @() -RunningSid 'S-1-5-21-9-9-9-9999'
+
+        It 'adds it under the null SID S-1-0-0, enabled, and returns that SID' {
+            $r['CreatedSid'] | Should Be 'S-1-0-0'
+            $u = Get-CrTestUser $r['State'] 'PUB-User'
+            $u['Sid'] | Should Be 'S-1-0-0'
+            $u['Disabled'] | Should Be $false
+            $u['Planned'] | Should Be $true
+            @($r['State'].Users).Count | Should Be ($usersBefore + 1)
+        }
+        It 'puts it into the groups of its role (Users)' {
+            (@((Get-CrTestGroup $r['State'] 'Users').MemberSids) -contains 'S-1-0-0') | Should Be $true
+            (@((Get-CrTestGroup $r['State'] 'Administrators').MemberSids) -contains 'S-1-0-0') | Should Be $false
+        }
+        It 'makes it a usable auto-logon target' {
+            (Test-CrAutoLogonUsable -State $r['State'] -User (Get-CrTestUser $r['State'] 'PUB-User') -RemovedAdminSids @())['Usable'] | Should Be $true
+        }
+        It 'leaves the discovered state unchanged' {
+            @($state.Users).Count | Should Be $usersBefore
+            $null -eq (Get-CrTestUser $state 'PUB-User') | Should Be $true
+            (@((Get-CrTestGroup $state 'Users').MemberSids) -contains 'S-1-0-0') | Should Be $false
+        }
+    }
+
+    Context 'a disabled PUB-User is enabled (IPT01)' {
+        $state = New-CrTestState -Profile IPT01
+        $pub = Get-CrTestUser $state 'PUB-User'
+        $pub['Disabled'] = $true
+        $pub['Flags'] = $pub['Flags'] -bor 0x2
+        $entry = Find-CrAutoLogonEntry -Resolved (Resolve-CrAccounts -Config (New-CrTestConfig) -State $state)
+        $r = Get-CrPlannedAutoLogonState -State $state -Entry $entry -Create $false -EnableSids @($pub['Sid']) -RunningSid 'S-1-5-21-9-9-9-9999'
+
+        It 'shows it enabled in a copy and creates nothing' {
+            $u = Get-CrTestUser $r['State'] 'PUB-User'
+            $u['Sid'] | Should Be $pub['Sid']
+            $u['Disabled'] | Should Be $false
+            ($u['Flags'] -band 0x2) | Should Be 0
+            $null -eq $r['CreatedSid'] | Should Be $true
+            @($r['State'].Users).Count | Should Be @($state.Users).Count
+        }
+        It 'leaves the discovered account disabled' {
+            $pub['Disabled'] | Should Be $true
+            ($pub['Flags'] -band 0x2) | Should Be 2
+        }
+    }
+
+    Context 'nothing to create or enable' {
+        It 'returns the discovered state itself and no SID' {
+            $state = New-CrTestState -Profile IPT01
+            $r = Get-CrPlannedAutoLogonState -State $state -Entry @{ Id = 'AutoLogon'; Accounts = @() } -Create $false -EnableSids @() -RunningSid ''
+            [object]::ReferenceEquals($r['State'], $state) | Should Be $true
+            $null -eq $r['CreatedSid'] | Should Be $true
+        }
+        It 'adds no account when the entry has none to create' {
+            $state = New-CrTestState -Profile IPT01
+            $entry = @{ Id = 'AutoLogon'; Accounts = @(@{ Name = 'PUB-User'; Sid = (Get-CrTestUserSid $state 'PUB-User'); User = (Get-CrTestUser $state 'PUB-User') }) }
+            $r = Get-CrPlannedAutoLogonState -State $state -Entry $entry -Create $true -EnableSids @() -RunningSid ''
+            $null -eq $r['CreatedSid'] | Should Be $true
+            @($r['State'].Users).Count | Should Be @($state.Users).Count
+        }
+    }
+}
+
 Describe 'Get-CrLogonGaps / Copy-CrStateWithMember (D28)' {
     $state = New-CrTestState -Profile IPT01
     $bicaAdmin = Get-CrTestUserSid $state 'BiCA Admin'
@@ -700,13 +974,26 @@ Describe 'New-CrPlan account state findings' {
         @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'ApplicationUser' 'Enable the account (D21)').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Info' 'Accounts' 'ApplicationUser' '*stays disabled*').Count | Should Be 0
     }
-    It 'sets the password of a disabled WinAutoUser but does not enable it (D21)' {
+    It 'enables a disabled PUB-User, which the auto-logon step then switches to (EnableIfDisabled, D18, D21, v10.8)' {
         $state = New-CrTestState -Profile IPT01
-        (Get-CrTestUser $state 'WinAutoUser')['Disabled'] = $true
+        $pub = Get-CrTestUser $state 'PUB-User'
+        $pub['Disabled'] = $true
+        $pub['Flags'] = $pub['Flags'] -bor 0x2
         $plan = New-CrTestPlan -State $state
-        @(Get-CrTestFindings $plan 'Info' 'Accounts' 'WinAutoUser' 'Account is disabled: it gets the new password but stays disabled*').Count | Should Be 1
-        @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'WinAutoUser' 'Enable*').Count | Should Be 0
-        @(Get-CrTestFindings $plan 'Info' 'Password' 'WinAutoUser' 'Password set (D9: no old password)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'PUB-User' 'Enable the account (D21)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Info' 'Accounts' 'PUB-User' '*stays disabled*').Count | Should Be 0
+        @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' 'BiCA Admin' 'Switch auto-logon from BiCA Admin to PUB-User (D18)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Ambiguous' 'AutoLogon').Count | Should Be 0
+    }
+    It 'enables a disabled SP Admin (EnableIfDisabled, D21, v10.8)' {
+        $state = New-CrTestState -Profile IPT01
+        [void](Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators') -PasswordNeverExpires -CannotChangePassword -Disabled)
+        $plan = New-CrTestPlan -State $state
+        $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SP Admin' 'Enable the account (D21)')
+        $f.Count | Should Be 1
+        $f[0]['Slot'] | Should Be 'SPAdmin'
+        @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SP Admin' '*stays disabled*').Count | Should Be 0
+        @(Get-CrTestFindings $plan 'Info' 'Password' 'SP Admin' 'Password set (D9: no old password)').Count | Should Be 1
     }
     It 'says the old password cannot be test-logged-on when ForceGuest leaves no logon type (D16)' {
         $state = New-CrTestState -Profile IPT01
@@ -767,7 +1054,7 @@ Describe 'New-CrPlan account state findings' {
         (Get-CrTestUser $state 'SYS Admin')['Disabled'] = $true
         $plan = New-CrTestPlan -State $state
         @(Get-CrTestFindings $plan 'Drift' $null 'SYS Admin').Count | Should Be 0
-        @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Already disabled*').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Already disabled (no replacement, D22)').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Ambiguous' $null 'SYS Admin').Count | Should Be 0
     }
     It 'tells the operator that the dependents of an other account move to ApplicationUser if it is disabled (D23, D24)' {
@@ -781,6 +1068,29 @@ Describe 'New-CrPlan account state findings' {
         $f.Count | Should Be 1
         $f[0]['Detail'] | Should Be 'member of: Users; dependents (moved to ApplicationUser if it is disabled, D24): service ExtraSvc'
         @(Get-CrTestFindings $plan $null $null 'ExtraUser' 'Move*').Count | Should Be 0
+    }
+    It 'names SOP-Admin as the target of those dependents when ApplicationUser does not exist (D23, D24, v10.8)' {
+        $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
+        [void](Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators', 'Remote Desktop Users') -PasswordNeverExpires -CannotChangePassword)
+        $extra = Add-CrTestUser -State $state -Name 'ExtraUser' -Groups @('S-1-5-32-545')
+        $svc = @{ Name = 'ExtraSvc'; DisplayName = 'Extra Service'; StartName = '.\ExtraUser'; StartNameSid = $extra.Sid; StartMode = 'Auto'; State = 'Running'
+                  PathExecutable = 'C:\App\Extra.exe'; DependentServices = @(); DependsOn = @() }
+        $state.Services = @($state.Services) + @($svc)
+        $plan = New-CrTestPlan -State $state
+        $f = @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' 'ExtraUser' 'Operator decides: disable or keep ExtraUser (D23)')
+        $f.Count | Should Be 1
+        $f[0]['Detail'] | Should Be 'member of: Users; dependents (moved to SOP-Admin if it is disabled, D24): service ExtraSvc'
+    }
+    It 'says that those dependents stay when SOP-Admin is created in this run and ApplicationUser does not exist (D24, v10.8)' {
+        $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
+        $extra = Add-CrTestUser -State $state -Name 'ExtraUser' -Groups @('S-1-5-32-545')
+        $svc = @{ Name = 'ExtraSvc'; DisplayName = 'Extra Service'; StartName = '.\ExtraUser'; StartNameSid = $extra.Sid; StartMode = 'Auto'; State = 'Running'
+                  PathExecutable = 'C:\App\Extra.exe'; DependentServices = @(); DependsOn = @() }
+        $state.Services = @($state.Services) + @($svc)
+        $plan = New-CrTestPlan -State $state
+        $f = @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' 'ExtraUser' 'Operator decides: disable or keep ExtraUser (D23)')
+        $f.Count | Should Be 1
+        $f[0]['Detail'] | Should Be 'member of: Users; dependents (SOP-Admin is created in this run, so they are not moved and the account stays enabled even if you choose disable, D24): service ExtraSvc'
     }
     It 'blocks every Windows entry and asks nothing when the Users part failed' {
         $state = New-CrTestState -Profile IPT01 -Parts @{ Users = @{ Error = 'access denied' } }
@@ -799,7 +1109,7 @@ Describe 'New-CrPlan with -Only' {
         $plan = New-CrTestPlan -State $state -Only @('SOPAdmin')
 
         It 'skips other slots, check-mode accounts, retired and other accounts' {
-            foreach ($n in @('ApplicationUser', 'WinAutoUser', 'WinUser1', 'SYS Admin', 'LocalAdm', 'SP Admin')) {
+            foreach ($n in @('ApplicationUser', 'PUB-User', 'WinAutoUser', 'WinUser1', 'SYS Admin', 'LocalAdm', 'SP Admin')) {
                 @(Get-CrTestFindings $plan $null $null $n).Count | Should Be 0
             }
             @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*').Count | Should Be 0
@@ -812,7 +1122,29 @@ Describe 'New-CrPlan with -Only' {
             @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'BiCA Remote' 'Disable BiCA Remote (replaced by SOP-Admin)').Count | Should Be 1
         }
         It 'still runs the auto-logon step because BiCA Admin (replaced by this slot) is the current auto-logon account' {
-            @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' $null 'Turn auto-logon off*').Count | Should Be 1
+            # The AutoLogon slot is not selected, so PUB-User is not created and there is nothing to switch to (D13).
+            $f = @(Get-CrTestFindings $plan 'Ambiguous' 'AutoLogon' 'BiCA Admin' 'Operator decision needed: TurnOff / LeaveUnchanged')
+            $f.Count | Should Be 1
+            $f[0]['Detail'] | Should Match 'No usable auto-logon target \(PUB-User\) exists for a switch'
+            @(Get-CrTestFindings $plan 'Drift' 'AutoLogon').Count | Should Be 0
+        }
+    }
+
+    Context 'only the AutoLogon slot (SM)' {
+        Mock Get-CrPathAllowSids { return , @() }
+        $state = New-CrTestState -Profile SM
+        $plan = New-CrTestPlan -State $state -Only @('AutoLogon')
+
+        It 'creates PUB-User and keeps WinAutoUser with its task (D24); nothing of other slots, retired or other accounts' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'PUB-User' 'Create PUB-User').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'WinAutoUser' 'Not disabled: PUB-User is created in this run*').Count | Should Be 1
+            foreach ($n in @('SOP-Admin', 'SP Admin', 'ApplicationUser', 'LocalAdm', 'BiCA Remote', 'SYS Admin', 'OtherAdmin', 'WinUser1')) {
+                @(Get-CrTestFindings $plan $null $null $n).Count | Should Be 0
+            }
+        }
+        It 'switches the auto-logon to the PUB-User it creates (D18, v10.8)' {
+            @(Get-CrTestFindings $plan 'Drift' 'AutoLogon' 'BiCA Admin' 'Switch auto-logon from BiCA Admin to PUB-User (D18)').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Ambiguous' 'AutoLogon').Count | Should Be 0
         }
     }
 
@@ -821,14 +1153,26 @@ Describe 'New-CrPlan with -Only' {
         $state = New-CrTestState -Profile SM
         $plan = New-CrTestPlan -State $state -Only @('AppUser')
 
-        It 'neither creates SOP-Admin or SP Admin nor touches the BiCA accounts nor grants SQL access' {
-            foreach ($n in @('SOP-Admin', 'SP Admin', 'BiCA Admin', 'BiCA Remote')) {
+        It 'neither creates SOP-Admin, SP Admin or PUB-User nor touches the BiCA accounts or WinAutoUser nor grants SQL access' {
+            foreach ($n in @('SOP-Admin', 'SP Admin', 'PUB-User', 'BiCA Admin', 'BiCA Remote', 'WinAutoUser')) {
                 @(Get-CrTestFindings $plan $null $null $n).Count | Should Be 0
             }
             @(Get-CrTestFindings $plan $null 'SQL').Count | Should Be 0
         }
         It 'does not run the auto-logon step (its current account BiCA Admin belongs to the SOPAdmin slot)' {
             @(Get-CrTestFindings $plan $null 'AutoLogon').Count | Should Be 0
+        }
+    }
+
+    Context 'only the AppUser slot while ApplicationUser is missing (IPT01)' {
+        $state = New-CrTestState -Profile IPT01 -OmitUsers 'ApplicationUser'
+        $plan = New-CrTestPlan -State $state -Only @('AppUser')
+
+        It 'reports the missing ApplicationUser but does not retire the built-in Administrator (only without -Only, v10.8)' {
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' 'ApplicationUser' 'Account not found (never created): ApplicationUser').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Info' 'Accounts' $null 'Not applicable on this machine: AppUser').Count | Should Be 1
+            @(Get-CrTestFindings $plan $null 'Accounts').Count | Should Be 2
+            @(Get-CrTestFindings $plan $null $null 'Administrator').Count | Should Be 0
         }
     }
 

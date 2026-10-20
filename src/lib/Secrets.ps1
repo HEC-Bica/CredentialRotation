@@ -216,7 +216,7 @@ function Get-CrEntryPasswordMode {
 # Create: the account doesn't exist and is created in this run (placeholder with ToCreate, or an entry with Create
 # and an account without SID). NeedsOld: only an existing account with PasswordMode 'Change' (D9).
 # Disabled: an existing disabled account; Enable: it is enabled in this run (entry EnableIfDisabled), else it stays
-# disabled (D21: BiCA accounts, PUB-User, WinAutoUser).
+# disabled (D21; every managed entry of the default config has EnableIfDisabled since v10.8).
 function New-CrSlotAccount {
     param($Entry, $Account)
     $sid = $null

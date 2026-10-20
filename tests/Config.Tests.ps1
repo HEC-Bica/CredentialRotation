@@ -71,11 +71,11 @@ Describe 'Import-CrConfig' {
         $sop.ContainsKey('PasswordMode') | Should Be $false
     }
 
-    It 'has ApplicationUser (Create, EnableIfDisabled, Change, the Application account, replaces RID-500)' {
+    It 'has ApplicationUser (never created, v10.8; EnableIfDisabled, Change, the Application account, replaces RID-500)' {
         $c = Import-CrConfig -Path $defaultPath
         $app = Get-TestAccount $c 'AppUser'
         $app.Name | Should Be 'ApplicationUser'
-        $app.Create | Should Be $true
+        $app.ContainsKey('Create') | Should Be $false
         $app.EnableIfDisabled | Should Be $true
         $app.Application | Should Be $true
         $app.ContainsKey('SqlAccess') | Should Be $false
@@ -84,21 +84,22 @@ Describe 'Import-CrConfig' {
         @($app.Replaces)[0] | Should Be 'RID-500'
     }
 
-    It 'has the AutoLogon entry with both auto-logon accounts (never created, never replaced)' {
+    It 'has the AutoLogon entry PUB-User: created if missing, always enabled, replaces WinAutoUser, no SM restriction (v10.8)' {
         $c = Import-CrConfig -Path $defaultPath
         $al = Get-TestAccount $c 'AutoLogon'
-        (@($al.Names) -join ',') | Should Be 'PUB-User,WinAutoUser'
+        $al.Name | Should Be 'PUB-User'
+        $al.ContainsKey('Names') | Should Be $false
         $al.Role | Should Be 'User'
         $al.Credential | Should Be 'AutoLogon'
-        $al.ContainsKey('Create') | Should Be $false
-        $al.ContainsKey('Replaces') | Should Be $false
+        $al.Create | Should Be $true
+        $al.EnableIfDisabled | Should Be $true
+        (@($al.Replaces) -join ',') | Should Be 'WinAutoUser'
         $alu = @($al.AutoLogonUser)
-        $alu.Count | Should Be 2
+        $alu.Count | Should Be 1
         $alu[0].Name | Should Be 'PUB-User'
-        $alu[1].Name | Should Be 'WinAutoUser'
         @($alu[0].Keys).Count | Should Be 1
-        @($alu[1].Keys).Count | Should Be 1
-        $al.AutoLogon.RestrictedComputerPattern | Should Be '^SM'
+        $al.AutoLogon.Mode | Should Be 'IfAlreadyOn'
+        $al.AutoLogon.ContainsKey('RestrictedComputerPattern') | Should Be $false
     }
 
     It 'retires SYS Admin in both spellings (v10.5)' {
@@ -108,7 +109,7 @@ Describe 'Import-CrConfig' {
         (@($r.Names) -join ',') | Should Be 'SYS Admin,SYS-Admin'
     }
 
-    It 'has SP Admin as a managed account: created if missing, Administrators only, its own slot, nothing else (D30, v10.7)' {
+    It 'has SP Admin as a managed account: created if missing, always enabled, Administrators only, its own slot, nothing else (D30)' {
         $c = Import-CrConfig -Path $defaultPath
         $sp = Get-TestAccount $c 'SPAdmin'
         $sp.Kind | Should Be 'Windows'
@@ -116,10 +117,11 @@ Describe 'Import-CrConfig' {
         $sp.Role | Should Be 'Admin'
         $sp.Credential | Should Be 'SPAdmin'
         $sp.Create | Should Be $true
+        $sp.EnableIfDisabled | Should Be $true
         $sp.Services | Should Be 'Auto'
         $sp.ScheduledTasks | Should Be 'Auto'
         $sp.ComPlus | Should Be 'Auto'
-        foreach ($k in @('Replaces', 'SqlAccess', 'Operator', 'Application', 'EnableIfDisabled', 'PasswordMode', 'LoginsEntry', 'Mode')) {
+        foreach ($k in @('Replaces', 'SqlAccess', 'Operator', 'Application', 'PasswordMode', 'LoginsEntry', 'Mode')) {
             $sp.ContainsKey($k) | Should Be $false
         }
         (@($c.Roles.Admin.Groups) -join ',') | Should Be 'S-1-5-32-544'
@@ -136,13 +138,27 @@ Describe 'Import-CrConfig' {
         foreach ($cr in $c.Credentials) { ($cr.Slot -like 'SQL*') | Should Be $false }
     }
 
-    It 'has no SqlSysadminLogin key, no single-Name PUB-User entry and no entry that manages a BiCA account (v10.6)' {
+    It 'has no SqlSysadminLogin key and no entry that manages a BiCA account or WinAutoUser (v10.6, v10.8)' {
         $c = Import-CrConfig -Path $defaultPath
         foreach ($a in $c.Accounts) {
             $a.ContainsKey('SqlSysadminLogin') | Should Be $false
-            $a.Name | Should Not Be 'PUB-User'
             ([string]$a.Name -like 'BiCA*') | Should Be $false
-            foreach ($n in @($a.Names)) { ([string]$n -like 'BiCA*') | Should Be $false }
+            [string]$a.Name | Should Not Be 'WinAutoUser'
+            if ($a.ContainsKey('Names')) {
+                foreach ($n in @($a.Names)) {
+                    ([string]$n -like 'BiCA*') | Should Be $false
+                    [string]$n | Should Not Be 'WinAutoUser'
+                }
+            }
+        }
+    }
+
+    It 'ends with SOP-Admin, SP Admin and PUB-User created and enabled on every machine (v10.8)' {
+        $c = Import-CrConfig -Path $defaultPath
+        foreach ($id in @('SOPAdmin', 'SPAdmin', 'AutoLogon')) {
+            $a = Get-TestAccount $c $id
+            $a.Create | Should Be $true
+            $a.EnableIfDisabled | Should Be $true
         }
     }
 
@@ -724,34 +740,57 @@ Describe 'Test-CrConfig' {
                                   AutoLogonUser = @(@{ Name = 'Kiosk' }); AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' } }
             Test-HasConfigError @(Test-CrConfig -Config $c) 'only one entry may have an AutoLogon block' | Should Be $true
         }
+        It 'accepts an AutoLogon block with or without RestrictedComputerPattern (optional since v10.8)' {
+            $c = New-CrTestConfig
+            @(Test-CrConfig -Config $c).Count | Should Be 0
+            (Get-TestAccount $c 'AutoLogon').AutoLogon.RestrictedComputerPattern = '^SM'
+            @(Test-CrConfig -Config $c).Count | Should Be 0
+        }
+        It 'an empty RestrictedComputerPattern' {
+            $c = New-CrTestConfig; (Get-TestAccount $c 'AutoLogon').AutoLogon.RestrictedComputerPattern = ''
+            Test-HasConfigError @(Test-CrConfig -Config $c) 'AutoLogon RestrictedComputerPattern must be a non-empty string' | Should Be $true
+        }
     }
 
     Context 'auto-logon accounts (D18, D21, D22)' {
+        # An AutoLogon entry with two accounts: without Create and Replaces (both need a single Name).
+        function Set-TestTwoAutoLogonAccounts {
+            param($Config, $AutoLogonUser)
+            $al = Get-TestAccount $Config 'AutoLogon'
+            $al.Remove('Name'); $al.Remove('Create'); $al.Remove('Replaces')
+            $al.Names = @('PUB-User', 'Kiosk')
+            $al.AutoLogonUser = $AutoLogonUser
+        }
         It 'an account of the entry missing from AutoLogonUser' {
             $c = New-CrTestConfig
-            (Get-TestAccount $c 'AutoLogon').AutoLogonUser = @(@{ Name = 'PUB-User' })
-            Test-HasConfigError @(Test-CrConfig -Config $c) "AutoLogon': 'WinAutoUser' is missing from AutoLogonUser" | Should Be $true
+            Set-TestTwoAutoLogonAccounts $c @(@{ Name = 'PUB-User' })
+            Test-HasConfigError @(Test-CrConfig -Config $c) "AutoLogon': 'Kiosk' is missing from AutoLogonUser" | Should Be $true
         }
         It 'accepts AutoLogonUser in another order, compared case-insensitively' {
             $c = New-CrTestConfig
-            (Get-TestAccount $c 'AutoLogon').AutoLogonUser = @(@{ Name = 'winautouser' }, @{ Name = 'pub-user' })
+            Set-TestTwoAutoLogonAccounts $c @(@{ Name = 'kiosk' }, @{ Name = 'pub-user' })
             @(Test-CrConfig -Config $c).Count | Should Be 0
         }
-        It 'Create on the AutoLogon entry (the auto-logon accounts are never created)' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'AutoLogon').Create = $true
-            Test-HasConfigError @(Test-CrConfig -Config $c) "AutoLogon': the auto-logon accounts are never created; Create is not valid with AutoLogon" | Should Be $true
-        }
-        It 'Create with AutoLogon also on a single-Name entry' {
+        It 'accepts Create on the single-Name AutoLogon entry (PUB-User is created if missing, v10.8)' {
             $c = New-CrTestConfig
-            $al = Get-TestAccount $c 'AutoLogon'
-            $al.Remove('Names'); $al.Name = 'PUB-User'; $al.AutoLogonUser = @(@{ Name = 'PUB-User' }); $al.Create = $true
-            $errors = @(Test-CrConfig -Config $c)
-            Test-HasConfigError $errors 'Create is not valid with AutoLogon' | Should Be $true
-            Test-HasConfigError $errors 'Create requires a single Name' | Should Be $false
+            (Get-TestAccount $c 'AutoLogon').Create | Should Be $true
+            Test-HasConfigError @(Test-CrConfig -Config $c) 'Create' | Should Be $false
+        }
+        It 'Create on an AutoLogon entry with Names' {
+            $c = New-CrTestConfig
+            Set-TestTwoAutoLogonAccounts $c @(@{ Name = 'PUB-User' }, @{ Name = 'Kiosk' })
+            (Get-TestAccount $c 'AutoLogon').Create = $true
+            Test-HasConfigError @(Test-CrConfig -Config $c) "AutoLogon': Create requires a single Name" | Should Be $true
         }
         It 'an auto-logon account in Replaces (case-insensitive)' {
+            $c = New-CrTestConfig; (Get-TestAccount $c 'AppUser').Replaces = @('RID-500', 'pub-user')
+            Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'PUB-User' must not be replaced \(Account 'AppUser'\)" | Should Be $true
+        }
+        It 'WinAutoUser replaced by a second entry (the AutoLogon entry replaces it, v10.8)' {
             $c = New-CrTestConfig; (Get-TestAccount $c 'AppUser').Replaces = @('RID-500', 'winautouser')
-            Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'WinAutoUser' must not be replaced \(Account 'AppUser'\)" | Should Be $true
+            $errors = @(Test-CrConfig -Config $c)
+            Test-HasConfigError $errors "AutoLogon': Replaces 'WinAutoUser' is already replaced by Account 'AppUser'" | Should Be $true
+            Test-HasConfigError $errors 'the auto-logon account' | Should Be $false
         }
         It 'an auto-logon account in a Disable entry with Names (case-insensitive)' {
             $c = New-CrTestConfig; (Get-TestAccount $c 'Retired').Names = @('SYS Admin', 'SYS-Admin', 'pub-user')
@@ -759,8 +798,8 @@ Describe 'Test-CrConfig' {
         }
         It 'an auto-logon account in a Disable entry with a single Name' {
             $c = New-CrTestConfig
-            Add-TestAccount $c @{ Id = 'OldKiosk'; Kind = 'Windows'; Name = 'WinAutoUser'; Mode = 'Disable' }
-            Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'WinAutoUser' must not be in a Disable entry" | Should Be $true
+            Add-TestAccount $c @{ Id = 'OldKiosk'; Kind = 'Windows'; Name = 'PUB-User'; Mode = 'Disable' }
+            Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'PUB-User' must not be in a Disable entry" | Should Be $true
         }
     }
 }

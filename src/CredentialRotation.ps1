@@ -6,14 +6,16 @@
 .DESCRIPTION
     Discovers the local accounts, groups, rights, dependents, auto-logon, write filter and SQL Server state,
     compares them with the configuration and reports what -Apply would change (audit, changes nothing).
-    With -Apply (account model v10.7, PLAN D18, D21-D30) it lists the enabled local accounts and what happens to each,
+    With -Apply (account model v10.8, PLAN D18, D21-D31) it lists the enabled local accounts and what happens to each,
     asks about the other enabled accounts, prompts for the passwords per credential slot, probes ApplicationUser's old
-    password, shows the plan and, after YES, creates the missing admin accounts (SOP-Admin, ApplicationUser, SP Admin),
-    sets the passwords of the managed accounts incl. every existing PUB-User/WinAutoUser (ApplicationUser: changed),
+    password, shows the plan and, after YES, creates the missing accounts SOP-Admin, SP Admin and PUB-User and enables
+    them if disabled, sets the passwords of the managed accounts (an existing ApplicationUser: changed, never created),
     enforces groups and flags, gives SOP-Admin the SQL Server access of BiCA Admin and BiCA Remote, updates and moves the
-    dependents, runs the auto-logon step, disables the replaced (BiCA Admin, BiCA Remote, built-in Administrator), retired
-    and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8). BiCA Admin and BiCA Remote get no new
-    password. SOP-Admin, the operator's account, is the last slot; a running BiCA Remote is disabled last (D25).
+    dependents, switches every active auto-logon to PUB-User, disables the replaced (BiCA Admin, BiCA Remote,
+    WinAutoUser, built-in Administrator), retired and chosen accounts and runs the check-mode fixes (PLAN sections 6
+    and 8). The replaced accounts get no new password; without ApplicationUser the built-in Administrator is retired and
+    dependents move to SOP-Admin. SOP-Admin, the operator's account, is the last slot; a running BiCA Remote is
+    disabled last (D25).
     SQL login credentials are not updated (D27).
     Start it through Start-CredentialRotation.cmd ("Run as administrator").
 
@@ -49,7 +51,7 @@ if ($UnexpectedArguments) {
 }
 
 $ErrorActionPreference = 'Stop'
-$script:CrToolVersion = '0.7.0'
+$script:CrToolVersion = '0.8.0'
 $script:CrScriptPath = $MyInvocation.MyCommand.Path
 $script:CrScriptDir = Split-Path -Parent $script:CrScriptPath
 
@@ -294,7 +296,8 @@ function Invoke-CrApplyFlow {
         Write-CrApplySummary -Preview $preview -DisablePlan $disablePlan -Plan $Plan -AutoLogonDecision $alDecision -Only $Only
 
         # Operator decisions (D13): ApplicationUser's old password not usable (set with DPAPI loss / skip), ambiguous
-        # auto-logon. Dependents of retired and operator-disabled accounts always move to ApplicationUser (D24, v10.4).
+        # auto-logon. Dependents of retired and operator-disabled accounts move to ApplicationUser, or to SOP-Admin
+        # without it (D24, v10.4, v10.8).
         Resolve-CrProbeDecisions -State $State -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Journal $journal -RunId $RunId -Only $Only
         $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Only $Only
         $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions -Preflight $Preflight

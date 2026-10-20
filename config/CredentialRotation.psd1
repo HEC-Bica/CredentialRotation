@@ -23,7 +23,7 @@
     # No SQL login slots: SQL credentials are not updated (D27, v10.5).
     Credentials = @(
         @{ Slot = 'AppUser';        Order = 20; Label = 'ApplicationUser' }
-        @{ Slot = 'AutoLogon';      Order = 30; Label = 'Auto-logon users (PUB-User / WinAutoUser)' }
+        @{ Slot = 'AutoLogon';      Order = 30; Label = 'Auto-logon user PUB-User (replaces WinAutoUser)' }
         @{ Slot = 'SPAdmin';        Order = 40; Label = 'SP Admin' }
         @{ Slot = 'SOPAdmin';       Order = 90; Label = 'SOP-Admin (your logon account from now on)' }   # last (D25)
     )
@@ -39,23 +39,30 @@
            Operator = $true                                                      # the operator's account (D25)
            Replaces = @('BiCA Admin', 'BiCA Remote'); SqlAccess = 'FromReplaced'; LoginsEntry = $true
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
-        @{ Id = 'AppUser';  Kind = 'Windows'; Name = 'ApplicationUser'; Role = 'Admin'; Credential = 'AppUser'; Create = $true
+        # ApplicationUser is never created (v10.8): only an existing one is managed. Without it, the built-in Administrator
+        # is disabled like a retired account and the dependents of disabled accounts move to SOP-Admin (D24).
+        @{ Id = 'AppUser';  Kind = 'Windows'; Name = 'ApplicationUser'; Role = 'Admin'; Credential = 'AppUser'
            EnableIfDisabled = $true                                              # it runs the application
            Application = $true                                                   # dependents of retired accounts move here (D24)
            PasswordMode = 'Change'                                               # D9: keep DPAPI data
            Replaces = @('RID-500'); LoginsEntry = $true
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto'; IisReport = 'Auto' }
-        # SP Admin (D30, v10.7): created if missing (Administrators only), its own new password on every rotation;
-        # no SQL access, replaces nothing.
+        # SP Admin (D30, v10.7): created if missing (Administrators only), always enabled (v10.8), its own new password on
+        # every rotation; no SQL access, replaces nothing.
         @{ Id = 'SPAdmin';  Kind = 'Windows'; Name = 'SP Admin'; Role = 'Admin'; Credential = 'SPAdmin'; Create = $true
+           EnableIfDisabled = $true
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
-        # Auto-logon accounts (D18, D21): every existing one, enabled or disabled, gets the slot password;
-        # never created, never enabled or disabled.
-        @{ Id = 'AutoLogon'; Kind = 'Windows'; Names = @('PUB-User', 'WinAutoUser'); Role = 'User'; Credential = 'AutoLogon'
-           AutoLogonUser = @( @{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' } )   # kept if active; switch target: first usable
-           AutoLogon = @{ Mode = 'IfAlreadyOn'; RestrictedComputerPattern = '^SM' }
+        # The auto-logon account PUB-User (D18, D21, v10.8): created if missing, always enabled; it replaces WinAutoUser.
+        # Every active auto-logon, on every machine, ends up as PUB-User; auto-logon that is off stays off. No
+        # RestrictedComputerPattern: SM machines are switched like the others.
+        @{ Id = 'AutoLogon'; Kind = 'Windows'; Name = 'PUB-User'; Role = 'User'; Credential = 'AutoLogon'; Create = $true
+           EnableIfDisabled = $true
+           Replaces = @('WinAutoUser')
+           AutoLogonUser = @( @{ Name = 'PUB-User' } )
+           AutoLogon = @{ Mode = 'IfAlreadyOn' }
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
-        # Retired without replacement (D22); their dependents move to ApplicationUser (D24, v10.4).
+        # Retired without replacement (D22); their dependents move to ApplicationUser, or to SOP-Admin where there is no
+        # ApplicationUser (D24, v10.4, v10.8).
         # 'SYS-Admin' is the same account as 'SYS Admin', spelled with a hyphen on some machines (v10.5).
         @{ Id = 'Retired';  Kind = 'Windows'; Names = @('SYS Admin', 'SYS-Admin'); Mode = 'Disable' }
         # No account is kept untouched any more (D26: SOP-Admin is managed since v10.6, SP Admin since v10.7); an entry

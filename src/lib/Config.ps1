@@ -310,10 +310,6 @@ function Test-CrConfigManagedKeys {
             [void]$Errors.Add(('{0}: SqlAccess requires Replaces (the accounts whose SQL access it gets).' -f $Where))
         }
     }
-    # D21: the auto-logon accounts are never created.
-    if (($Account['Create'] -eq $true) -and $Account.ContainsKey('AutoLogon')) {
-        [void]$Errors.Add(('{0}: the auto-logon accounts are never created; Create is not valid with AutoLogon.' -f $Where))
-    }
     if ($Account.ContainsKey('PasswordMode')) {
         if ($Schema.PasswordModeValues -notcontains [string]$Account['PasswordMode']) {
             [void]$Errors.Add(('{0}: PasswordMode must be one of: {1}.' -f $Where, ($Schema.PasswordModeValues -join ', ')))
@@ -491,7 +487,9 @@ function Test-CrConfigAccount {
             if ($Schema.AutoLogonModes -notcontains [string]$block['Mode']) {
                 [void]$Errors.Add(('{0}: AutoLogon Mode must be one of: {1}.' -f $Where, ($Schema.AutoLogonModes -join ', ')))
             }
-            if (-not (Test-CrConfigString $block['RestrictedComputerPattern'])) {
+            # Optional since v10.8: without it, no machine is restricted (auto-logon is switched everywhere).
+            if (-not $block.ContainsKey('RestrictedComputerPattern')) {
+            } elseif (-not (Test-CrConfigString $block['RestrictedComputerPattern'])) {
                 [void]$Errors.Add(('{0}: AutoLogon RestrictedComputerPattern must be a non-empty string.' -f $Where))
             } else {
                 $regexError = Test-CrConfigRegex $block['RestrictedComputerPattern']

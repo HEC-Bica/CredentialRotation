@@ -120,12 +120,15 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $e.Replaced[0].Enabled | Should Be $false
     }
 
-    It 'resolves a missing ApplicationUser to a placeholder and still lists the replaced RID-500' {
+    It 'never creates a missing ApplicationUser (v10.8): not applicable, and still lists the replaced RID-500' {
         $s = New-CrTestState -Profile 'SM' -OmitUsers 'ApplicationUser'
         $e = Get-TestEntry (Resolve-CrAccounts -Config $config -State $s) 'AppUser'
-        $e.Create | Should Be $true
-        $e.Accounts[0].Name | Should Be 'ApplicationUser'
-        $e.Accounts[0].ToCreate | Should Be $true
+        $e.Create | Should Be $false
+        $e.NotApplicable | Should Be $true
+        $e.Accounts.Count | Should Be 0
+        $e.Missing.Count | Should Be 1
+        $e.Missing[0] | Should Be 'ApplicationUser'
+        $e.Error | Should BeNullOrEmpty
         $e.Replaced.Count | Should Be 1
         $e.Replaced[0].Name | Should Be 'LocalAdm'
     }
@@ -137,31 +140,33 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         (Get-TestEntry $resolved 'FtpUsers').Config.NamePattern | Should Be '^ftp|ftp$'
     }
 
-    It 'resolves the AutoLogon entry to WinAutoUser; the absent PUB-User is missing, not created' {
+    It 'resolves the absent PUB-User to a placeholder that replaces WinAutoUser (v10.8)' {
         $e = Get-TestEntry $resolved 'AutoLogon'
         $e.Mode | Should Be 'Rotate'
-        $e.Create | Should Be $false
+        $e.Create | Should Be $true
         $e.NotApplicable | Should Be $false
         $e.Accounts.Count | Should Be 1
-        $e.Accounts[0].Name | Should Be 'WinAutoUser'
-        $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'WinAutoUser')
-        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
-        $e.Missing.Count | Should Be 1
-        $e.Missing[0] | Should Be 'PUB-User'
-        $e.Replaced.Count | Should Be 0
+        $e.Accounts[0].Name | Should Be 'PUB-User'
+        $e.Accounts[0].Sid | Should BeNullOrEmpty
+        $e.Accounts[0].ToCreate | Should Be $true
+        $e.Missing.Count | Should Be 0
+        $e.Replaced.Count | Should Be 1
+        $e.Replaced[0].Name | Should Be 'WinAutoUser'
+        $e.Replaced[0].Sid | Should Be (Get-CrTestUserSid $state 'WinAutoUser')
+        $e.Replaced[0].Enabled | Should Be $true
         $e.Slot | Should Be 'AutoLogon'
         $e.RoleName | Should Be 'User'
         $e.PasswordMode | Should Be 'Set'
         $e.Operator | Should Be $false
-        $e.EnableIfDisabled | Should Be $false
+        $e.EnableIfDisabled | Should Be $true
     }
 
-    It 'keeps the auto-logon block and both AutoLogonUser names' {
+    It 'keeps the auto-logon block (no RestrictedComputerPattern) and the single AutoLogonUser PUB-User' {
         $e = Get-TestEntry $resolved 'AutoLogon'
-        $e.AutoLogon.RestrictedComputerPattern | Should Be '^SM'
-        $e.AutoLogonUser.Count | Should Be 2
+        $e.AutoLogon.Mode | Should Be 'IfAlreadyOn'
+        $e.AutoLogon.RestrictedComputerPattern | Should BeNullOrEmpty
+        $e.AutoLogonUser.Count | Should Be 1
         $e.AutoLogonUser[0].Name | Should Be 'PUB-User'
-        $e.AutoLogonUser[1].Name | Should Be 'WinAutoUser'
     }
 
     It 'resolves a Disable entry to the existing accounts' {
@@ -192,7 +197,7 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $e.Accounts[0].Name | Should Be 'SP Admin'
         $e.Accounts[0].ToCreate | Should Be $true
         $e.Operator | Should Be $false
-        $e.EnableIfDisabled | Should Be $false
+        $e.EnableIfDisabled | Should Be $true
         $e.Application | Should Be $false
         $e.SqlAccess | Should BeNullOrEmpty
         $e.LoginsEntry | Should Be $false
@@ -219,14 +224,17 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
     It 'compares names case-insensitively' {
         $c = New-CrTestConfig
         (Get-TestConfigEntry $c 'AppUser').Name = 'applicationuser'
-        (Get-TestConfigEntry $c 'AutoLogon').Names = @('pub-user', 'winautouser')
+        (Get-TestConfigEntry $c 'AutoLogon').Name = 'pub-user'
+        (Get-TestConfigEntry $c 'AutoLogon').Replaces = @('winautouser')
         (Get-TestConfigEntry $c 'Retired').Names = @('sys admin')
         $r = Resolve-CrAccounts -Config $c -State $state
         (Get-TestEntry $r 'AppUser').Accounts[0].Name | Should Be 'ApplicationUser'
         $al = Get-TestEntry $r 'AutoLogon'
         $al.Accounts.Count | Should Be 1
-        $al.Accounts[0].Name | Should Be 'WinAutoUser'
-        $al.Missing[0] | Should Be 'pub-user'
+        $al.Accounts[0].Name | Should Be 'pub-user'
+        $al.Accounts[0].ToCreate | Should Be $true
+        $al.Replaced.Count | Should Be 1
+        $al.Replaced[0].Name | Should Be 'WinAutoUser'
         (Get-TestEntry $r 'Retired').Accounts[0].Name | Should Be 'SYS Admin'
     }
 
@@ -344,64 +352,65 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
         $e.Accounts[0].Name | Should Be 'ApplicationUser'
     }
 
-    It 'resolves the AutoLogon entry to both existing accounts, in config order' {
+    It 'resolves the AutoLogon entry to the existing PUB-User, which replaces WinAutoUser (v10.8)' {
         $e = Get-TestEntry $resolved 'AutoLogon'
         $e.Create | Should Be $false
         $e.NotApplicable | Should Be $false
-        $e.Accounts.Count | Should Be 2
+        $e.Accounts.Count | Should Be 1
         $e.Accounts[0].Name | Should Be 'PUB-User'
         $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $state 'PUB-User')
-        $e.Accounts[1].Name | Should Be 'WinAutoUser'
-        $e.Accounts[1].Sid | Should Be (Get-CrTestUserSid $state 'WinAutoUser')
+        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
         $e.Missing.Count | Should Be 0
-        $e.Replaced.Count | Should Be 0
+        $e.Replaced.Count | Should Be 1
+        $e.Replaced[0].Name | Should Be 'WinAutoUser'
+        $e.Replaced[0].Sid | Should Be (Get-CrTestUserSid $state 'WinAutoUser')
+        $e.Replaced[0].Enabled | Should Be $true
+        foreach ($r in $resolved) { ((Get-TestAccountNames $r) -contains 'WinAutoUser') | Should Be $false }
     }
 
-    It 'resolves a disabled auto-logon account too (no placeholder; enabled state is not its business)' {
+    It 'resolves a disabled PUB-User (enabled by its slot, EnableIfDisabled) and a disabled WinAutoUser (already replaced)' {
         $s = New-CrTestState -Profile 'IPT01' -Customize {
             param($st)
-            $u = Get-CrTestUser $st 'WinAutoUser'
-            $u.Disabled = $true
-            $u.Flags = $u.Flags -bor 0x2
+            foreach ($n in @('PUB-User', 'WinAutoUser')) {
+                $u = Get-CrTestUser $st $n
+                $u.Disabled = $true
+                $u.Flags = $u.Flags -bor 0x2
+            }
         }
         $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AutoLogon'
         $e.Create | Should Be $false
-        $e.EnableIfDisabled | Should Be $false
-        $e.Accounts.Count | Should Be 2
-        $e.Accounts[1].Name | Should Be 'WinAutoUser'
-        $e.Accounts[1].User.Disabled | Should Be $true
-        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
-        $e.Accounts[1].ToCreate | Should BeNullOrEmpty
-        $e.Missing.Count | Should Be 0
-    }
-
-    It 'lists an absent auto-logon account as missing next to a disabled one (never created)' {
-        $s = New-CrTestState -Profile 'IPT01' -OmitUsers 'PUB-User' -Customize {
-            param($st)
-            $u = Get-CrTestUser $st 'WinAutoUser'
-            $u.Disabled = $true
-            $u.Flags = $u.Flags -bor 0x2
-        }
-        $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AutoLogon'
-        $e.Create | Should Be $false
-        $e.NotApplicable | Should Be $false
+        $e.EnableIfDisabled | Should Be $true
         $e.Accounts.Count | Should Be 1
-        $e.Accounts[0].Name | Should Be 'WinAutoUser'
+        $e.Accounts[0].Name | Should Be 'PUB-User'
         $e.Accounts[0].User.Disabled | Should Be $true
         $e.Accounts[0].ToCreate | Should BeNullOrEmpty
-        $e.Missing.Count | Should Be 1
-        $e.Missing[0] | Should Be 'PUB-User'
+        $e.Missing.Count | Should Be 0
+        $e.Replaced.Count | Should Be 1
+        $e.Replaced[0].Enabled | Should Be $false
     }
 
-    It 'is not applicable when neither auto-logon account exists (no placeholders)' {
+    It 'creates PUB-User where it is missing, next to a WinAutoUser that it replaces' {
+        $s = New-CrTestState -Profile 'IPT01' -OmitUsers 'PUB-User'
+        $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AutoLogon'
+        $e.Create | Should Be $true
+        $e.NotApplicable | Should Be $false
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].Name | Should Be 'PUB-User'
+        $e.Accounts[0].ToCreate | Should Be $true
+        $e.Missing.Count | Should Be 0
+        $e.Replaced.Count | Should Be 1
+        $e.Replaced[0].Name | Should Be 'WinAutoUser'
+    }
+
+    It 'creates PUB-User also where neither auto-logon account exists (v10.8)' {
         $s = New-CrTestState -Profile 'IPT01' -OmitUsers @('PUB-User', 'WinAutoUser')
         $e = Get-TestEntry (Resolve-CrAccounts -Config (New-CrTestConfig) -State $s) 'AutoLogon'
-        $e.Create | Should Be $false
-        $e.NotApplicable | Should Be $true
-        $e.Accounts.Count | Should Be 0
-        $e.Missing.Count | Should Be 2
-        $e.Missing[0] | Should Be 'PUB-User'
-        $e.Missing[1] | Should Be 'WinAutoUser'
+        $e.Create | Should Be $true
+        $e.NotApplicable | Should Be $false
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].ToCreate | Should Be $true
+        $e.Missing.Count | Should Be 0
+        $e.Replaced.Count | Should Be 0
     }
 
     It 'resolves the Disable entry to SYS Admin and SYS-Admin' {
@@ -461,6 +470,8 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
         $e.Error | Should Match 'access denied'
         $e.Replaced.Count | Should Be 0
         (Get-TestEntry $r 'AppUser').Create | Should Be $false
+        (Get-TestEntry $r 'AutoLogon').Create | Should Be $false
+        (Get-TestEntry $r 'AutoLogon').Replaced.Count | Should Be 0
     }
 }
 
@@ -505,7 +516,7 @@ Describe 'Get-CrOtherEnabledAccounts' {
         (Get-CrOtherEnabledAccounts -State $state -Resolved $resolved).Count | Should Be 0
     }
 
-    It 'excludes PUB-User, WinAutoUser and SYS-Admin because the AutoLogon and Retired entries select them (IPT01)' {
+    It 'excludes PUB-User, WinAutoUser (replaced) and SYS-Admin because the AutoLogon and Retired entries select them (IPT01)' {
         $state = New-CrTestState -Profile 'IPT01'
         $c = New-CrTestConfig
         $kept = @()
@@ -615,12 +626,22 @@ Describe 'NamePattern exclusion and SID overlap' {
 
     It 'reports an auto-logon account that a Disable entry also selects' {
         $c = New-CrTestConfig
+        (Get-TestConfigEntry $c 'Retired').Names = @('SYS Admin', 'SYS-Admin', 'PUB-User')
+        $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'IPT01')
+        $findings = Find-CrSidOverlap -Resolved $resolved
+        $findings.Count | Should Be 1
+        $findings[0].Account | Should Be 'PUB-User'
+        $findings[0].Message | Should Match 'AutoLogon, Retired'
+    }
+
+    It 'reports a replaced WinAutoUser that a Disable entry also selects (v10.8)' {
+        $c = New-CrTestConfig
         (Get-TestConfigEntry $c 'Retired').Names = @('SYS Admin', 'SYS-Admin', 'WinAutoUser')
         $resolved = Resolve-CrAccounts -Config $c -State (New-CrTestState -Profile 'SM')
         $findings = Find-CrSidOverlap -Resolved $resolved
         $findings.Count | Should Be 1
         $findings[0].Account | Should Be 'WinAutoUser'
-        $findings[0].Message | Should Match 'AutoLogon, Retired'
+        $findings[0].Message | Should Match 'AutoLogon \(replaces\), Retired'
     }
 
     It 'reports a replaced account that another entry selects' {

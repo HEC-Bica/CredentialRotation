@@ -409,7 +409,7 @@ function New-CrManagedAccount {
     return Complete-CrRotationResult $result $steps $warnings 0 $null
 }
 
-# Sets the password of a managed set account (D9: BiCA Admin, BiCA Remote, PUB-User, WinAutoUser; PLAN section 8 steps 1-2):
+# Sets the password of a managed set account (D9: SOP-Admin, SP Admin, PUB-User; PLAN section 8 steps 1-2):
 #   1. unlock if locked (journal 'Unlocked'); the lock state is re-checked and a relock stops here
 #   2. Invoke-CrNetPasswordReset (NetUserSetInfo 1003). No CCP handling: an administrative set ignores CCP.
 #   3. journal 'Secret' only on success
@@ -495,7 +495,7 @@ function Disable-CrAccount {
 }
 
 # Enables an account (UF_ACCOUNTDISABLE cleared): an existing disabled account of an entry with EnableIfDisabled
-# (ApplicationUser) is enabled after its password step (CONTRACTS v10). An enabled account = success, Changed $false.
+# (every managed account of the default config, v10.8) is enabled after its password step (CONTRACTS v10). An enabled account = success, Changed $false.
 # Not journaled.
 # Returns @{ Success; Changed; Win32Error; Message }.
 function Enable-CrAccount {

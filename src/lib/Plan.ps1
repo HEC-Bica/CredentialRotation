@@ -347,7 +347,8 @@ function Add-CrCreatedTargetFinding {
 }
 
 # D24: dependents of an account that is disabled in this run. Every movable item is a HighImpact
-# "Move ... from <old> to <target>": the replacement, or for retired and other accounts the application account (v10.4).
+# "Move ... from <old> to <target>": the replacement, or for retired and other accounts the application account (v10.4),
+# or the operator's account where there is no application account (v10.8, Get-CrDependentTargetEntry).
 function Add-CrDisableDependentFindings {
     param($Plan, $State, [string]$Sid, [string]$Name, [string]$Slot, [string]$TargetName)
     $deps = Get-CrAccountDependents -State $State -Sid $Sid
@@ -444,9 +445,11 @@ function Add-CrReplacedFindings {
     }
 }
 
-# D22: Mode = 'Disable' entries (retired without replacement).
+# D22: Mode = 'Disable' entries (retired without replacement), and the accounts of an entry whose own account does not
+# exist (Test-CrReplacedRetired, v10.8; $Why names the missing replacement). Their dependents move to $TargetName (D24).
 function Add-CrDisableEntryFindings {
-    param($Plan, $State, $Entry, [string]$RunningSid, [string]$OperatorName, [string]$AppUserName, [bool]$AppUserCreated)
+    param($Plan, $State, $Entry, [string]$RunningSid, [string]$OperatorName, [string]$TargetName, [bool]$TargetCreated,
+          [bool]$TargetSqlLogin = $false, [string]$Why = 'no replacement')
     foreach ($m in (ConvertTo-CrArray $Entry['Missing'])) {
         Add-CrPlanFinding $Plan 'Info' 'Accounts' ('Account not found (nothing to disable): ' + $m) $null $m
     }
@@ -454,27 +457,27 @@ function Add-CrDisableEntryFindings {
         $u = $a['User']
         $name = [string]$a['Name']
         if ($u -and $u['Disabled']) {
-            Add-CrPlanFinding $Plan 'Info' 'Accounts' 'Already disabled (retired, D22)' $null $name
+            Add-CrPlanFinding $Plan 'Info' 'Accounts' ('Already disabled (' + $Why + ', D22)') $null $name
             continue
         }
-        if ($AppUserCreated -and (Get-CrMovableDependentCount -State $State -Sid ([string]$a['Sid'])) -gt 0) {
-            Add-CrCreatedTargetFinding -Plan $Plan -Name $name -Slot $null -TargetName $AppUserName
+        if ($TargetCreated -and (Get-CrMovableDependentCount -State $State -Sid ([string]$a['Sid'])) -gt 0) {
+            Add-CrCreatedTargetFinding -Plan $Plan -Name $name -Slot $null -TargetName $TargetName -SqlLoginGranted $TargetSqlLogin
             continue
         }
         $isRunning = ($RunningSid -and ([string]$a['Sid'] -ieq $RunningSid))
         $detail = 'D22: groups and password stay unchanged'
         if ($isRunning) { $detail = $detail + '; the running account is disabled as the last step (D25)' }
-        Add-CrPlanFinding $Plan 'Drift' 'Accounts' ('Disable ' + $name + ' (no replacement)') $null $name $detail
+        Add-CrPlanFinding $Plan 'Drift' 'Accounts' ('Disable ' + $name + ' (' + $Why + ')') $null $name $detail
         if ($isRunning) {
             Add-CrPlanFinding $Plan 'HighImpact' 'Accounts' ('The running account ' + $name + ' is disabled at the end; log on as ' + $OperatorName + ' next time (D25)') $null $name
         }
-        Add-CrDisableDependentFindings -Plan $Plan -State $State -Sid ([string]$a['Sid']) -Name $name -Slot $null -TargetName $AppUserName
+        Add-CrDisableDependentFindings -Plan $Plan -State $State -Sid ([string]$a['Sid']) -Name $name -Slot $null -TargetName $TargetName
     }
 }
 
 # D23: every other enabled local account is put to the operator.
 function Add-CrOtherAccountFindings {
-    param($Plan, $State, $Resolved, [string]$AppUserName, [bool]$AppUserCreated)
+    param($Plan, $State, $Resolved, [string]$TargetName, [bool]$TargetCreated)
     foreach ($u in (ConvertTo-CrArray (Get-CrOtherEnabledAccounts -State $State -Resolved $Resolved))) {
         $sid = [string]$u['Sid']
         $parts = New-Object System.Collections.ArrayList
@@ -482,11 +485,11 @@ function Add-CrOtherAccountFindings {
         foreach ($g in (ConvertTo-CrArray (Get-CrDirectGroupSids -State $State -Sid $sid))) { [void]$groupNames.Add([string](Get-CrGroupName $State $g)) }
         if ($groupNames.Count -gt 0) { [void]$parts.Add('member of: ' + ($groupNames.ToArray() -join ', ')) }
         $deps = Get-CrDependentSummary (Get-CrAccountDependents -State $State -Sid $sid)
-        if ($deps -and $AppUserCreated -and (Get-CrMovableDependentCount -State $State -Sid $sid) -gt 0) {
+        if ($deps -and $TargetCreated -and (Get-CrMovableDependentCount -State $State -Sid $sid) -gt 0) {
             # D24 (v10.4): no move to an account created in this run, so the account stays enabled even on "disable".
-            [void]$parts.Add('dependents (' + $AppUserName + ' is created in this run, so they are not moved and the account stays enabled even if you choose disable, D24): ' + $deps)
+            [void]$parts.Add('dependents (' + $TargetName + ' is created in this run, so they are not moved and the account stays enabled even if you choose disable, D24): ' + $deps)
         } elseif ($deps) {
-            [void]$parts.Add('dependents (moved to ' + $AppUserName + ' if it is disabled, D24): ' + $deps)
+            [void]$parts.Add('dependents (moved to ' + $TargetName + ' if it is disabled, D24): ' + $deps)
         }
         $detail = $null
         if ($parts.Count -gt 0) { $detail = $parts.ToArray() -join '; ' }
@@ -568,7 +571,8 @@ function Get-CrOperatorAccountName {
 }
 
 # The application account (D24): the managed entry marked Application, i.e. ApplicationUser (v10.6; until v10.5 the
-# only entry with Replaces). Dependents of retired and operator-disabled accounts always move there (v10.4, O5 decided).
+# only entry with Replaces). Dependents of retired and operator-disabled accounts move there (v10.4, O5 decided), or to
+# the operator's account where it does not exist (v10.8, Get-CrDependentTargetEntry).
 function Test-CrAppUserEntry {
     param($Entry)
     if (-not ($Entry -is [hashtable])) { return $false }
@@ -582,6 +586,39 @@ function Test-CrSqlAccessEntry {
     if (-not ($Entry -is [hashtable])) { return $false }
     if ([string]$Entry['SqlAccess'] -eq 'FromReplaced') { return $true }
     return [bool](($Entry['Config'] -is [hashtable]) -and [string]$Entry['Config']['SqlAccess'] -eq 'FromReplaced')
+}
+
+# D24 (v10.8): where the dependents of retired, operator-disabled and orphaned replaced accounts move: the application
+# account (ApplicationUser) when it exists or is created, else the operator's account (SOP-Admin). The resolved entry,
+# or $null.
+function Get-CrDependentTargetEntry {
+    param($Resolved)
+    $operator = $null
+    foreach ($e in (ConvertTo-CrArray $Resolved)) {
+        if (-not ($e -is [hashtable]) -or $e['Kind'] -ne 'Windows' -or $e['Mode'] -ne 'Rotate' -or -not $e['Slot']) { continue }
+        if ((Test-CrAppUserEntry $e) -and -not $e['NotApplicable']) { return $e }
+        if (-not $operator -and (Test-CrOperatorEntry $e)) { $operator = $e }
+    }
+    return $operator
+}
+
+# The display name of an entry's (first) account, also when it is still to be created or does not exist.
+function Get-CrEntryDisplayName {
+    param($Entry)
+    if (-not ($Entry -is [hashtable])) { return $null }
+    foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) { if (($a -is [hashtable]) -and $a['Name']) { return [string]$a['Name'] } }
+    if (($Entry['Config'] -is [hashtable]) -and $Entry['Config']['Name']) { return [string]$Entry['Config']['Name'] }
+    return [string]$Entry['Id']
+}
+
+# v10.8: $true for a managed entry whose own account neither exists nor is created while accounts it replaces exist
+# (ApplicationUser missing, built-in Administrator present). Those accounts are disabled like retired ones (D22) and
+# their dependents move to Get-CrDependentTargetEntry (D24); like retired accounts, only without -Only.
+function Test-CrReplacedRetired {
+    param($Entry)
+    if (-not ($Entry -is [hashtable]) -or $Entry['Kind'] -ne 'Windows' -or $Entry['Mode'] -ne 'Rotate') { return $false }
+    if (-not $Entry['NotApplicable'] -or $Entry['Error']) { return $false }
+    return ((ConvertTo-CrArray $Entry['Replaced']).Count -gt 0)
 }
 
 # Returns a copy of $State in which $MemberSid is also a member of $GroupSids (for "after the group adds" right checks).
@@ -607,6 +644,49 @@ function Copy-CrStateWithMember {
     }
     $copy['Groups'] = $groups.ToArray()
     return $copy
+}
+
+# v10.8: the state the auto-logon step is expected to see after the slots, for the audit and the summary before YES.
+# The account of the auto-logon entry (PUB-User) that the run creates is added under the null SID S-1-0-0 with the groups
+# its role adds; one it enables (EnableIfDisabled) is shown enabled. Returns @{ State; CreatedSid ($null if none) }.
+# $Create: create the missing account; $EnableSids: the existing accounts that are enabled.
+function Get-CrPlannedAutoLogonState {
+    param($State, $Entry, [bool]$Create, [string[]]$EnableSids, [string]$RunningSid)
+    $out = @{ State = $State; CreatedSid = $null }
+    $enable = ConvertTo-CrArray $EnableSids
+    if (-not ($Entry -is [hashtable]) -or (-not $Create -and $enable.Count -eq 0)) { return $out }
+    $copy = @{}
+    foreach ($k in $State.Keys) { $copy[$k] = $State[$k] }
+    $users = New-Object System.Collections.ArrayList
+    foreach ($u in (ConvertTo-CrArray $State['Users'])) {
+        if (($u -is [hashtable]) -and $u['Disabled'] -and ($enable -contains [string]$u['Sid'])) {
+            $c = @{}
+            foreach ($k in $u.Keys) { $c[$k] = $u[$k] }
+            $c['Disabled'] = $false
+            if ($null -ne $c['Flags']) { $c['Flags'] = ([int]$c['Flags']) -band (-bnot 0x2) }
+            [void]$users.Add($c)
+        } else {
+            [void]$users.Add($u)
+        }
+    }
+    if ($Create) {
+        $name = $null
+        foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) { if (($a -is [hashtable]) -and $a['ToCreate'] -and $a['Name']) { $name = [string]$a['Name']; break } }
+        if ($name) {
+            $sid = 'S-1-0-0'
+            [void]$users.Add(@{ Name = $name; Sid = $sid; Disabled = $false; LockedOut = $false; Planned = $true })
+            $copy['Users'] = $users.ToArray()
+            $role = $Entry['Role']
+            if (-not ($role -is [hashtable])) { $role = @{} }
+            $gp = Get-CrGroupPlan -State $copy -Role $role -Sid $sid -RunningSid $RunningSid
+            $add = ConvertTo-CrArray $gp['Add']
+            if (-not $gp['Skip'] -and $add.Count -gt 0) { $copy = Copy-CrStateWithMember -State $copy -MemberSid $sid -GroupSids $add }
+            $out['CreatedSid'] = $sid
+        }
+    }
+    $copy['Users'] = $users.ToArray()
+    $out['State'] = $copy
+    return $out
 }
 
 # D28 (v10.6): the logon types that $ReplacedSid may use and $ReplacementSid may not: 'Interactive' (local) and
@@ -695,7 +775,8 @@ function Get-CrCurrentAutoLogonAccountSlot {
     $i = $current.LastIndexOf('\')
     if ($i -ge 0) { $current = $current.Substring($i + 1) }
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
-        if ($e['Kind'] -ne 'Windows' -or -not $e['Slot']) { continue }
+        # Retired replaced accounts (v10.8) are never processed under -Only.
+        if ($e['Kind'] -ne 'Windows' -or -not $e['Slot'] -or (Test-CrReplacedRetired $e)) { continue }
         foreach ($a in (ConvertTo-CrArray $e['Accounts'])) {
             if ([string]$a['Name'] -ieq $current) { return $e['Slot'] }
         }
@@ -747,14 +828,18 @@ function New-CrPlan {
     }
     $sqlInstalled = (($sql -is [hashtable]) -and $sql['DefaultInstancePresent'])
 
-    # Accounts the run would put on the new secret and that can be verified (enabled; created accounts have no SID yet
-    # and are never auto-logon targets).
+    # Accounts the run would put on the new secret and that can be verified (enabled; created accounts have no SID yet:
+    # a created auto-logon account is added for the auto-logon decision, Get-CrPlannedAutoLogonState).
     $verified = New-Object System.Collections.ArrayList
     $removedAdmins = New-Object System.Collections.ArrayList # accounts leaving Administrators in this run
     $operatorName = Get-CrOperatorAccountName -Resolved $Resolved -Fallback 'the operator account'
-    $appUserName = Get-CrManagedAccountName -Resolved $Resolved -Test { param($e) Test-CrAppUserEntry $e } -Fallback 'the application user'
-    $appUserCreated = $false
-    foreach ($e in (ConvertTo-CrArray $Resolved)) { if ((Test-CrAppUserEntry $e) -and (Test-CrEntryCreated $e)) { $appUserCreated = $true } }
+    # D24 (v10.8): dependents of retired and operator-disabled accounts move to ApplicationUser, or to SOP-Admin without it.
+    $depTarget = Get-CrDependentTargetEntry -Resolved $Resolved
+    $depTargetName = 'the application user'
+    if ($depTarget) { $depTargetName = Get-CrEntryDisplayName $depTarget }
+    $depTargetCreated = [bool]($depTarget -and (Test-CrEntryCreated $depTarget))
+    $depTargetSql = [bool]($depTarget -and (Test-CrSqlAccessEntry $depTarget))
+    $onlyGiven = [bool]($Only -and @($Only).Count -gt 0)
 
     foreach ($entry in (ConvertTo-CrArray $Resolved)) {
         $slot = $entry['Slot']
@@ -777,7 +862,8 @@ function New-CrPlan {
             continue
         }
         if ($isDisable) {
-            Add-CrDisableEntryFindings -Plan $plan -State $State -Entry $entry -RunningSid $RunningSid -OperatorName $operatorName -AppUserName $appUserName -AppUserCreated $appUserCreated
+            Add-CrDisableEntryFindings -Plan $plan -State $State -Entry $entry -RunningSid $RunningSid -OperatorName $operatorName `
+                -TargetName $depTargetName -TargetCreated $depTargetCreated -TargetSqlLogin $depTargetSql
             continue
         }
         foreach ($m in (ConvertTo-CrArray $entry['Missing'])) {
@@ -785,6 +871,12 @@ function New-CrPlan {
         }
         if ($entry['NotApplicable']) {
             Add-CrPlanFinding $plan 'Info' 'Accounts' ('Not applicable on this machine: ' + $entry['Id']) $slot
+            # v10.8: the accounts it replaces (the built-in Administrator without ApplicationUser) are retired.
+            if ((Test-CrReplacedRetired $entry) -and -not $onlyGiven) {
+                $why = 'its replacement ' + (Get-CrEntryDisplayName $entry) + ' does not exist'
+                Add-CrDisableEntryFindings -Plan $plan -State $State -Entry @{ Missing = @(); Accounts = $entry['Replaced'] } -RunningSid $RunningSid `
+                    -OperatorName $operatorName -TargetName $depTargetName -TargetCreated $depTargetCreated -TargetSqlLogin $depTargetSql -Why $why
+            }
             continue
         }
         $slotBlocked = ($slot -and $blockedSlots.ContainsKey($slot))
@@ -813,7 +905,7 @@ function New-CrPlan {
                     if ($u['Disabled']) { Add-CrPlanFinding $plan 'Info' 'Accounts' 'Account is disabled (reported only)' $slot $u['Name'] }
                     if ($u['LockedOut']) { Add-CrPlanFinding $plan 'Info' 'Accounts' 'Account is locked (reported only)' $slot $u['Name'] }
                 } else {
-                    # D21: only an entry with EnableIfDisabled (ApplicationUser) is enabled; the others stay disabled.
+                    # D21: only an entry with EnableIfDisabled is enabled (all managed entries since v10.8); the others stay disabled.
                     $staysDisabled = ($u['Disabled'] -and -not $entry['EnableIfDisabled'])
                     if ($u['Disabled'] -and $entry['EnableIfDisabled']) {
                         Add-CrPlanFinding $plan 'Drift' 'Accounts' 'Enable the account (D21)' $slot $u['Name']
@@ -845,7 +937,7 @@ function New-CrPlan {
     # Unreadable account data is already reported by the per-entry Blocked findings.
     $usersError = Get-CrPrincipalPartError -Part $State['Users'] -Section 'Users'
     if (-not ($Only -and @($Only).Count -gt 0) -and -not $usersError) {
-        Add-CrOtherAccountFindings -Plan $plan -State $State -Resolved $Resolved -AppUserName $appUserName -AppUserCreated $appUserCreated
+        Add-CrOtherAccountFindings -Plan $plan -State $State -Resolved $Resolved -TargetName $depTargetName -TargetCreated $depTargetCreated
     }
 
     # Under -Only the auto-logon step runs when the auto-logon slot or the slot of the
@@ -856,7 +948,22 @@ function New-CrPlan {
         if ($currentSlot) { $runAutoLogon = Test-CrSlotSelected -Slot $currentSlot -Only $Only }
     }
     if ($runAutoLogon) {
-        Add-CrAutoLogonFindings -Plan $plan -State $State -Config $Config -Resolved $Resolved -VerifiedSids $verified.ToArray() -RemovedAdminSids $removedAdmins.ToArray()
+        # v10.8: the auto-logon account (PUB-User) that its slot creates or enables counts as present, enabled and verified.
+        $alState = $State
+        $alEntry = Find-CrAutoLogonEntry -Resolved $Resolved
+        $alSlot = $null
+        if ($alEntry) { $alSlot = [string]$alEntry['Slot'] }
+        if ($alEntry -and -not $alEntry['Error'] -and $alEntry['Mode'] -eq 'Rotate' -and (Test-CrSlotSelected -Slot $alSlot -Only $Only) -and
+            -not ($alSlot -and $blockedSlots.ContainsKey($alSlot))) {
+            $enableSids = New-Object System.Collections.ArrayList
+            foreach ($a in (ConvertTo-CrArray $alEntry['Accounts'])) {
+                if (($a -is [hashtable]) -and $a['Sid'] -and ($a['User'] -is [hashtable]) -and $a['User']['Disabled'] -and $alEntry['EnableIfDisabled']) { [void]$enableSids.Add([string]$a['Sid']) }
+            }
+            $planned = Get-CrPlannedAutoLogonState -State $State -Entry $alEntry -Create (Test-CrEntryCreated $alEntry) -EnableSids ($enableSids.ToArray()) -RunningSid $RunningSid
+            $alState = $planned['State']
+            if ($planned['CreatedSid']) { [void]$verified.Add($planned['CreatedSid']) }
+        }
+        Add-CrAutoLogonFindings -Plan $plan -State $alState -Config $Config -Resolved $Resolved -VerifiedSids $verified.ToArray() -RemovedAdminSids $removedAdmins.ToArray()
     }
 
     $plan['HighImpact'] = @($plan['Findings'] | Where-Object { $_['Severity'] -eq 'HighImpact' })

@@ -63,6 +63,7 @@ function Get-CrFilterDriverInfo {
 
 #region Computer and policy
 
+# $null without a configured pattern (v10.8): then no machine is restricted.
 function Get-CrRestrictedComputerPattern {
     param($Config)
     if ($Config -is [hashtable]) {
@@ -72,7 +73,7 @@ function Get-CrRestrictedComputerPattern {
             }
         }
     }
-    return '^SM'
+    return $null
 }
 
 function Get-CrComputerInfo {
@@ -106,7 +107,9 @@ function Get-CrComputerInfo {
     }
     try {
         $pattern = Get-CrRestrictedComputerPattern -Config $Config
-        $info['IsSm'] = [regex]::IsMatch([string]$info['Name'], $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($pattern) {
+            $info['IsSm'] = [regex]::IsMatch([string]$info['Name'], $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
     } catch {
         if (-not $info['Error']) { $info['Error'] = 'RestrictedComputerPattern: ' + $_.Exception.Message }
     }

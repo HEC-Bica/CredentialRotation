@@ -66,7 +66,7 @@ $State = @{
 ```
 
 ### Computer
-`@{ Name; IsSm; OsVersion ('6.1.7601'); OsCaption; Is64BitOs; Is64BitProcess; PSVersion ('2.0'); ClrVersion; LanguageMode; IsElevated; PartOfDomain; MachineSid; SystemDrive ('C:') }`. `IsSm` = name matches the auto-logon `RestrictedComputerPattern` (case-insensitive).
+`@{ Name; IsSm; OsVersion ('6.1.7601'); OsCaption; Is64BitOs; Is64BitProcess; PSVersion ('2.0'); ClrVersion; LanguageMode; IsElevated; PartOfDomain; MachineSid; SystemDrive ('C:') }`. `IsSm` = name matches the auto-logon `RestrictedComputerPattern` (case-insensitive); `$false` when the config has none (the default config since v10.8).
 
 ### Policy
 `@{ MinPasswordLength; MaxPasswordAgeSeconds; MinPasswordAgeSeconds; PasswordHistoryLength; LockoutThreshold; LockoutDurationSeconds; LockoutObservationSeconds; ComplexityEnabled; ForceGuest }`. Numbers are `[int]`/`[long]`; `ComplexityEnabled` and `ForceGuest` are `$true`/`$false`/`$null` (unknown). Max age "never" = `-1`.
@@ -251,36 +251,36 @@ Stored as `<log root>\journal.clixml` (`Export-Clixml -Path` / `Import-Clixml -P
 
 # v10: account model (D18, D21–D25; PLAN v10.4) — supersedes the M2 parts above where they conflict
 
-PLAN v10.7: §1, §1.1, D9, D18, D20–D30, §5 config example, §6 steps 6–7, §7.5, §7.9 (D29), §8 slot order and enforcement phase. History: v10 introduced `SOP-Admin`/`PUB-User` as created target accounts; v10.1 returned the auto-logon accounts to the v9 model; v10.2 dropped `SOP-Admin` and kept `BiCA Admin`/`BiCA Remote`; v10.3 creates missing BiCA accounts; v10.5 retires `SYS-Admin` (hyphen spelling of `SYS Admin`), keeps existing `SOP-Admin` and `SP Admin` accounts untouched with `Mode = 'Keep'` (D26) and removes the SQL login slots and entries (D27); v10.4 records the decisions on review round 12 (always move dependents to `ApplicationUser`, no move to a created account, strict budget, no `-LogPath`); v10.6 makes `SOP-Admin` the managed operator account that replaces `BiCA Admin` and `BiCA Remote` (D28) and gets the SQL Server access of their Windows logins (D29); v10.7 makes `SP Admin` a managed account with its own slot (D30) and keeps no account untouched.
+PLAN v10.8: §1, §1.1, D9, D18, D20–D31, §5 config example, §6 steps 6–7, §7.5, §7.9 (D29), §8 slot order and enforcement phase. History: v10 introduced `SOP-Admin`/`PUB-User` as created target accounts; v10.1 returned the auto-logon accounts to the v9 model; v10.2 dropped `SOP-Admin` and kept `BiCA Admin`/`BiCA Remote`; v10.3 creates missing BiCA accounts; v10.5 retires `SYS-Admin` (hyphen spelling of `SYS Admin`), keeps existing `SOP-Admin` and `SP Admin` accounts untouched with `Mode = 'Keep'` (D26) and removes the SQL login slots and entries (D27); v10.4 records the decisions on review round 12 (always move dependents to `ApplicationUser`, no move to a created account, strict budget, no `-LogPath`); v10.6 makes `SOP-Admin` the managed operator account that replaces `BiCA Admin` and `BiCA Remote` (D28) and gets the SQL Server access of their Windows logins (D29); v10.7 makes `SP Admin` a managed account with its own slot (D30) and keeps no account untouched; v10.8 (D31) makes `PUB-User` the created auto-logon account that replaces `WinAutoUser` (every active auto-logon is switched to it, also on SM machines), never creates `ApplicationUser` (without it the built-in Administrator is retired and dependents move to `SOP-Admin`) and enables every managed account.
 
 ## Config (Config.ps1, config/CredentialRotation.psd1)
 
 - Roles: `Admin`, `AdminRemote` (v10.6, `SOP-Admin`: Administrators + Remote Desktop Users + `Name:Offer Remote Assistance Helpers?`, exclusive), `User`, `WinUser`, `Ftp`. `RotateOnly` and `Operator` are gone.
 - Slots, in `Order`: `AppUser` 20, `AutoLogon` 30, `SPAdmin` 40 (v10.7, D30), `SOPAdmin` 90 (last, D25). `BiCAAdmin`/`BiCARemote` are gone (v10.6).
-- Entries: `SOPAdmin`, `AppUser`, `SPAdmin` (v10.7: `Role = 'Admin'`, `Create`, dependents `Auto`, nothing else), `AutoLogon`, `Retired` (Disable), `WinUsers`, `FtpUsers` (Check). No `Keep` entry since v10.7; `Mode = 'Keep'` stays supported (tests add one). No SQL slots and no `SqlLogin` entries since v10.5 (D27); `Kind = 'SqlLogin'` stays supported (tests use `New-CrTestSqlConfig`).
+- Entries: `SOPAdmin`, `AppUser` (no `Create` since v10.8), `SPAdmin` (v10.7: `Role = 'Admin'`, `Create`, `EnableIfDisabled` since v10.8, dependents `Auto`, nothing else), `AutoLogon`, `Retired` (Disable), `WinUsers`, `FtpUsers` (Check). No `Keep` entry since v10.7; `Mode = 'Keep'` stays supported (tests add one). No SQL slots and no `SqlLogin` entries since v10.5 (D27); `Kind = 'SqlLogin'` stays supported (tests use `New-CrTestSqlConfig`).
 - Account keys of managed (Rotate) Windows entries:
-  - `Create` (bool; single `Name` only; not with `AutoLogon`)
-  - `Replaces` (string[]: names or `RID-500`; `SOPAdmin`: `BiCA Admin`, `BiCA Remote`; `AppUser`: `RID-500`)
+  - `Create` (bool; single `Name` only; allowed with `AutoLogon` since v10.8; `SOPAdmin`, `SPAdmin`, `AutoLogon`)
+  - `Replaces` (string[]: names or `RID-500`; `SOPAdmin`: `BiCA Admin`, `BiCA Remote`; `AppUser`: `RID-500`; `AutoLogon`: `WinAutoUser`, v10.8)
   - `PasswordMode` (`'Set'` default | `'Change'`)
   - `Operator` (bool; single `Name`; at most one entry: the operator's account, D25; `SOPAdmin`)
-  - `EnableIfDisabled` (bool: an existing disabled account is enabled; in the default config `AppUser` and `SOPAdmin`)
+  - `EnableIfDisabled` (bool: an existing disabled account is enabled; in the default config every Rotate entry since v10.8: `SOPAdmin`, `AppUser`, `SPAdmin`, `AutoLogon`)
   - `Application` (bool, v10.6; single `Name`; at most one entry: the target of the dependents of retired and operator-disabled accounts, D24; `AppUser`). Until v10.5 this was "the entry with `Replaces`".
   - `SqlAccess` (v10.6, D29; only `'FromReplaced'`; requires `Replaces`): the account gets the SQL Server access of the accounts it replaces; `SOPAdmin`
 - `Mode` values: `'Check'` | `'Disable'` | `'Keep'` (a `Disable` or `Keep` entry has only `Id`, `Kind`, `Name`/`Names` and `Mode`; `Keep`: v10.5, D26). `Candidates` stays supported but the default config doesn't use it.
 - Top-level `OtherEnabledAccounts = 'Ask'` (only value).
-- The `AutoLogon` entry: `Names = @('PUB-User','WinAutoUser')`, `AutoLogonUser = @( @{ Name = 'PUB-User' }, @{ Name = 'WinAutoUser' } )` (only key: `Name`), the `AutoLogon` block, `Services`/`ScheduledTasks`/`ComPlus = 'Auto'`.
+- The `AutoLogon` entry (v10.8): `Name = 'PUB-User'`, `Create`, `EnableIfDisabled`, `Replaces = @('WinAutoUser')`, `AutoLogonUser = @( @{ Name = 'PUB-User' } )` (only key: `Name`), `AutoLogon = @{ Mode = 'IfAlreadyOn' }`, `Services`/`ScheduledTasks`/`ComPlus = 'Auto'`. `RestrictedComputerPattern` is optional (v10.8): validated only when present; without it `Get-CrRestrictedComputerPattern` returns `$null` and `Computer.IsSm` stays `$false`.
 - Validation:
   - `Replaces` entries are names or `RID-500`; a name may be replaced by one entry only.
   - A `Disable` or `Keep` entry has no Role/Credential, no dependents, no `NamePattern`/`Candidates` and no managed keys.
   - `PasswordMode` only on Windows entries with a Credential.
   - `AutoLogonUser` must list exactly the entry's `Name`/`Names`.
-  - An auto-logon account must not be in any `Replaces`, `Disable` or `Keep` entry.
+  - An auto-logon account (an `AutoLogonUser` name) must not be in any `Replaces`, `Disable` or `Keep` entry. `WinAutoUser` is no auto-logon account since v10.8.
 - `Get-CrConfigSlotNames -Config` → slot names; `Get-CrUnknownOnlySlots -Config -Only` → the `-Only` names that are no slot (case-insensitive). The entry point exits 2 when there are any.
 
 ## Resolution (Principals.ps1)
 
 Resolved entries gain:
-- `Create` = `$true` when the entry has `Create` and its account doesn't exist (then `Accounts` holds one placeholder `@{ Name; Sid = $null; User = $null; ToCreate = $true }`, `NotApplicable = $false`, `Missing` empty)
+- `Create` = `$true` when the entry has `Create` and its account doesn't exist (then `Accounts` holds one placeholder `@{ Name; Sid = $null; User = $null; ToCreate = $true }`, `NotApplicable = $false`, `Missing` empty). A missing account without `Create` (e.g. `ApplicationUser`, v10.8): `NotApplicable = $true`, the name in `Missing`, `Replaced` still filled.
 - `PasswordMode`, `Operator`, `EnableIfDisabled`, `Application` (bools from the entry; `$false` for non-Rotate entries); `SqlAccess` (the entry's value for Rotate Windows entries, else `$null`)
 - `Replaced = @(@{ Name; Sid; User; Enabled })` — existing accounts named in `Replaces` (RID-500 via the machine SID); a replaced account that is already disabled is listed with `Enabled = $false`
 - For `Mode = 'Disable'` entries: `Mode = 'Disable'`, `Accounts` = the existing ones
@@ -293,6 +293,12 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
 - `Get-CrPlannedLogonGaps -State -Entry -ReplacedSid -RunningSid` → the gaps once the entry's account has its role groups (an account still to be created is represented by `S-1-0-0`)
 - `Get-CrReplacementBlocker -State -Entry -ReplacedSid -ReplacedName -Preflight -RunningSid` → why an account replaced by the entry stays enabled, judged before the run, or `$null`: its SQL access plan is unknown or blocked (D29), or, for the `Operator` entry, a logon gap (D28). Used by `New-CrPlan` and `Get-CrApplyDisablePlan`.
 
+v10.8 helpers (Plan.ps1, used by Apply.ps1 too):
+- `Get-CrDependentTargetEntry -Resolved` → where the dependents of retired, operator-disabled and orphaned replaced accounts move (D24): the `Application` entry if its account exists or is created (not `NotApplicable`), else the `Operator` entry; `$null` if neither exists.
+- `Get-CrEntryDisplayName -Entry` → the entry's first account name, else the config `Name`, else the `Id`.
+- `Test-CrReplacedRetired -Entry` → `$true` for a Rotate Windows entry that is `NotApplicable` (own account missing and not created) without `Error` and has `Replaced` accounts (the built-in Administrator without `ApplicationUser`): those accounts are retired like a `Disable` entry (D22), only without `-Only`.
+- `Get-CrPlannedAutoLogonState -State -Entry -Create -EnableSids -RunningSid` → `@{ State; CreatedSid }`: a copy of `$State` for the auto-logon decision of the audit and the summary before YES. The entry's account to be created is added as `S-1-0-0` (`Planned = $true`) with the groups its role adds (`Get-CrGroupPlan`, `Copy-CrStateWithMember`); `EnableSids` are shown enabled. `CreatedSid` counts as verified.
+
 ## Audit findings (Plan.ps1)
 
 `New-CrPlan` adds:
@@ -300,10 +306,12 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
 - for an entry with `SqlAccess` (`Add-CrSqlAccessFindings`, D29): `Drift` "SQL Server: create the Windows login <computer>\<name>, add it to the server role …" (detail: the source logins), `HighImpact` when the access is unknown or can't be granted now, `Info` when it is in place, `HighImpact` per report-only note (named instances, roles not copied, database permissions, Agent job owners, a disabled source login)
 - `HighImpact` "Not disabled: <Get-CrReplacementBlocker>" instead of the disable and move findings of a replaced account (D28, D29)
 - for a disabled managed account: `Drift` "Enable the account" only with `EnableIfDisabled`; otherwise `Info` "stays disabled", and it doesn't count as verified for the auto-logon decision
+- for a `NotApplicable` entry with replaced accounts (`Test-CrReplacedRetired`, without `-Only`, v10.8): `Add-CrDisableEntryFindings -Why 'its replacement <name> does not exist'` → `Drift` "Disable <name> (its replacement ApplicationUser does not exist)" or `Info` "Already disabled (…, D22)", with the move findings to `Get-CrDependentTargetEntry`
+- the auto-logon findings on `Get-CrPlannedAutoLogonState` (v10.8) when the auto-logon slot is selected and not blocked
 - `Drift` "Disable <name> (replaced by X)" per enabled replaced account and per enabled `Disable` account
-- `HighImpact` "Move <service/task/COM+> from <old> to <target>" per dependent of an account to be disabled (D24): the replacement, or `ApplicationUser` for retired and other accounts (v10.4)
+- `HighImpact` "Move <service/task/COM+> from <old> to <target>" per dependent of an account to be disabled (D24): the replacement, or for retired and other accounts `Get-CrDependentTargetEntry` (`ApplicationUser`, v10.4; `SOP-Admin` without it, v10.8)
 - `HighImpact` "Not disabled: <target> is created in this run …; migrate them manually (D24)" instead of the disable and move findings, when the target account is created in this run and the account has movable dependents
-- `Ambiguous` "Operator decides: disable or keep <name>" per other enabled account (D23); the detail lists its dependents, which move to `ApplicationUser` if it is disabled
+- `Ambiguous` "Operator decides: disable or keep <name>" per other enabled account (D23); the detail lists its dependents, which move to the `Get-CrDependentTargetEntry` account if it is disabled
 - `HighImpact` "the running account <name> is disabled at the end; log on as <operator> next time" when the running account is to be disabled (D25)
 - `HighImpact` for an unreadable task folder (dependents there unknown)
 - no probe-type finding for set accounts
@@ -335,7 +343,7 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
 ## Secrets.ps1
 
 - `Read-CrSlotSecrets`:
-  - new password twice per slot; one prompt for all accounts of a slot (the auto-logon slot: every existing `PUB-User`/`WinAutoUser`)
+  - new password twice per slot; one prompt for all accounts of a slot (the auto-logon slot: `PUB-User` only since v10.8)
   - old password **only** for accounts with `PasswordMode = 'Change'` that exist; created and set accounts get no old-password prompt
   - `Reapply` only for Change accounts (Set accounts: setting the same value is harmless)
   - a failing `Test-CrLocalPasswordPolicy` call (no `Status`, or an exception) is a warning, not a rejection (`Get-CrNewSecretProblems`, v10.4); only a policy verdict rejects
@@ -349,11 +357,12 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
 ## AutoLogon.ps1
 
 - `Get-CrAutoLogonDecision -State -Resolved -Config -VerifiedSids -RemovedAdminSids` (no `-CreatedTargetNames`; `TargetCreated` is gone):
-  - The managed auto-logon accounts are the `AutoLogonUser` list (`PUB-User`, `WinAutoUser`).
+  - The managed auto-logon accounts are the `AutoLogonUser` list (`PUB-User` only since v10.8).
   - An active auto-logon as one of them is **kept** on every machine: `Standardize` if usable and verified, `NoChange` if usable but not on a new secret, `Ambiguous` if not usable.
-  - Any other account → `TurnOff` (SM) or `Switch` to the first usable account of the list (other machines; `Ambiguous` if none, or if the target isn't verified).
+  - Any other account (incl. `WinAutoUser` since v10.8) → `Switch` to the first usable account of the list (`Ambiguous` if none, or if the target isn't verified); `TurnOff` only where `Computer.IsSm` (a configured `RestrictedComputerPattern`; none in the default config since v10.8).
+  - The audit (`New-CrPlan`) and the summary before YES (`Get-CrApplyAutoLogonPreview`) call it with `Get-CrPlannedAutoLogonState`; the apply step with the real state after the slots (a created account is in `State.Users` via `Add-CrApplyCreatedUser`, an enabled one via `Set-CrApplyUserDisabled`).
   - `OperatorOptions` are `TurnOff` and `LeaveUnchanged` only (`StandardizeCurrent` is gone).
-- `Test-CrAutoLogonUsable -State -User -RemovedAdminSids` (no `-VerifiedSids`): a disabled account is never usable, because the auto-logon accounts are never enabled (D21).
+- `Test-CrAutoLogonUsable -State -User -RemovedAdminSids` (no `-VerifiedSids`): a disabled account is not usable; `PUB-User` is enabled by its slot before the step (`EnableIfDisabled`, v10.8).
 - `Invoke-CrAutoLogonAction` has no `StandardizeCurrent` action. `Switch` starts with step `AutoAdminLogonOff` (v10.4), then the Standardize steps (with `RemoveAutoLogonSID`) and `AutoAdminLogonOn` last.
 
 ## Apply.ps1 / entry point
@@ -371,15 +380,15 @@ Helpers (Plan.ps1, used by Apply.ps1 too): `Get-CrOperatorAccountName -Resolved 
   A disabled account is not logon-tested (reported "cannot be verified"). When a slot stops after step 2, the accounts already on the new password are still logon-tested (`Invoke-CrApplyVerifyOnNew`).
 - Enforcement per PLAN §8:
   1. removals
-  2. dependent moves (D24; only to a verified replacement, or to `ApplicationUser` for retired and operator-disabled accounts; never to an account created in this run or in an earlier unfinished run per the journal step `Created` — the account then stays enabled)
+  2. dependent moves (D24; only to a verified replacement, or for retired and operator-disabled accounts to `Get-CrDependentTargetEntry`: `ApplicationUser`, or `SOP-Admin` without it (v10.8; `Get-CrApplyMoveTarget` then also needs `$Context['SqlAccess']` Ok for an entry with `SqlAccess`); never to an account created in this run or in an earlier unfinished run per the journal step `Created` — the account then stays enabled)
   3. auto-logon step (a kept account that got a new password but couldn't be verified → `HighImpact` "auto-logon broken until re-run")
   4. disabling: replaced + `Disable` entries + operator-chosen others. Never the running account. An account stays enabled if one of its dependents couldn't be moved or it is still the auto-logon account. Nothing is disabled while dependents are unknown. A replaced account also needs (`Get-CrApplyReplacementReason`, called by `Get-CrApplyDisableBlocker`) its replacement's slot `Done`, the replacement verified and enabled, `$Context['SqlAccess']` Ok for an entry with `SqlAccess` (D29) and, for the `Operator` entry, no logon gap on the current state (D28). Since v10.7 the dependent moves of a replaced account (step 2) need the same, so nothing moves to a replacement whose slot failed (e.g. at `SqlAccess`).
   5. check-mode fixes
   6. **running account last (D25)**, only if it is itself to be disabled, and the `Operator` entry's account (`Get-CrApplyOperatorEntry -Resolved`) is not the running account and is enabled, in Administrators, verified and holds an effective `RemoteInteractive` right (`Get-CrEffectiveLogonRights`).
-- `Get-CrApplyAppUserEntry -Resolved`: the managed entry with `Replaces` (`Test-CrAppUserEntry`).
+- `Get-CrApplyAppUserEntry -Resolved`: the managed entry marked `Application` (`Test-CrAppUserEntry`). The disable plan uses `Get-CrDependentTargetEntry` instead (v10.8).
 - `Find-CrApplyUserByName` ignores a `X\` prefix (e.g. `.\Bica Admin` in `DefaultUserName`).
 - Follow-ups: LOGINS for accounts whose password changed or was created; `RDP` "Update the saved RDP credentials" for the `Operator` entry's account after its set (v10.4); IIS as before; "log on as <operator> next time" after D25.
-- `Get-CrApplyDisablePlan -State -Resolved -Preview -RunningSid -Only -OtherDecisions [-Preflight]` (no `-DependentDecisions`): items without `NeedsDecision`/`Decision`; `MoveEntry` = the replacement entry, or the application entry for `Disable` and `Other` items with dependents; `Planned = $false` with a reason when the move target is created in this run (`Test-CrApplyEntryCreated -Preview -Entry`), or for a replaced account when `Get-CrReplacementBlocker` (with `-Preflight`'s `SqlWriteBlocked`) returns a reason (v10.6).
+- `Get-CrApplyDisablePlan -State -Resolved -Preview -RunningSid -Only -OtherDecisions [-Preflight]` (no `-DependentDecisions`): items without `NeedsDecision`/`Decision`; `MoveEntry` = the replacement entry, or `Get-CrDependentTargetEntry` for `Disable` and `Other` items with dependents; the replaced accounts of a `Test-CrReplacedRetired` entry are `Disable` items (only without `-Only`) with `Why = 'its replacement <name> does not exist'` (v10.8; `Invoke-CrApplyDisableOne` reports "retired, <Why> (D22)", `Get-CrApplyAccountFates` fate `disable`); `Planned = $false` with a reason when the move target is created in this run (`Test-CrApplyEntryCreated -Preview -Entry`), or for a replaced account when `Get-CrReplacementBlocker` (with `-Preflight`'s `SqlWriteBlocked`) returns a reason (v10.6).
 - Exit code (v10.4): 1 also when a selected slot ends `Skipped` or `Blocked`, except the SQL slots of this version (`Unsupported = $true`); `Invoke-CrApply` returns `NotAppliedSlots`. Exit 1 also when a verification was skipped by the D12 budget (`VerifyIncomplete`). An account kept enabled because its move target is created in this run (`MigrateManually` on the disable item) gets a `FollowUp` "Migrate ... manually, then disable it (D24)". The entry point completes the journal run only when the exit code is not 1, so a partial run stays unfinished for the re-run (D11).
 
 - **ForceGuest (D16):** when `State.Policy.ForceGuest` is `True`, `Select-CrProbeLogonType` must not choose `Network` (Windows may map a local network logon to Guest, which would accept any password); it uses the next allowed type, or `Unverifiable` if none.
