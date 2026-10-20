@@ -1,6 +1,13 @@
 # Credential Rotation Tool — Implementation Plan
 
-Status: draft v10.5 · 2026-10-19.
+Status: draft v10.6 · 2026-10-19.
+- **v10.6:** user decision (2026-10-19, D21, D22, D24–D29): **`SOP-Admin` replaces `BiCA Admin` and `BiCA Remote` on every machine.**
+  - `SOP-Admin` is the managed admin account and the operator's account (D28). A missing one is created; an existing one is taken over: its password is set, its role enforced and it is enabled if disabled. Its slot `SOPAdmin` is the last slot (D25).
+  - `BiCA Admin` and `BiCA Remote` are replaced accounts (D22): no new password any more, disabled once `SOP-Admin` is verified, has their SQL Server access and may log on wherever they could. Their dependents move to `SOP-Admin` (D24).
+  - **SQL Server (D29):** `SOP-Admin` gets a Windows login on the default instance with the fixed server roles of the BiCA logins (`sysadmin` on every test machine). The tool writes it as the running account. Without it, the BiCA accounts stay enabled.
+  - `BiCA Remote` as the running account is disabled last, as in D25.
+  - Only `SP Admin` is still kept untouched (D26). D27 stays: no SQL credential is changed; the D29 login has no password.
+  - Supersedes v10.2, the BiCA parts of v10.3 (O7, O8) and D26 for `SOP-Admin`. The v10 decisions on `SOP-Admin` (§13.1: replaces both BiCA accounts, its groups, `BiCA Remote` disabled last, a `sysadmin` login) are back in force.
 - **v10.5:** user decisions (2026-10-19, D22, D26, D27):
   - `SYS-Admin` is the same account as `SYS Admin`, spelled with a hyphen on some machines. Both spellings are retired: always disabled (D22).
   - Existing `SOP-Admin` and `SP Admin` accounts are **kept untouched** (D26): no longer retired, never changed and not put to the operator. The config gets a new entry mode, `Mode = 'Keep'`.
@@ -28,7 +35,7 @@ Status: draft v10.5 · 2026-10-19.
   - Every existing one, enabled or disabled, gets the one auto-logon password, entered once (twice for confirmation).
   - An active auto-logon as either of them is kept.
 - **v10:** account model redesigned (D21–D25): target accounts are created if missing, the accounts they replace are disabled, and passwords are **set** (only `ApplicationUser` is changed with its old password). v10.1 and v10.2 reverted parts of it; what remains is `ApplicationUser` created if missing, the built-in Administrator disabled, retired accounts disabled, the operator decision on other accounts, and set passwords.
-- Sections not yet rewritten in detail defer to D18 and D21–D27 where they conflict.
+- Sections not yet rewritten in detail defer to D18 and D21–D29 where they conflict.
 - Twelve rounds of independent review (Appendix A).
 - Updated with the **M0 inventories of two test sites** (§13.2) and the user's decisions on their findings:
   - **QS-K1:** `SM-QS-K1` and `IPT01-QS-K1`, Windows 10 LTSC 2019
@@ -37,22 +44,22 @@ Status: draft v10.5 · 2026-10-19.
 
 ## 1. Goal and scope
 
-A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP1 x64 incl. Windows Embedded Standard 7, Windows 10 x64). The operator copies it over RDP to `C:\temp` and runs it from there while logged on as `BiCA Remote`. **The tool only cares about the local credentials of the machine it runs on.** It:
+A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP1 x64 incl. Windows Embedded Standard 7, Windows 10 x64). The operator copies it over RDP to `C:\temp` and runs it from there, logged on as `BiCA Remote` until `SOP-Admin` is in place and as `SOP-Admin` afterwards (D2, v10.6). **The tool only cares about the local credentials of the machine it runs on.** It:
 
 1. **Lists the existing and enabled local Windows accounts** first (D21).
-2. Manages **three admin accounts** (D21), each with its own new password:
-   - `BiCA Admin`
-   - `BiCA Remote`, the operator's logon account
+2. Manages **two admin accounts** (D21, v10.6), each with its own new password:
+   - `SOP-Admin`, the operator's logon account, which replaces `BiCA Admin` and `BiCA Remote` (D28)
    - `ApplicationUser`, which runs the application
    
-   Missing ones are created (v10.3). The tool **sets** the passwords (D9 revised: only `ApplicationUser` is *changed* with its old password, to keep its DPAPI data).
+   Missing ones are created. The tool **sets** the passwords (D9 revised: only `ApplicationUser` is *changed* with its old password, to keep its DPAPI data).
 3. **Sets the auto-logon password** on every existing auto-logon account (`PUB-User`, `WinAutoUser`), enabled or disabled, with one password entered once (D21, v10.1). These accounts are never created, enabled or disabled by the tool.
-4. ~~Sets the passwords of 3 SQL Server logins.~~ Updates **no SQL credentials** (D27, v10.5). The Windows dependents of the rotated accounts are still updated, among them the SQL Server service when it runs as `ApplicationUser`.
+4. ~~Sets the passwords of 3 SQL Server logins.~~ Updates **no SQL credentials** (D27, v10.5). It gives `SOP-Admin` a Windows login on the default instance with the server roles of the BiCA logins (D29, v10.6). The Windows dependents of the rotated accounts are still updated, among them the SQL Server service when it runs as `ApplicationUser`.
 5. **Disables accounts** (D22):
+   - `BiCA Admin` and `BiCA Remote`, replaced by `SOP-Admin` (v10.6)
    - the built-in Administrator, replaced by `ApplicationUser`
    - the retired account `SYS Admin`, also spelled `SYS-Admin` (v10.5)
    
-   Existing `SOP-Admin` and `SP Admin` accounts are kept untouched (D26, v10.5). Other enabled accounts are put to the operator one by one (D23). `WinUser1–3` and the FTP users are kept and checked as before.
+   An existing `SP Admin` is kept untouched (D26). Other enabled accounts are put to the operator one by one (D23). `WinUser1–3` and the FTP users are kept and checked as before.
 6. Enforces the role of every managed account and checks/fixes the `WinUser` and FTP accounts.
 7. Updates everything on the machine that depends on these passwords: services, scheduled tasks and COM+ applications. It **moves dependents of disabled accounts to the replacement account** (D24).
 8. Enforces the **auto-logon policy** (D18). Auto-logon only ever runs as `PUB-User` or `WinAutoUser`, never as an admin, and an active auto-logon as either of them is kept.
@@ -66,31 +73,31 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 
 | Account | Selection rule | Action | Target state | LOGINS entry |
 |---|---|---|---|---|
-| **`BiCA Admin`** | by name; **created if missing** (v10.3) | **set** password (D9); plus its own dependents | Administrators only · PNE · CCP · PR. Enabled state of an existing account unchanged | yes |
-| **`BiCA Remote`** | by name; **created if missing** (v10.3); the operator's logon account | **set** password, as the **last** slot (§8, D25); plus its own dependents | Administrators + `Offer Remote Assistance Helpers` (added if the group exists) only · PNE · CCP · PR. **Allowed extra group** (kept, never added): `Remote Desktop Users` | yes |
+| **`SOP-Admin`** (v10.6) | by name; **created if missing**; an existing one is taken over; the operator's logon account | **set** password, as the **last** slot (§8, D25); plus its own dependents; replaces `BiCA Admin` and `BiCA Remote` (D28); gets their SQL Server access (D29) | Administrators + Remote Desktop Users + `Offer Remote Assistance Helpers` (added if the group exists) only · enabled · PNE · CCP · PR | yes, in place of the `BiCA Admin`/`BiCA Remote` entries |
+| Replaced BiCA accounts (v10.6) | `BiCA Admin`, `BiCA Remote` where they exist | **disable only** (D22), once `SOP-Admin` is verified, has their SQL Server access (D29) and may log on locally and over RDP wherever they could (D28); their dependents move to `SOP-Admin` (D24); a running `BiCA Remote` is disabled last (D25). No new password: one that stays enabled keeps its old password (reported) | disabled | — |
 | **`ApplicationUser`** | by name; **created if missing** | **change** with the old password (keeps DPAPI, D9); if that fails the operator chooses set/skip; plus dependents: services, scheduled tasks, COM+; replaces the built-in Administrator | Administrators only · enabled · PNE · CCP · PR | yes |
 | **Auto-logon accounts:** `PUB-User`, `WinAutoUser` | by name; **every existing one, enabled or disabled**; **never created** (v10.1) | **set** password: all of them get the one auto-logon slot password (D9). Enabled state unchanged: the tool never enables or disables them. The active auto-logon account keeps its auto-logon (D18) | Users only · PNE · CCP · PR | no |
 | Replaced account | the built-in Administrator (RID 500, possibly renamed) | **disable only** (groups and password unchanged, D22); dependents moved to `ApplicationUser` (D24) | disabled | — |
 | Retired accounts | `SYS Admin` and its hyphen spelling **`SYS-Admin`** (v10.5; `SP Admin` until v10.4) | **disable only** (D22); their dependents are moved to `ApplicationUser` (D24, v10.4); if one is the running account, it is disabled last (D25) | disabled | — |
-| Kept accounts | `SOP-Admin` and `SP Admin` where they exist (v10.5) | **nothing** (D26): password, groups, flags, rights, enabled state and dependents stay as they are; not put to the operator (D23); not disabled as the running account (D25) | unchanged | — |
+| Kept accounts | `SP Admin` where it exists (v10.5; `SOP-Admin` until v10.5) | **nothing** (D26): password, groups, flags, rights, enabled state and dependents stay as they are; not put to the operator (D23); not disabled as the running account (D25) | unchanged | — |
 | Other enabled accounts | every enabled local account not listed in this table | **the operator decides per account** before `YES`: disable or keep (D23); the dependents of a disabled one are moved to `ApplicationUser` (D24) | as decided | — |
 | `WinUser1`, `WinUser2`, `WinUser3` | by name | **check + fix**, no password change | Users · PNE · CCP. **Allowed extra groups** (kept, never added): `Remote Desktop Users`, groups named `hw_fn_*`. All other groups are removed | — |
 | FTP users (0–3 per machine) | name starts or ends with `ftp`, case-insensitive | **check + fix**, no password change | CardCenters only · PNE · CCP. **Removed from Users** too (confirmed; `SM-102575` has `AG_FTP` and `LVSTG_FTP` in CardCenters + Users). If `CardCenters` doesn't exist: report, leave groups unchanged | — |
 | `SQLApplication`, `SQLScript`, `SQLService` | SQL logins on the default instance | **not managed** (D27, v10.5): no password or role change, no `LOGINS` follow-up | unchanged | — |
 
-- PNE = password never expires. CCP = user cannot change password. PR = password required: the flag `UF_PASSWD_NOTREQD` (0x20) is cleared after the new password is set. `BiCA Admin` has that flag on all four test machines today.
+- PNE = password never expires. CCP = user cannot change password. PR = password required: the flag `UF_PASSWD_NOTREQD` (0x20) is cleared after the new password is set. `BiCA Admin` has that flag on all four test machines today; it is no longer managed (v10.6).
 - "X only" = member of X and removed from all other local groups, except the listed allowed extra groups.
 - Each slot has its own password. The auto-logon slot covers both auto-logon accounts. The same password is used on every machine of a **site** (2–3 machines).
-- `BiCA Admin`, `BiCA Remote` and `ApplicationUser` are **created if missing** (D21, v10.3), with the slot password, their role groups and flags.
-  - Only `ApplicationUser` is also enabled if it exists but is disabled (it runs the application). Its old password can't be validated while it is disabled (`LogonUser` is refused), so it can't be changed: the operator chooses set (DPAPI data lost) or skip, and it is enabled after the set.
-  - An existing disabled `BiCA Admin`/`BiCA Remote` stays disabled and is reported.
-  - A created account has a new SID, so it has no Windows login in SQL Server (logins are bound to the SID, §7.9). This is reported; creating SQL logins is out of scope.
+- `SOP-Admin` and `ApplicationUser` are **created if missing** (D21), with the slot password, their role groups and flags.
+  - Both are also enabled if they exist but are disabled (`EnableIfDisabled`). `ApplicationUser` runs the application; its old password can't be validated while it is disabled (`LogonUser` is refused), so it can't be changed: the operator chooses set (DPAPI data lost) or skip, and it is enabled after the set. `SOP-Admin` is set anyway and enabled after the set (v10.6).
+  - A created account has a new SID, so it has no Windows login in SQL Server (logins are bound to the SID, §7.9). For `ApplicationUser` this is reported; `SOP-Admin` gets its login from the tool (D29).
+- On the QS-K1 machines a WIP build created `SOP-Admin` on 2026-10-07 and disabled `BiCA Remote` (§13.2). v10.6 takes that `SOP-Admin` over and still copies the SQL access of the disabled `BiCA Remote` (its login stays `sysadmin`).
 - `PUB-User` and `WinAutoUser` are never created. With neither present, the auto-logon slot is "not applicable". No managed account is the renamed built-in Administrator (confirmed). The tool still checks for SID overlap (§5).
 - Every Windows slot updates its accounts' own services, password-stored tasks and COM+ identities: a set breaks stored credentials just like a change (D8).
 - **Not touched:**
   - `sa`
-  - `SOP-Admin` and `SP Admin` (D26, v10.5): kept by a `Mode = 'Keep'` entry, so they are not put to the operator either
-  - the SQL logins (D27, v10.5)
+  - `SP Admin` (D26, v10.5): kept by a `Mode = 'Keep'` entry, so it is not put to the operator either
+  - the SQL logins (D27, v10.5), except that `SOP-Admin` gets a Windows login and server roles (D29, v10.6)
   - disabled accounts (`Guest`/`GST-User`, `DefaultAccount`, `WDAGUtilityAccount`, already-disabled `WinPrep`/`DefaultUser`) are not put to the operator
   - the enabled state of `PUB-User` and `WinAutoUser`. They are managed accounts, so they are never put to the operator either.
 - An **enabled** account outside the table, e.g. `USBAdmin` on `SM-102575`, is put to the operator (D23).
@@ -99,6 +106,7 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
   - from v10: "`PUB-User` created if missing, replaces `WinAutoUser`" (by v10.1), and "`SOP-Admin` created if missing, replaces `BiCA Admin`/`BiCA Remote`" (by v10.2)
   - from v10.2: "an existing `SOP-Admin` is retired like `SP Admin`" (by v10.5: both kept untouched, D26)
   - from v10: "`SP Admin` is retired" (by v10.5: kept untouched again, as in v9); the SQL login slots (by v10.5, D27)
+  - from v10.2–v10.5: "`BiCA Admin` and `BiCA Remote` are managed and set", the slots `BiCAAdmin`/`BiCARemote` and "`SOP-Admin` is kept untouched" (by v10.6: `SOP-Admin` replaces both, D28)
 
 ### 1.2 Scope boundaries
 
@@ -131,17 +139,17 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 | # | Decision | Rationale |
 |---|---|---|
 | D1 | **PowerShell, limited to PS 2.0 syntax *and semantics*, .NET 2.0/3.5 APIs.** | PS 2.0 is the default on Windows 7. The Windows 7 test site (102575) has WMF 5.1, but other machines may not. Windows 10 runs PS 2.0 code unchanged; all four test machines have the PS 2.0 engine + .NET 3.5 installed. |
-| D2 | **Executed locally, elevated, by an operator logged on as `BiCA Remote` over RDP**, from a copy in `C:\temp`. That account gets a new password too, as the last slot (§8, D25). Only local credentials are in scope. The SM inventories of both test sites ran at the console as `BiCA Admin`; that is not the operating model on real sites (confirmed). | Confirmed operating model. |
+| D2 | **Executed locally, elevated, by an operator logged on over RDP** as `BiCA Remote` until `SOP-Admin` is in place, as `SOP-Admin` afterwards (v10.6), from a copy in `C:\temp`. `SOP-Admin` gets a new password too, as the last slot (§8, D25); a running `BiCA Remote` is disabled as the last step. The running account must be `sysadmin` through its own Windows login for the SQL step (D29). Only local credentials are in scope. The SM inventories of both test sites ran at the console as `BiCA Admin`; that is not the operating model on real sites (confirmed). | Confirmed operating model; v10.6 (2026-10-19): "the script might be executed with user `BiCA Remote` while `SOP-Admin` does not exist at that time". |
 | D3 | **Non-interactive core + interactive front-end.** Core functions accept `SecureString`s only. | Testable, and keeps a later per-site orchestrator possible. |
 | D4 | **Secrets never on a command line, never as a PowerShell command parameter, never printed.** Plaintext is passed only to .NET/COM/ADSI methods or property setters, inside the adapter layer. | Process list, event 4688, Module Logging, transcripts. |
 | D5 | **Principals are resolved by SID.** This covers built-in accounts, well-known groups, and SQL Windows logins (whose names carry **old computer names** on both test sites, e.g. `DESKTOP-4ALF524\BiCA Admin`, `WIN-DJPP3T59SJL\BiCA Admin`). Managed accounts are resolved by their selection rule. Custom groups (`CardCenters`, `Offer Remote Assistance Helpers`, `hw_fn_*`) are resolved by name. **Group membership is read and changed by SID through `netapi32`** (`NetLocalGroupGetMembers`/`AddMembers`/`DelMembers`, level 0), not through ADSI: on Windows Embedded Standard 7 (test site 102575) ADSI returned no name or SID for any local-account member. | Localization, renamed built-in accounts, machines renamed after imaging. |
 | D6 | **One declarative, unsigned `.psd1` config.** It holds no secrets. | No signing (confirmed); integrity risk accepted (§9). |
 | D7 | **Audit by default; `-Apply` makes changes after a single `YES`.** The `YES` covers rotations and check-fixes. Exception: runtime ambiguities (D13). | Confirmed. |
 | D8 | **The credential slot is the unit of apply** for local dependents. `LOGINS` entries and IIS identities are outside the tool and are reported as follow-ups. | Confirmed. |
-| D9 | **Windows passwords are *set*** (`NetUserSetInfo` 1003, no old password asked), **except `ApplicationUser`, which is *changed* with its validated old password** (`NetUserChangePassword`) to keep its DPAPI data; if the old password doesn't work, the operator chooses set (DPAPI loss) or skip. The auto-logon slot sets `PUB-User` and `WinAutoUser` to the same value. SQL logins are set as sysadmin (not since v10.5, D27). | Confirmed 2026-10-07 after the DPAPI explanation: a set makes the account's DPAPI-protected secrets unreadable; only `ApplicationUser` (runs SQL Server and the retail application, many master keys) needs them. Setting the *same* password loses nothing. Re-confirmed for `BiCA Admin`/`BiCA Remote` after v10.2 kept them in use (O8, 2026-10-07): their DPAPI data (master keys on both test sites) is given up. |
+| D9 | **Windows passwords are *set*** (`NetUserSetInfo` 1003, no old password asked), **except `ApplicationUser`, which is *changed* with its validated old password** (`NetUserChangePassword`) to keep its DPAPI data; if the old password doesn't work, the operator chooses set (DPAPI loss) or skip. The auto-logon slot sets `PUB-User` and `WinAutoUser` to the same value. SQL logins are set as sysadmin (not since v10.5, D27). | Confirmed 2026-10-07 after the DPAPI explanation: a set makes the account's DPAPI-protected secrets unreadable; only `ApplicationUser` (runs SQL Server and the retail application, many master keys) needs them. Setting the *same* password loses nothing. Re-confirmed for `BiCA Admin`/`BiCA Remote` after v10.2 kept them in use (O8, 2026-10-07): their DPAPI data (master keys on both test sites) is given up. Since v10.6 they are no longer set; an existing `SOP-Admin` is set and gives up its DPAPI data. |
 | D10 | **Group exclusivity with explicit allow-lists. No other privilege reductions.** | Confirmed, incl. the `WinUser` allow-list. |
 | D11 | **Re-runs are idempotent.** | Recover from a crash by re-running with the same input. |
-| D12 | **Lockout budget for the tool's own logon attempts** (since D9 revised: only the `ApplicationUser` old-password probe and the post-set verifications log on). The threshold and duration are **read per machine**: QS-K1 has 4/5 min on SM and 10/15 min on IPT01, 102575 has 4/3 min on both. The counter and the locked state are re-read immediately before every attempt and before `ChangePassword`. An attempt is made only if at least two attempts remain below the threshold, i.e. the counter plus two is still below the threshold (threshold 4: attempts only at counter 0 or 1; strict rule confirmed 2026-10-08). This applies to every logon the tool makes, including the verification after a set (v10.4); a verification that the budget forbids is reported as "not verified (lockout budget)". The probe order minimizes failures (§6 step 7). Failures from other sources are not under the tool's control. | Protects especially `BiCA Remote`. |
+| D12 | **Lockout budget for the tool's own logon attempts** (since D9 revised: only the `ApplicationUser` old-password probe and the post-set verifications log on). The threshold and duration are **read per machine**: QS-K1 has 4/5 min on SM and 10/15 min on IPT01, 102575 has 4/3 min on both. The counter and the locked state are re-read immediately before every attempt and before `ChangePassword`. An attempt is made only if at least two attempts remain below the threshold, i.e. the counter plus two is still below the threshold (threshold 4: attempts only at counter 0 or 1; strict rule confirmed 2026-10-08). This applies to every logon the tool makes, including the verification after a set (v10.4); a verification that the budget forbids is reported as "not verified (lockout budget)". The probe order minimizes failures (§6 step 7). Failures from other sources are not under the tool's control. | Protects especially the operator's account (`SOP-Admin` since v10.6). |
 | D13 | **Ambiguity → ask the operator, never guess.** | Explicit requirement. |
 | D14 | **All three SQL logins are `sysadmin`.** Deliberate and user-confirmed; matches both test sites. *Moot since v10.5: SQL logins are not managed (D27).* | Confirmed. |
 | D15 | **Site password rules = the strictest rule of any machine**, enforced by the tool on every machine in addition to the local OS policy. Default: minimum length **8** + an **emulation of Windows complexity**, the strictest found on the test sites (`IPT01-QS-K1`). Configurable in `SitePasswordRules`. The emulation: 3 of 5 categories (Unicode upper, lower, digits, non-alphanumeric, other letters), and no case-insensitive token of 3+ characters from the `SamAccountName` or `FullName` of any account in the slot (split on `, . - _ #`, space, tab), nor from the SQL login name. It is implemented in `Native.ps1` over the BSTR, so plaintext stays out of PowerShell. | Confirmed. A shared site password must be accepted on every machine; otherwise the site diverges. |
@@ -150,13 +158,15 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 | D18 | **Auto-logon policy** (v10.1: back to the v9 accounts). Auto-logon only ever runs as a usable `PUB-User` or `WinAutoUser` (enabled, unlocked, interactive logon allowed, not admin), **never as an admin**.<br>• An **active** auto-logon as either of them (auto-logon on and the account enabled) is **kept** on every machine and standardized with the new auto-logon password. There is no switch between the two.<br>• **SM machines** (computer name starts with `SM`, case-insensitive): auto-logon as any other account is turned off.<br>• **Other machines:** any other account is switched to the selected user: `PUB-User` if usable, otherwise `WinAutoUser`. Without a usable one, the operator decides (D13).<br>• Neither account is created or enabled for auto-logon. Auto-logon that is off stays off.<br>Rules in §7.5. | Confirmed. v10.1 (2026-10-07): `PUB-User` can't be enforced as the only auto-logon account because of logon restrictions. Test site 102575 runs auto-logon as `BiCA Admin` with a plain-text password. |
 | D19 | **Write-filter guard.** Preflight detects EWF/FBWF (Windows Embedded Standard 7) and UWF (Windows 10). A volume counts as protected if the filter protects it in the **current session**, unless a whole-volume commit is pending for the next shutdown (EWF `-commit`). If the state can't be determined while a filter driver is installed, the volume counts as protected.<br>• **System volume protected → all of `-Apply` is blocked** (confirmed): slots, auto-logon step, enforcement phase. The tool's own journal and logs would vanish too. Audit still runs and explains why.<br>• Otherwise, a protected volume holding SQL `master` data or log files (`sys.master_files`) blocks the SQL slots. | Confirmed: unknown whether the machines use a write filter. Changes on a protected volume vanish at the next reboot. |
 | D20 | **Re-apply mode.** Entering an account's *current* password as its new password: `ApplicationUser` → treated as already on the new secret (no change); the set accounts → set to the same value, which keeps their DPAPI data and passes history (assumed: an admin set isn't checked against history; spike 7, still open as O6). Dependents are rewritten, groups and flags enforced, everything verified; no `LOGINS` follow-up for an unchanged password. **Account creation, disabling (D22/D23) and dependent moves (D24) still happen in a re-apply run;** use `-Only` to limit it. SQL slots left empty. A set account can't be recognized as a re-apply (no old password is asked), so it still gets a new password age and a `LOGINS` follow-up. **The safe first write test is `-Only AppUser`** (O9): `ApplicationUser` is the only account whose re-apply the probe detects, and under `-Only` the retired and other accounts are not processed. It disables the built-in Administrator, which is already disabled on all four test machines. The auto-logon slot sets both accounts to one value, so it is only a re-apply if `PUB-User` and `WinAutoUser` already share their password; otherwise it is a real change for one of them (DPAPI loss, history). Then leave the slot empty in a re-apply run. | Confirmed as the safe first write test (README step 2); scope `-Only AppUser` confirmed 2026-10-07 (O9). |
-| D21 | **Account model: three managed admin accounts plus the existing auto-logon accounts** (v10.2).<br>• `BiCA Admin`, `BiCA Remote` (admin; the operator's account) and `ApplicationUser` (admin; application): each gets its own new password and is created if missing (`NetUserAdd` with the slot password, role groups and flags; v10.3 for the BiCA accounts).<br>• Only `ApplicationUser` is enabled if it exists but is disabled; the enabled state of an existing BiCA account is unchanged.<br>• The auto-logon accounts `PUB-User` and `WinAutoUser` are managed only where they exist (v10.1): never created, enabled state unchanged, all set to the one auto-logon slot password.<br>• `SOP-Admin` is never created (v10.2); an existing one is kept untouched, like `SP Admin` (D26, v10.5).<br>• The tool first **lists the existing enabled local accounts**, then enforces roles and keeps `WinUser1–3` and the FTP users in check mode. | Confirmed 2026-10-07. v10.1: `PUB-User` is not created or enforced (logon restrictions); `WinAutoUser` is kept. v10.2: `SOP-Admin` dropped because of SQL Server (the operator's integrated sysadmin access runs through the BiCA Windows logins); `BiCA Admin`/`BiCA Remote` kept with new unique passwords. v10.3: missing BiCA accounts are created (O7). |
-| D22 | **Replaced and retired accounts are disabled only** (`UF_ACCOUNTDISABLE`; groups and password unchanged, so re-enabling is possible):<br>• built-in Administrator (RID 500) → `ApplicationUser`<br>• retired, no replacement: `SYS Admin`, also spelled `SYS-Admin` (v10.5; `SP Admin` until v10.4)<br>A replaced account is only disabled when its replacement exists, is enabled and was verified on its new password in this run. An account that is still the auto-logon account after the auto-logon step stays enabled (e.g. the operator chose "leave unchanged"); the conflict is reported. `BiCA Admin`, `BiCA Remote` (v10.2), `PUB-User` and `WinAutoUser` (v10.1) are not replaced. | Confirmed; `SOP-Admin` "the same as `SP Admin`" (2026-10-07, v10.2). v10.5 (2026-10-19): "always disable `SYS Admin` and `SYS-Admin`"; `SOP-Admin` and `SP Admin` are kept untouched instead (D26). |
+| D21 | **Account model: two managed admin accounts plus the existing auto-logon accounts** (v10.6).<br>• `SOP-Admin` (admin; the operator's account, D28) and `ApplicationUser` (admin; application): each gets its own new password and is created if missing (`NetUserAdd` with the slot password, role groups and flags).<br>• Both are enabled if they exist but are disabled (`EnableIfDisabled`).<br>• The auto-logon accounts `PUB-User` and `WinAutoUser` are managed only where they exist (v10.1): never created, enabled state unchanged, all set to the one auto-logon slot password.<br>• `BiCA Admin` and `BiCA Remote` are replaced by `SOP-Admin` (D22, D28); `SP Admin` is kept untouched (D26).<br>• The tool first **lists the existing enabled local accounts**, then enforces roles and keeps `WinUser1–3` and the FTP users in check mode. | Confirmed 2026-10-07. v10.1: `PUB-User` is not created or enforced (logon restrictions); `WinAutoUser` is kept. v10.2: `SOP-Admin` dropped because of SQL Server (the operator's integrated sysadmin access runs through the BiCA Windows logins); `BiCA Admin`/`BiCA Remote` kept with new unique passwords. v10.3: missing BiCA accounts are created (O7). v10.6 (2026-10-19): `SOP-Admin` replaces both BiCA accounts, with their SQL access (D29). |
+| D22 | **Replaced and retired accounts are disabled only** (`UF_ACCOUNTDISABLE`; groups and password unchanged, so re-enabling is possible):<br>• `BiCA Admin` and `BiCA Remote` → `SOP-Admin` (v10.6)<br>• built-in Administrator (RID 500) → `ApplicationUser`<br>• retired, no replacement: `SYS Admin`, also spelled `SYS-Admin` (v10.5; `SP Admin` until v10.4)<br>A replaced account is only disabled when its replacement's slot completed, the replacement is enabled and was verified on its new password in this run, has the replaced accounts' SQL Server access (D29) and, for the operator's account, may log on wherever they could (D28). An account that is still the auto-logon account after the auto-logon step stays enabled (e.g. the operator chose "leave unchanged"); the conflict is reported. `PUB-User` and `WinAutoUser` (v10.1) are not replaced. | Confirmed; `SOP-Admin` "the same as `SP Admin`" (2026-10-07, v10.2). v10.5 (2026-10-19): "always disable `SYS Admin` and `SYS-Admin`"; `SOP-Admin` and `SP Admin` are kept untouched instead (D26). v10.6 (2026-10-19): "replace & disable `BiCA Admin` and `BiCA Remote` on all machines with `SOP-Admin`". |
 | D23 | **Other enabled accounts** (not managed, not replaced, not `WinUser1–3`/FTP users) are listed and **the operator decides per account** before `YES`: disable or keep. | Confirmed ("other users: ask"). |
-| D24 | **Dependents of a disabled account move to its replacement**: services (`ChangeServiceConfigW` with the replacement's name and new password), password-stored scheduled tasks (`UserId` + password), COM+ server identities. Requires the replacement's password from this run; otherwise the account isn't disabled and the conflict is reported.<br>• **Retired accounts** (`SYS Admin`/`SYS-Admin`) and **other accounts the operator disables** (D23): their dependents are **always moved to `ApplicationUser`** (v10.4), shown as high-impact before `YES`.<br>• **Exception, new SID:** nothing is moved to an account the tool created in this run (or in an earlier unfinished run, per the journal). If `ApplicationUser` is created, the built-in Administrator, and any retired or other account with dependents, **keeps its dependents and stays enabled**: a created account has no SQL login, ACLs or profile of the old one. This is reported for a manual migration. Without dependents the account is disabled as usual. | Confirmed "move to replacement". O5 decided 2026-10-08: always move; D23 accounts the same; no move to a newly created `ApplicationUser`. |
-| D25 | **The operator's own account comes last.**<br>• The operator logs on as `BiCA Remote`, whose slot is processed last (§8). The RDP session survives the password set; the tool reminds the operator to update saved RDP credentials.<br>• If the running account is itself to be disabled (a retired account such as `SYS-Admin`, or one the operator chose to disable, D23), it is disabled as the very last step of the run. That happens only after `BiCA Remote` is enabled, verified on its new password in this run, and holds an effective remote-interactive logon right (`SeRemoteInteractiveLogonRight` granted and not denied, §7.3). The RDP session continues; the next logon is as `BiCA Remote`. | Confirmed. v10.2: the operator account is `BiCA Remote` again; the effective RDP right replaces v10's "member of Remote Desktop Users", which `BiCA Remote`'s role doesn't add. |
-| D26 | **Kept accounts** (v10.5). Existing `SOP-Admin` and `SP Admin` accounts are selected by a `Mode = 'Keep'` entry and **never changed**: no password, group, flag, right or enabled-state change, no dependent update or move, no `LOGINS` follow-up.<br>• They are not put to the operator (D23) and never disabled as the running account (D25).<br>• The plan shows one Info line per kept account; a missing one is not reported.<br>• If auto-logon runs as one of them, the auto-logon policy (D18) still applies to the machine's auto-logon settings. | Confirmed 2026-10-19 ("keep `SOP-Admin` untouched", "leave `SP Admin` as is as well"). Supersedes the v10.2 rule that an existing `SOP-Admin` is retired and the v10 rule that `SP Admin` is retired. |
-| D27 | **No SQL credential updates** (v10.5). The tool changes no password or role of a SQL login: the default config has no SQL slots and no `SqlLogin` entries, and M5 (SQL rotation) is dropped.<br>• The Windows dependents of the rotated accounts are still updated, among them the SQL Server and Agent services running as `ApplicationUser` (no restart, D17).<br>• The audit no longer reports SQL login drift (G4). It still reports that a created account has no Windows login in SQL Server.<br>• The code keeps its `Kind = 'SqlLogin'` support (such slots are skipped as not available), but the default config doesn't use it; §7.9 is the dropped design. | Confirmed 2026-10-19 ("remove any SQL credential updates"). |
+| D24 | **Dependents of a disabled account move to its replacement**: services (`ChangeServiceConfigW` with the replacement's name and new password), password-stored scheduled tasks (`UserId` + password), COM+ server identities. Requires the replacement's password from this run; otherwise the account isn't disabled and the conflict is reported.<br>• `BiCA Admin`/`BiCA Remote` → `SOP-Admin` (v10.6).<br>• **Retired accounts** (`SYS Admin`/`SYS-Admin`) and **other accounts the operator disables** (D23): their dependents are **always moved to `ApplicationUser`** (the `Application` entry, v10.4), shown as high-impact before `YES`.<br>• **Exception, new SID:** nothing is moved to an account the tool created in this run (or in an earlier unfinished run, per the journal). If `ApplicationUser` or `SOP-Admin` is created, an account it replaces, and any retired or other account with dependents moving to it, **keeps its dependents and stays enabled**: a created account has no ACLs or profile of the old one. This is reported for a manual migration; a later run that finds the account existing moves them. Without dependents the account is disabled as usual. | Confirmed "move to replacement". O5 decided 2026-10-08: always move; D23 accounts the same; no move to a newly created `ApplicationUser`. v10.6: the same for a newly created `SOP-Admin`. |
+| D25 | **The operator's own account comes last.**<br>• The operator's account is `SOP-Admin` (the `Operator` entry, v10.6), whose slot is processed last (§8). The RDP session survives the password set; the tool reminds the operator to update saved RDP credentials.<br>• If the running account is itself to be disabled (`BiCA Remote` replaced by `SOP-Admin`, a retired account such as `SYS-Admin`, or one the operator chose to disable, D23), it is disabled as the very last step of the run. That happens only after `SOP-Admin` is enabled, in Administrators, verified on its new password in this run, and holds an effective remote-interactive logon right (`SeRemoteInteractiveLogonRight` granted and not denied, §7.3), and after the conditions of D22 for a replaced account. The RDP session continues; the next logon is as `SOP-Admin`. | Confirmed. v10.2: the operator account is `BiCA Remote` again; the effective RDP right replaces v10's "member of Remote Desktop Users", which `BiCA Remote`'s role doesn't add. v10.6 (2026-10-19): "disabling `BiCA Remote` should be the last step"; the operator account is `SOP-Admin`. |
+| D26 | **Kept accounts** (v10.5). An existing `SP Admin` is selected by a `Mode = 'Keep'` entry and **never changed**: no password, group, flag, right or enabled-state change, no dependent update or move, no `LOGINS` follow-up.<br>• It is not put to the operator (D23) and never disabled as the running account (D25).<br>• The plan shows one Info line per kept account; a missing one is not reported.<br>• If auto-logon runs as one of them, the auto-logon policy (D18) still applies to the machine's auto-logon settings.<br>• `SOP-Admin` was kept untouched in v10.5 only; since v10.6 it is managed (D28). | Confirmed 2026-10-19 ("keep `SOP-Admin` untouched", "leave `SP Admin` as is as well"). Supersedes the v10.2 rule that an existing `SOP-Admin` is retired and the v10 rule that `SP Admin` is retired. `SOP-Admin` part superseded by v10.6. |
+| D27 | **No SQL credential updates** (v10.5). The tool changes no password or role of a SQL login: the default config has no SQL slots and no `SqlLogin` entries, and M5 (SQL rotation) is dropped.<br>• The Windows dependents of the rotated accounts are still updated, among them the SQL Server and Agent services running as `ApplicationUser` (no restart, D17).<br>• The audit no longer reports SQL login drift (G4). It still reports that a created `ApplicationUser` has no Windows login in SQL Server.<br>• The code keeps its `Kind = 'SqlLogin'` support (such slots are skipped as not available), but the default config doesn't use it; §7.9 is the dropped design.<br>• Exception (v10.6): `SOP-Admin`'s Windows login and its server roles (D29); no password is involved. | Confirmed 2026-10-19 ("remove any SQL credential updates"). v10.6 (2026-10-19): "grant the same level of access to SQL". |
+| D28 | **`SOP-Admin` replaces `BiCA Admin` and `BiCA Remote`** (v10.6).<br>• `SOP-Admin` is a managed admin account and the operator's account (`Operator`): role `AdminRemote` = Administrators + Remote Desktop Users + `Offer Remote Assistance Helpers` (added if the group exists), exclusive; PNE, CCP, PR. Slot `SOPAdmin`, the last slot (D25).<br>• Missing: created with the slot password (`Create`). Existing: taken over: its password is set (D9; its DPAPI data is lost), its role enforced, and it is enabled if disabled (`EnableIfDisabled`).<br>• `BiCA Admin` and `BiCA Remote` are its replaced accounts (`Replaces`): disabled only (D22), no new password. Their dependents move to `SOP-Admin` (D24). Their `LOGINS` entries must name `SOP-Admin` with its new password (follow-up).<br>• **The operator must be able to log on as before:** a BiCA account is disabled only if `SOP-Admin` holds an effective interactive and remote-interactive logon right (§7.3) wherever the BiCA account holds one, judged before `YES` on the planned groups and again before the disable.<br>• A BiCA account that stays enabled keeps its old password; this is reported, and a re-run completes the disabling. | User decision 2026-10-19: "replace & disable users `BiCA Admin` and `BiCA Remote` on all machines with the user `SOP-Admin`: fully replace their functionality with the existing or inexisting user `SOP-Admin`". The groups are the v10 answer for `SOP-Admin` (§13.1). |
+| D29 | **SQL Server access of `SOP-Admin`** (v10.6). On the default instance, `SOP-Admin` gets the access of the BiCA accounts:<br>• **Source:** the enabled Windows logins whose SID is a replaced BiCA account (also an already disabled one, e.g. `BiCA Remote` on QS-K1), and their fixed server roles (`sysadmin`, `securityadmin`, `serveradmin`, `setupadmin`, `processadmin`, `diskadmin`, `dbcreator`, `bulkadmin`; `sysadmin` covers the others). On every test machine both BiCA logins are `sysadmin`.<br>• **Write:** `CREATE LOGIN [<computer>\SOP-Admin] FROM WINDOWS` if its SID has no login, `ALTER LOGIN … ENABLE` if it is disabled, then the missing roles (`sp_addsrvrolemember` up to 2008 R2, `ALTER SERVER ROLE … ADD MEMBER` from 2012). Nothing is removed, no other login is changed, no password is involved. Constant command texts; the names are parameters quoted with `QUOTENAME`.<br>• **When:** step 7 of the `SOPAdmin` slot, after its logon test, over the tool's integrated connection as the running account, which must be `sysadmin` through its own Windows login (e.g. `BiCA Remote`). Verified by reading the login and its roles by SID.<br>• **Not possible** (the instance is stopped or unreachable, the logins can't be read, the running account isn't `sysadmin`, version outside 9–14, a write filter on `master` (D19), a login with the same name for another SID): the slot ends failed at step `SqlAccess` (exit 1), the BiCA accounts stay enabled and the reason is shown before `YES`.<br>• **Report only:** named instances, roles that aren't fixed server roles, database permissions when no BiCA login is `sysadmin`, Agent jobs owned by a BiCA login, a disabled BiCA login. | User decision 2026-10-19: "grant the same level of access to SQL". The v10 plan had "`SOP-Admin` gets a Windows login with `sysadmin`"; v10.2 dropped `SOP-Admin` because the operator lost integrated sysadmin access once the BiCA accounts were disabled. |
 
 ## 3. Execution model
 
@@ -249,8 +259,8 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
     Roles = @{
         Admin    = @{ Groups = @('S-1-5-32-544'); ExclusiveGroups = $true; PasswordNeverExpires = $true; CannotChangePassword = $true
                       PasswordRequired = $true }
-        AdminRemote = @{ Groups = @('S-1-5-32-544', 'Name:Offer Remote Assistance Helpers?'); ExclusiveGroups = $true
-                      AllowedExtraGroups = @('S-1-5-32-555')                                  # kept if present, never added
+        # SOP-Admin (D28, v10.6): Administrators + Remote Desktop Users + Offer Remote Assistance Helpers (if it exists)
+        AdminRemote = @{ Groups = @('S-1-5-32-544', 'S-1-5-32-555', 'Name:Offer Remote Assistance Helpers?'); ExclusiveGroups = $true
                       PasswordNeverExpires = $true; CannotChangePassword = $true; PasswordRequired = $true }
         User     = @{ Groups = @('S-1-5-32-545'); ExclusiveGroups = $true; PasswordNeverExpires = $true; CannotChangePassword = $true
                       PasswordRequired = $true }
@@ -263,23 +273,25 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
     # One prompt per slot (new password twice), applied in ascending Order (D9: set; ApplicationUser: change).
     # No SQL login slots (D27, v10.5).
     Credentials = @(
-        @{ Slot = 'BiCAAdmin';      Order = 10; Label = 'BiCA Admin' }
         @{ Slot = 'AppUser';        Order = 20; Label = 'ApplicationUser' }
         @{ Slot = 'AutoLogon';      Order = 30; Label = 'Auto-logon users (PUB-User / WinAutoUser)' }
-        @{ Slot = 'BiCARemote';     Order = 90; Label = 'BiCA Remote (your own logon account)' }   # last (D25)
+        @{ Slot = 'SOPAdmin';       Order = 90; Label = 'SOP-Admin (your logon account from now on)' }   # last (D25)
     )
 
     Accounts = @(
         # Managed admin accounts (D21): created if missing. Every Windows slot updates its own dependents: a set breaks
         # stored credentials (D8).
-        @{ Id = 'BiCAAdmin';  Kind = 'Windows'; Name = 'BiCA Admin';  Role = 'Admin';       Credential = 'BiCAAdmin';  Create = $true
-           LoginsEntry = $true; Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
-        @{ Id = 'BiCARemote'; Kind = 'Windows'; Name = 'BiCA Remote'; Role = 'AdminRemote'; Credential = 'BiCARemote'; Create = $true
-           Operator = $true                                                      # the operator's account (D25)
-           LoginsEntry = $true; Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
         # Replaces = accounts disabled once this one is verified (D22), their dependents move here (D24).
+        # SOP-Admin replaces BiCA Admin and BiCA Remote (D28, v10.6); an existing one is taken over and enabled. It gets
+        # the SQL Server access of their Windows logins before they are disabled (D29).
+        @{ Id = 'SOPAdmin'; Kind = 'Windows'; Name = 'SOP-Admin'; Role = 'AdminRemote'; Credential = 'SOPAdmin'; Create = $true
+           EnableIfDisabled = $true
+           Operator = $true                                                      # the operator's account (D25)
+           Replaces = @('BiCA Admin', 'BiCA Remote'); SqlAccess = 'FromReplaced'; LoginsEntry = $true
+           Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
         @{ Id = 'AppUser';  Kind = 'Windows'; Name = 'ApplicationUser'; Role = 'Admin'; Credential = 'AppUser'; Create = $true
            EnableIfDisabled = $true                                              # it runs the application
+           Application = $true                                                   # dependents of retired accounts move here (D24)
            PasswordMode = 'Change'                                               # D9: keep DPAPI data
            Replaces = @('RID-500'); LoginsEntry = $true
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto'; IisReport = 'Auto' }   # no restarts (D17)
@@ -291,8 +303,8 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }   # a set breaks stored credentials (D8, D17)
         # Retired without replacement (D22); their dependents move to ApplicationUser (D24, v10.4).
         @{ Id = 'Retired';  Kind = 'Windows'; Names = @('SYS Admin', 'SYS-Admin'); Mode = 'Disable' }   # SYS-Admin: v10.5
-        # Never changed and not put to the operator (D26, v10.5)
-        @{ Id = 'Untouched'; Kind = 'Windows'; Names = @('SOP-Admin', 'SP Admin'); Mode = 'Keep' }
+        # Never changed and not put to the operator (D26, v10.5; SOP-Admin is managed since v10.6)
+        @{ Id = 'Untouched'; Kind = 'Windows'; Names = @('SP Admin'); Mode = 'Keep' }
         # Kept and checked (no password change)
         @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1', 'WinUser2', 'WinUser3'); Role = 'WinUser'; Mode = 'Check' }
         @{ Id = 'FtpUsers'; Kind = 'Windows'; NamePattern = '^ftp|ftp$'; Role = 'Ftp'; Mode = 'Check' }
@@ -311,6 +323,8 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
 - a regex that doesn't compile. Regexes are compiled with `IgnoreCase`.
 - `Pattern:` outside `AllowedExtraGroups`
 - `Operator` without a single `Name`, or on more than one entry (D25)
+- `Application` without a single `Name`, or on more than one entry (D24, v10.6)
+- `SqlAccess` other than `FromReplaced`, or without `Replaces` (D29, v10.6)
 - `Create` together with `AutoLogon` (the auto-logon accounts are never created)
 - an `AutoLogon` entry whose `AutoLogonUser` list doesn't name every account of the entry
 - an auto-logon account in `Replaces` or in a `Disable` entry (D18, D22)
@@ -339,6 +353,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
      - `IsIntegratedSecurityOnly = 0`
      - per login: `CHECK_POLICY`, `CHECK_EXPIRATION`, `IsLocked`
      - other instances are reported and ignored
+     - for `SOP-Admin`'s login (D29, v10.6): the running account is `sysadmin`, the version is 9.x–14.x and no write filter protects `master`. A failure blocks no slot; it is passed on as the reason why the BiCA accounts stay enabled.
    - **COM+:** the catalog is reachable. **IIS** (if installed): read-only discovery.
    - A domain-joined machine is reported as a warning.
 3. **Resolve accounts**, including the SID-overlap check. Ambiguities go to the operator.
@@ -347,7 +362,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
    - services, password-stored tasks and COM+ applications per account SID
    - IIS identities and DCOM `RunAs` (report)
    - auto-logon variant and the D18 action (§7.5)
-   - SQL logins, `sysadmin`, Agent/linked logins and job owners (report)
+   - SQL logins, `sysadmin` and the explicit server role memberships (D29), Agent/linked logins and job owners (report)
 5. **Plan.** Per slot:
    - changes, and the services/COM+ applications that will be "restart pending" (D17)
    - **high-impact items:**
@@ -429,10 +444,10 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
   - the password is never touched
 
 ### 7.2 Groups (`Groups.ps1`)
-- Target groups are added if missing. `Name:…?` groups are added if they exist. For `BiCA Remote` this means `Offer Remote Assistance Helpers`, which exists on both QS-K1 machines and on neither 102575 machine. On QS-K1 `BiCA Admin` is also a member; exclusivity **removes it** (confirmed: Administrators only).
+- Target groups are added if missing. `Name:…?` groups are added if they exist. For `SOP-Admin` (v10.6) this means `Offer Remote Assistance Helpers`, which exists on both QS-K1 machines and on neither 102575 machine; `Remote Desktop Users` is one of its target groups (D28). The replaced BiCA accounts keep their groups (D22).
 - **Exclusive groups:** the account is removed from every other local group **except** those matching `AllowedExtraGroups`. Allowed groups are kept but never added:
   - `WinUser1–3`: `Remote Desktop Users` and all `hw_fn_*` USB-device groups (created by USB-Blocker PLUS)
-  - `BiCA Remote`: `Remote Desktop Users` (a member on both 102575 machines)
+  - ~~`BiCA Remote`: `Remote Desktop Users`~~ (v10.2–v10.5; `BiCA Remote` is no longer managed)
   - FTP users: none, so they leave `Users` (confirmed)
 - **Membership by SID via `netapi32` (D5):**
   - all local groups are enumerated, and `NetLocalGroupGetMembers` level 0 builds a SID → groups map
@@ -441,7 +456,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
   - Background: ADSI `Groups()` worked on all four test machines. ADSI `Members()` returned the right number of members on Windows Embedded Standard 7, but no name or SID for any local account, so the rails couldn't be checked. Spike item 8.
 - **`CardCenters` missing:** reported; groups left unchanged. **Replaced and retired accounts:** no group changes (D22).
 - **Rails:**
-  - `BiCA Remote`, the running account, and process-token groups are never removed from Administrators
+  - the running account and process-token groups are never removed from Administrators
   - Administrators always keeps at least one enabled member that is the running account or was verified in this run
 - Removals run in the enforcement phase (§8).
 
@@ -580,7 +595,7 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
 - **DCOM `RunAs`:** report only, from both `HKCR\AppID` views (none on either test site).
 
 ### 7.8 `LOGINS` follow-up report (`Plan.ps1`, `Apply.ps1`)
-- `HKLM\SOFTWARE\BICA\SYSTEM\LOGINS` holds credentials for `BiCA Admin`, `BiCA Remote`, `ApplicationUser`/`Administrator`, `SQLApplication`, `SQLScript` and `SQLService`.
+- `HKLM\SOFTWARE\BICA\SYSTEM\LOGINS` holds credentials for `BiCA Admin`, `BiCA Remote`, `ApplicationUser`/`Administrator`, `SQLApplication`, `SQLScript` and `SQLService`. Since v10.6 the `BiCA Admin`/`BiCA Remote` entries must name `SOP-Admin` with its new password: the `SOP-Admin` follow-up says so (D28).
 - Registry handling is **out of scope** (confirmed). The tool does not read or write the key.
 - Per rotated account with `LoginsEntry`:
   - a high-impact item in the plan before `YES`
@@ -611,6 +626,21 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
   - the Agent service account (both SM machines: `ApplicationUser`)
   - Express edition = no Agent (both IPT01 machines)
 
+**SQL Server access of `SOP-Admin` (D29, v10.6, `Sql.ps1`)** — the only SQL write of this version:
+- **Read side:** the `ServerRoles` query adds the explicit server role memberships to every login (`ServerRoles`; unknown → `IsSysadmin` counts). `Get-CrSqlAccessPlan` compares the enabled Windows logins of the replaced accounts (by SID) with the login of `SOP-Admin` (by SID; still to be created → by name `<computer>\SOP-Admin`).
+- **Statements** (constant texts, parameters `@login`, `@role`, `@sid`; dynamic statements quote with `QUOTENAME`):
+
+  | Step | 9.x–10.x (2005–2008 R2) | 11.x–14.x (2012–2017) |
+  |---|---|---|
+  | create | `CREATE LOGIN [<computer>\SOP-Admin] FROM WINDOWS` | same |
+  | enable | `ALTER LOGIN [<login>] ENABLE` | same |
+  | role | `EXEC sp_addsrvrolemember @loginame, @rolename` | `ALTER SERVER ROLE [<role>] ADD MEMBER [<login>]` |
+  | verify | `sys.server_principals` + `sys.server_role_members` by SID | same |
+
+- Runs in step 7 of the `SOPAdmin` slot (§8), after the account exists, has its groups and passed its logon test. A created `SOP-Admin` gets its login in the same run, by name, which SQL Server resolves to the new SID.
+- The step stops at the first failure; a re-run finds the login by SID and adds what is missing.
+- Report-only items are listed in D29.
+
 ### 7.10 Logging and run journal (`Log.ps1`, `Journal.ps1`)
 - Local only: `%ProgramData%\CredentialRotation\logs\` (ACL by SID: Administrators/SYSTEM), log file + CSV.
 - If `%ProgramData%\CredentialRotation` already exists with a non-admin owner or with write access for non-admins, the tool takes ownership (Administrators) and sets a protected ACL before it reads the journal. A standard user can create that folder in advance, and an edited journal would change the probe order (D12). **If the owner or the ACL had to be corrected, the existing journal is ignored and reported.** The probe then tests the old password first, which is the default and stays within the lockout budget.
@@ -619,13 +649,12 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
 
 ## 8. Sequencing, verification, enforcement, failure handling
 
-**Slot order** (v10.2; no SQL slots since v10.5, D27):
-1. `BiCA Admin` — set, groups (Administrators only), verified
-2. `ApplicationUser` — created if missing, changed with its old password (D9), dependents updated (no restarts, D17)
-3. auto-logon accounts — every existing `PUB-User` and `WinAutoUser`, enabled or disabled, set to the one slot password; never created (v10.1)
-4. **`BiCA Remote` last** — the operator's own account (D25)
+**Slot order** (v10.6; no SQL slots since v10.5, D27):
+1. `ApplicationUser` — created if missing, changed with its old password (D9), dependents updated (no restarts, D17)
+2. auto-logon accounts — every existing `PUB-User` and `WinAutoUser`, enabled or disabled, set to the one slot password; never created (v10.1)
+3. **`SOP-Admin` last** — the operator's own account (D25, D28): created or set, groups, verified, then its SQL Server login (D29)
 
-`BiCA Admin` first serves the Administrators rail: a second enabled admin is verified early. It is not a reconnect path, because `BiCA Admin` is denied RDP logon on three of the four test machines (both SM machines and `IPT01-102575`). The operator's own account goes last. The RDP session survives the password set. After the set, the tool reminds the operator to update saved RDP credentials (a FOLLOW-UP entry): an RDP client retrying the old saved password would lock `BiCA Remote`.
+`ApplicationUser` first serves the Administrators rail: an enabled admin is verified early. The operator's own account goes last. The RDP session survives the password set. After the set, the tool reminds the operator to update saved RDP credentials (a FOLLOW-UP entry): an RDP client retrying the old saved password would lock `SOP-Admin`. The BiCA accounts have no slot any more (v10.6); they are disabled in the enforcement phase, a running `BiCA Remote` as the very last step.
 
 **Steps within a slot:**
 
@@ -641,33 +670,36 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
 5  restart      none (D17): services and COM+ applications are reported as "restart pending"
 6  verify       logon test per account (logon type per D16, within the D12 budget; a disabled account is not tested); LOGINS / IIS follow-ups
                 recorded. If the slot stops after step 2, the accounts already on the new secret are still tested.
+7  SQL access   SOPAdmin only (D29, v10.6): SOP-Admin's Windows login with the server roles of the BiCA logins; verified by SID.
+                A failure stops the slot here (exit 1), so the BiCA accounts stay enabled.
 ```
 
-Step 0 for a missing managed admin account (`Create`: `BiCA Admin`, `BiCA Remote`, `ApplicationUser`): **create** it (`NetUserAdd` level 1 with the slot password, `UF_DONT_EXPIRE_PASSWD` and `UF_PASSWD_CANT_CHANGE`), then continue with grants and verify; step 2 is then already done. For set accounts, step 1 has no CCP clear (an admin set ignores CCP) and step 2 is `NetUserSetInfo` 1003.
+Step 0 for a missing managed admin account (`Create`: `SOP-Admin`, `ApplicationUser`): **create** it (`NetUserAdd` level 1 with the slot password, `UF_DONT_EXPIRE_PASSWD` and `UF_PASSWD_CANT_CHANGE`), then continue with grants and verify; step 2 is then already done. For set accounts, step 1 has no CCP clear (an admin set ignores CCP) and step 2 is `NetUserSetInfo` 1003.
 
 The auto-logon slot may hold two accounts (`PUB-User`, `WinAutoUser`); both are set in step 2. If the second one fails after the first succeeded, the slot stops with an exact done/pending report, as for any other failure. A disabled auto-logon account is set and gets its groups and flags, but stays disabled.
 
-Step 4 runs for every Windows slot, i.e. its accounts' own services, password-stored tasks and COM+ identities, if any. A set breaks stored credentials just like a change. Since v10.1/v10.2, `WinAutoUser`'s and the BiCA accounts' dependents are no longer moved to another account, so they must be updated in place.
+Step 4 runs for every Windows slot, i.e. its accounts' own services, password-stored tasks and COM+ identities, if any. A set breaks stored credentials just like a change. Since v10.1, `WinAutoUser`'s dependents are no longer moved to another account, so they are updated in place. Since v10.6 the BiCA accounts' dependents move to `SOP-Admin` (D24).
 
 **Verification:** `LogonUser` with the logon type chosen per D16. 1385 counts as "password valid" if spike item 2 confirms it. A disabled account returns 1331. Spike item 2 must confirm that 1331 is returned only for a correct password before it counts as "password valid"; until then a disabled account is reported as "set, not verifiable (disabled)". It is never an auto-logon target, so this affects only the report.
 
 **Enforcement phase**, after all slots, in this order:
 1. exclusive-group removals for completed slots (respecting allow-lists)
-2. **dependent moves (D24):** services, password-stored tasks and COM+ identities of each account to be disabled are switched to its replacement, or to `ApplicationUser` for retired and other accounts (with the new password from this run, verified); an item that can't be moved keeps its account enabled and is reported. No move to an `ApplicationUser` created in this run: the built-in Administrator then keeps its dependents and stays enabled.
+2. **dependent moves (D24):** services, password-stored tasks and COM+ identities of each account to be disabled are switched to its replacement, or to `ApplicationUser` for retired and other accounts (with the new password from this run, verified); an item that can't be moved keeps its account enabled and is reported. No move to an `ApplicationUser` or `SOP-Admin` created in this run: the account it replaces then keeps its dependents and stays enabled.
 3. the **auto-logon step** (D18, §7.5): keep and standardize, switch to the selected user, or turn off. It judges admin status after step 1, and uses the auto-logon slot's new password, which is held only in memory.
 4. **disabling (D22, D23):**
+   - `BiCA Admin` and `BiCA Remote` (v10.6), if the `SOPAdmin` slot completed (incl. its SQL access, D29), `SOP-Admin` is enabled and verified, may log on locally and over RDP wherever the BiCA account could (D28), and all of the BiCA account's dependents were moved (none to move if `SOP-Admin` was created in this run and the account has dependents: it stays enabled)
    - the built-in Administrator, if `ApplicationUser` is verified and all of its dependents were moved (none to move if `ApplicationUser` was created in this run and the Administrator has dependents: it stays enabled)
    - the retired accounts (`SYS Admin`, `SYS-Admin`)
    - the other accounts the operator chose to disable
    
    **Exceptions:** the running account, and an account that is still the auto-logon account after step 3 (reported).
 5. check-mode fixes (`WinUser1–3`, FTP users), part of the `YES` run
-6. **the running account is disabled last (D25)**, only if it is to be disabled (e.g. a retired `SYS-Admin`). The conditions: `BiCA Remote` is enabled, verified in this run, and holds an effective remote-interactive logon right.
+6. **the running account is disabled last (D25)**, only if it is to be disabled (e.g. `BiCA Remote`, or a retired `SYS-Admin`). The conditions: `SOP-Admin` is enabled, in Administrators, verified in this run, and holds an effective remote-interactive logon right, plus the conditions of step 4 for its kind.
 
-- Under `-Only`, only selected slots; the auto-logon step as described in §7.5. The following run only without `-Only`: check-mode accounts, retired accounts, and the D23 question on other enabled accounts. A replaced account (the built-in Administrator) is disabled when its replacement's slot is selected.
+- Under `-Only`, only selected slots; the auto-logon step as described in §7.5. The following run only without `-Only`: check-mode accounts, retired accounts, and the D23 question on other enabled accounts. A replaced account (`BiCA Admin`, `BiCA Remote`, the built-in Administrator) is disabled when its replacement's slot is selected.
 - An unknown slot name in `-Only` is a fatal parameter error (exit 2), not an empty selection.
 - Rails apply.
-- After a crash between the slots and the auto-logon step, a re-run with the same passwords sets the set accounts again to the same value and finds `ApplicationUser` already on the new secret (D11, journal), then runs the step. Setting the same value again depends on O6 (password history).
+- After a crash between the slots and the auto-logon step, a re-run with the same passwords sets the set accounts again to the same value and finds `ApplicationUser` already on the new secret (D11, journal), then runs the step. Setting the same value again depends on O6 (password history). If the first run disabled the running `BiCA Remote`, the re-run is made as `SOP-Admin`, which has its SQL login by then (D29).
 
 **Failure handling** (no automatic revert):
 - **Failure before step 2:** pre-steps are undone; the slot is skipped.
@@ -731,7 +763,8 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
     - **D16 logon-type selection** from grant/deny sets (test-site rights as fixtures)
     - **D15 site rules** + local policy
     - probe order, locked accounts, minimum-age handling, lockout budget with thresholds 4 and 10
-    - exclusive groups with **allow-lists** (`Pattern:^hw_fn_`, `Remote Desktop Users` for `BiCA Remote`), `?` semantics, rails, SID → groups map from `NetLocalGroupGetMembers` fixtures
+    - exclusive groups with **allow-lists** (`Pattern:^hw_fn_`), `?` semantics, rails, SID → groups map from `NetLocalGroupGetMembers` fixtures
+    - `SOP-Admin` (v10.6): created or taken over, the BiCA accounts replaced, the SQL access plan and its T-SQL texts for both dialects (D29), the logon-right comparison (D28)
     - the **D18 decision table**, with fixtures from all four test machines:
       - SM / other machine × off / `PUB-User` / `WinAutoUser` / admin / other account / ambiguous
       - usable-target rules; `AutoLogonCount`; REG_SZ vs REG_DWORD; a stale `DefaultDomainName`
@@ -758,12 +791,18 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
   - `ApplicationUser` present: renamed built-in Administrator disabled, its dependents moved to `ApplicationUser`
   - `ApplicationUser` missing (created) while the built-in Administrator runs services: nothing moved, the Administrator stays enabled, manual migration reported (D24, v10.4); without dependents it is disabled
   - a retired account and an operator-disabled other account with a service and a task: both moved to `ApplicationUser`, then disabled (D24, v10.4)
-  - `SYS-Admin` present (retired, the hyphen spelling of `SYS Admin`, v10.5); `SYS-Admin` as the running account: disabled last, only if `BiCA Remote` is verified and allowed RDP logon (D25)
+  - `SYS-Admin` present (retired, the hyphen spelling of `SYS Admin`, v10.5); `SYS-Admin` as the running account: disabled last, only if `SOP-Admin` is verified and allowed RDP logon (D25)
   - an enabled admin `SOP-Admin` or `SP Admin`: kept untouched, also as the running account (D26)
-  - `BiCA Admin`/`BiCA Remote` missing: created (v10.3), "no SQL login" reported; present but disabled: set, stays disabled
+  - **`SOP-Admin` (v10.6), each run as `BiCA Remote` over RDP:**
+    - missing: created, added to its groups, verified, its SQL login created with `sysadmin` (D29); `BiCA Admin` disabled, the running `BiCA Remote` disabled last; the next logon as `SOP-Admin` works over RDP and at the console, and has integrated `sysadmin` access
+    - present, as on QS-K1 (created by the WIP build, `BiCA Remote` already disabled): taken over (set, groups), its login created; run as `BiCA Admin` at the console where `BiCA Remote` is disabled, or the SQL step fails with "not sysadmin" and the BiCA accounts stay enabled
+    - present but disabled: set and enabled
+    - `BiCA Admin` with a service while `SOP-Admin` is created: `BiCA Admin` stays enabled (D24), a second run moves the service and disables it
+    - SQL Server stopped, or the running account not `sysadmin`: the `SOPAdmin` slot ends failed at `SqlAccess`, both BiCA accounts stay enabled (exit 1)
+    - 2008 R2 (`sp_addsrvrolemember`) and 2017 (`ALTER SERVER ROLE`), Express and Standard
   - `PUB-User` + `WinAutoUser` both present, one of them disabled: both set to the slot password, the disabled one stays disabled; neither present: slot not applicable, nothing created
   - 0, 1 and 3 FTP users, with and without `CardCenters`, incl. FTP users in CardCenters + Users (Users removed) while the FTP site keeps working, or the removal is listed as the cause
-  - `WinUser` in `Remote Desktop Users` + `hw_fn_*` groups (kept) + another group (removed); `BiCA Remote` in `Remote Desktop Users` (kept)
+  - `WinUser` in `Remote Desktop Users` + `hw_fn_*` groups (kept) + another group (removed)
   - `UF_PASSWD_NOTREQD` set on a rotated account (cleared) and on the disabled built-in Administrator (kept)
   - `ApplicationUser` present but disabled: set or skip (no change possible), enabled after the set, then the built-in Administrator disabled
   - dependent discovery failed (e.g. COM+ catalog unreadable): the Windows slots are blocked and no account is disabled
@@ -772,7 +811,7 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
     - off with a stale `DefaultUserName` (SM-QS-K1 style): leave off
     - on as `BiCA Admin` with a plain-text password, on an SM machine: turn off
     - the same on an IPT01 machine: switch to `WinAutoUser`
-    - the auto-logon slot skipped while `BiCA Admin` is set: the operator chooses
+    - the auto-logon slot skipped while `BiCA Admin` is disabled by the `SOPAdmin` slot: the operator chooses; "leave unchanged" keeps `BiCA Admin` enabled
   - **re-apply (D20)** on test site 102575 with `/PS2`, **`-Only AppUser`** (O9): `ApplicationUser` entered with its current password. Expected: no password change (password age unchanged), its dependents rewritten, groups/flags enforced, no `LOGINS` follow-up, nothing created, no account disabled except the already disabled built-in Administrator
   - **`ApplicationUser` running SQL Server**: rotation leaves SQL running ("restart pending"); a later manual restart or reboot starts SQL, the Agent and the retail services with the new password
 - **Failure injection:**
@@ -851,7 +890,7 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 | `SP Admin` | Leave untouched. *Superseded by v10 (disabled, retired); restored by v10.5 (kept untouched, D26)* | D22, D26 |
 | Fixes | Only with `-Apply`, part of the single `YES` | D7 |
 | Rotated accounts | Each its own password; PNE, CCP, exclusive groups; **`UF_PASSWD_NOTREQD` cleared** (not for disabled replaced/retired accounts) | D8, D10, §7.1 |
-| BiCA Remote | `Offer Remote Assistance Helpers` added where it exists; **`Remote Desktop Users` kept if present** | `?` semantics, allow-list |
+| BiCA Remote | `Offer Remote Assistance Helpers` added where it exists; **`Remote Desktop Users` kept if present**. *Moot since v10.6: `BiCA Remote` is replaced by `SOP-Admin`* | `?` semantics, allow-list |
 | Write filter | Unknown whether used → **detect**. System volume protected → **block all of `-Apply`**; a protected SQL `master` volume → block the SQL slots | D19 |
 | ~~`WinAutoUser` → `PUB-User`~~ | ~~Non-SM machine with a `WinAutoUser` auto-logon and a usable `PUB-User`: switch to `PUB-User`~~ **Superseded by v10.1:** kept | D18 |
 | PS 2.0 test host | **None available yet**; unit tests on PS 5.1 meanwhile, `/PS2` audits on the test sites | §11, O3 |
@@ -862,16 +901,17 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 | **Open items O7–O9 (2026-10-07, v10.3)** | **Set** the new passwords of `BiCA Admin` and `BiCA Remote` (O8). An enabled `PUB-User`/`WinAutoUser` that isn't used for auto-logon stays enabled; a switch away from another account goes to `PUB-User` first, then `WinAutoUser`; **a missing `BiCA Admin`/`BiCA Remote` is created** (O7). The safe first write test is `-Only AppUser` (O9) | D9, D18, D20, D21 |
 | **Review round 12 decisions (2026-10-08, v10.4)** | First real rotation = **one full run** (no slot-by-slot runs); if `-Only` is used, AutoLogon before BiCAAdmin. `/PS2` for both applies on 102575. **Strict D12 budget.** Site rules also for the re-apply. Dependents of retired accounts **always moved** to `ApplicationUser` (O5); the same for other accounts the operator disables (D23). **No move to a newly created `ApplicationUser`**: the built-in Administrator keeps its dependents and stays enabled. Interrupted run: **stop, re-run only**. **Remove `-LogPath`.** Auto-logon switch: **turn off first**. `PUB-User` set **without a DPAPI warning** | D12, D20, D24, §3, §7.5, §8 |
 | Disable also | `SYS Admin` (also spelled `SYS-Admin`, v10.5); `SP Admin` from v10 to v10.4; an existing `SOP-Admin` from v10.2 to v10.4 | D22 |
-| **`SYS-Admin`, `SOP-Admin`, `SP Admin`, SQL (2026-10-19, v10.5)** | `SYS-Admin` is `SYS Admin` with another spelling: **always disable `SYS Admin` and `SYS-Admin`**. **Keep `SOP-Admin` and `SP Admin` untouched.** **Remove any SQL credential updates** | D22, D26, D27 |
+| **`SYS-Admin`, `SOP-Admin`, `SP Admin`, SQL (2026-10-19, v10.5)** | `SYS-Admin` is `SYS Admin` with another spelling: **always disable `SYS Admin` and `SYS-Admin`**. **Keep `SOP-Admin` and `SP Admin` untouched.** **Remove any SQL credential updates**. The `SOP-Admin` part is superseded by v10.6 (next row) | D22, D26, D27 |
+| **`SOP-Admin` replaces the BiCA accounts (2026-10-19, v10.6)** | "**Replace & disable users `BiCA Admin` and `BiCA Remote` on all machines with the user `SOP-Admin`**: fully replace their functionality with the existing or inexisting user `SOP-Admin`. **Grant the same level of access to SQL.** Since the script might be executed with user `BiCA Remote` while `SOP-Admin` does not exist at that time, **disabling `BiCA Remote` should be the last step**." The v10 answers on `SOP-Admin` (groups, `BiCA Remote` last, a `sysadmin` login) apply again | D2, D21, D22, D24–D29 |
 | Keep | `WinUser1–3`, FTP users (check mode as before) | D21 |
 | Other enabled accounts | **Ask the operator** per account | D23 |
 | Dependents of disabled accounts | **Move to the replacement** | D24 |
-| ~~`SOP-Admin` groups~~ | ~~Administrators + Remote Desktop Users + Offer Remote Assistance Helpers~~ **Superseded by v10.2** | — |
-| ~~Running account~~ | ~~Disable `BiCA Remote` last, after `SOP-Admin` is verified~~ **Superseded by v10.2:** `BiCA Remote` keeps being the operator account, set as the last slot | D25 |
+| `SOP-Admin` groups | Administrators + Remote Desktop Users + Offer Remote Assistance Helpers. Superseded by v10.2, **in force again since v10.6** | `AdminRemote` role, D28 |
+| Running account | Disable `BiCA Remote` last, after `SOP-Admin` is verified. Superseded by v10.2 (`BiCA Remote` stayed the operator account, set as the last slot), **in force again since v10.6** | D25 |
 | Replaced accounts | **Disable only** (groups and password unchanged) | D22 |
 | Passwords | **Set**, except `ApplicationUser`: **changed** with its old password to keep its DPAPI data (decided after the DPAPI explanation) | D9 |
-| ~~SQL~~ | ~~`SOP-Admin` gets a Windows login with `sysadmin` (M5)~~ **Superseded by v10.2** | — |
-| BiCA Admin | Administrators only; **removed** from `Offer Remote Assistance Helpers` | `Admin` role |
+| SQL | `SOP-Admin` gets a Windows login with `sysadmin` (M5). Superseded by v10.2; **since v10.6 it gets the server roles of the BiCA logins** (`sysadmin` on the test sites), written in its slot, not in M5 | D29 |
+| BiCA Admin | Administrators only; **removed** from `Offer Remote Assistance Helpers`. *Moot since v10.6: replaced by `SOP-Admin`, its groups stay as they are when it is disabled (D22)* | `Admin` role |
 | Old passwords | Usually known | D9 |
 | Password policy | Earlier answer "uniform" was **contradicted by the inventory** (§13.2). Decision: **strictest rule on every machine** | D15 |
 | SQL | **2005–2017** must be supported; default instance; integrated sysadmin; `sa` not managed; all three `sysadmin` | §7.9 |
@@ -935,8 +975,8 @@ Step 4 runs for every Windows slot, i.e. its accounts' own services, password-st
 - ~~O7~~ **Decided (2026-10-07):**
   - (a) An enabled `PUB-User`/`WinAutoUser` that isn't the auto-logon account stays enabled.
   - (b) A switch from an admin or other account on a non-SM machine goes to `PUB-User` if usable, otherwise to `WinAutoUser`.
-  - (c) A missing `BiCA Admin`/`BiCA Remote` is created. Default: an existing but disabled one stays disabled (only `ApplicationUser` is enabled if disabled).
-- ~~O8~~ **Decided (2026-10-07):** `BiCA Admin` and `BiCA Remote` are **set** (D9); their DPAPI data is given up.
+  - (c) A missing `BiCA Admin`/`BiCA Remote` is created. Default: an existing but disabled one stays disabled (only `ApplicationUser` is enabled if disabled). *Superseded by v10.6: the BiCA accounts are replaced by `SOP-Admin`, which is created if missing and enabled if disabled.*
+- ~~O8~~ **Decided (2026-10-07):** `BiCA Admin` and `BiCA Remote` are **set** (D9); their DPAPI data is given up. *Superseded by v10.6: they are no longer set; `SOP-Admin` is.*
 - ~~O9~~ **Decided (2026-10-07):** the safe first write test is `-Only AppUser` (D20).
 - **O3** A test host with a real PS 2.0 engine (Windows 10 LTSC 2019 or Windows 7 VM). None is available yet (user, 2026-10-06).
 - ~~O4~~ `BiCA Admin` in `Offer Remote Assistance Helpers`: **remove it** (user, 2026-10-06).
@@ -958,11 +998,15 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 
 | Risk | Mitigation |
 |---|---|
-| `BiCA Remote` locked by the tool | Lockout budget per machine (D12), logon type per D16, rotated last, live session persists, auto-unlock |
-| Operator locked out when the running account is disabled (e.g. a retired `SYS-Admin`) | D25: disabled last, only after `BiCA Remote` is enabled, verified and holds an effective RDP logon right; the live session persists |
-| DPAPI data of `BiCA Admin`/`BiCA Remote` lost by the set | Accepted (O8); shown before `YES` |
+| `SOP-Admin` locked by the tool | Lockout budget per machine (D12), logon type per D16, rotated last, live session persists, auto-unlock |
+| Operator locked out when the running account is disabled (`BiCA Remote`, a retired `SYS-Admin`) | D25: disabled last, only after `SOP-Admin` is enabled, in Administrators, verified and holds an effective RDP logon right; the live session persists |
+| Operator loses SQL Server `sysadmin` access when the BiCA accounts are disabled (the v10.2 issue) | D29: `SOP-Admin` gets the server roles of the BiCA logins in its slot, verified by SID; without it the BiCA accounts stay enabled (exit 1). Named instances and database-level permissions are reported for a manual check |
+| Console or RDP access lost when the BiCA accounts are disabled (`BiCA Admin` is the console account on the SM machines, `BiCA Remote` the RDP account) | D28: a BiCA account is disabled only if `SOP-Admin` holds the effective local and remote-interactive logon rights it holds |
+| The SQL step can't run where `BiCA Remote` is already disabled (QS-K1 after the WIP build) and the operator logs on as `SOP-Admin` without a SQL login | Shown before `YES` ("not sysadmin"/"no connection"); run the tool once as `BiCA Admin` at the console, or grant the login manually; the BiCA accounts stay enabled until then |
+| A BiCA account kept enabled (dependents while `SOP-Admin` is created, SQL step failed, logon right missing) keeps its old password | Reported per account; a re-run disables it once the condition is met |
+| DPAPI data of an existing `SOP-Admin` lost by the set | Accepted like O8 for the BiCA accounts; shown before `YES` |
 | Network logons as `PUB-User`/`WinAutoUser` between the machines of a site, probably MSMQ of the POS software (`WinAutoUser`: "WinPOS-User for MSMQ"; `SM-QS-K1` shows a `PUB-User` logon while its auto-logon is off, 2026-10-19). They need the same password on both machines, and a logged-on session keeps its old password until it logs on again. While a site is half rotated, they fail and count as bad passwords on the receiving machine (lockout threshold 4 on `SM-QS-K1`) | Rotate all machines of a site in one session with the same auto-logon password, then restart the machines with an active auto-logon (or log the account off and on), then check MSMQ; a lockout ends by itself after the lockout duration. The failures can also exhaust the lockout budget of the verification logons (D12) |
-| A created `BiCA Admin`/`BiCA Remote` has a new SID and no SQL Server login | Reported; only happens where the account was missing |
+| A created `ApplicationUser` has a new SID and no SQL Server login | Reported; only happens where the account was missing. A created `SOP-Admin` gets its login (D29) |
 | Services of the application user keep running on the old logon until restarted | D17: no restarts by the tool; "restart pending" in the report; the new password applies at the next start (verified beforehand via `LogonUser`) |
 | Site password rejected on one machine (complexity, length) | D15 strictest site rules checked on every machine |
 | Site password rejected by history on one machine | "Never used before" notice; slot failure is reported precisely; operator chooses a new site password |
@@ -970,7 +1014,7 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 | App uses old passwords until `LOGINS` is updated; possible local lockouts | Shown before `YES`, FOLLOW-UP REQUIRED, exit code 4; accepted |
 | Half-rotated local dependents | Slot as unit (D8), retry, run journal, idempotent re-run (D11) |
 | Verification refused because of deny rights | D16 logon-type selection; spike item 14 |
-| Exclusive groups remove a needed membership, e.g. FTP folder access granted through Users | Allow-lists (`WinUser`, `BiCA Remote`), `?` groups, admin rails, every removal listed before `YES`; FTP users leaving Users is a confirmed decision, tried first on test site 102575 |
+| Exclusive groups remove a needed membership, e.g. FTP folder access granted through Users | Allow-lists (`WinUser`), `?` groups, admin rails, every removal listed before `YES`; FTP users leaving Users is a confirmed decision, tried first on test site 102575 |
 | Group membership misread (ADSI on Windows Embedded Standard 7) | `netapi32` by SID (D5); spike item 8 |
 | Auto-logon switched to a standard user breaks the console application (e.g. POS software on `IPT01-102575`) | Confirmed policy (D18); shown before `YES`; tried first on test site 102575; M4 reboot tests |
 | Auto-logon turned off on an SM machine: the console session no longer starts by itself | Confirmed policy (D18); shown before `YES` |
@@ -985,7 +1029,7 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 | Stale auto-logon after a partial run (one failed logon per boot, threshold 4 on 102575) | Password source per target account (§7.5); "auto-logon broken until re-run" as a high-impact item; a switch turns auto-logon off first; re-run with the same passwords |
 | Dependents moved to an account with a new SID lose its SQL login, ACLs and profile (a created `ApplicationUser`) | D24 v10.4: no move to an `ApplicationUser` created in this run; the built-in Administrator stays enabled; manual migration reported |
 | Moves of retired/other accounts' dependents to `ApplicationUser` change who they run as (SQL login, ACLs of the old account) | Shown as high-impact before `YES`; failures only show at the next start (D17); `ApplicationUser` is `sysadmin` on all test sites except `IPT01-102575` |
-| An RDP client retries `BiCA Remote`'s old saved password | FOLLOW-UP reminder after its set (§8); threshold 4 on 102575 |
+| An RDP client retries `SOP-Admin`'s old saved password | FOLLOW-UP reminder after its set (§8); threshold 4 on 102575 |
 
 ---
 
@@ -1005,6 +1049,8 @@ Found when the v10.3 build was compared with this plan. The other findings of th
 | 10 | v9.2 | 7.5 | 4 Major, 6 Minor | D18 table gaps (no usable target, admin `PUB-User`, `AutoLogonCount`, REG_DWORD, stale domain), password source per account, D19 vs journal/enforcement, no real PS 2.0 in CI → resolved in v9.3 (usable-target rule, per-account password source, crash-safe write order, readable audit definition, all of `-Apply` blocked on a protected system volume, `master` data + log files, `/PS2` audits, D18 moved into M2, FTP network-right/ACL warnings, absolute launcher paths, log-folder ownership, v1.3 gate) |
 | 11 | v9.3 | 8.5 | 4 Minor | removals vs auto-logon step order, standardize option when a switch fails, planted journal, `/PS2` only for audits → fixed in v9.3 (removals before the auto-logon step, third operator option, journal ignored after an ownership fix, `/PS2` for the first apply on 102575, PS 2.0 VMs marked pending) |
 | 12 | v10.3 + build 0.3.0 | 7.5 (plan), 7.5 (apply), 8 (safety), 8 (tests) | 0 Blocker, 10 Major, ~15 Minor | README slot order vs "off stays off", undefined final full run, D24 moves to a new SID, `/PS2` coverage of the write paths, re-apply vs site rules, exit 0 for a skipped slot, verification logons outside the D12 budget, `-LogPath` ACL reset, no RDP reminder, 2 unit tests vs D12 → user decisions in v10.4 (§13.1); code fixes in 0.4.0 |
+
+v10.6 was a user decision (2026-10-19), not reviewed: `SOP-Admin` replaces `BiCA Admin` and `BiCA Remote` (D28) and gets the SQL Server access of their Windows logins (D29); a running `BiCA Remote` is disabled last (D25); only `SP Admin` is kept untouched (D26). The application account is now marked by `Application` in the config, since `SOP-Admin` replaces accounts too. Implemented in version 0.6.0; the unit tests are updated but not yet run.
 
 v10.5 was a user decision (2026-10-19), not reviewed: `SYS-Admin` is retired as the hyphen spelling of `SYS Admin`; existing `SOP-Admin` and `SP Admin` accounts are kept untouched by the new `Mode = 'Keep'` (D26); SQL credentials are no longer updated and M5 is dropped (D27). Implemented in version 0.5.0 (0.5.1: exit code printed; 0.5.2: Sysinternals Autologon traces reported only).
 

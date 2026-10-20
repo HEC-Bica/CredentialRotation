@@ -707,7 +707,39 @@ function Invoke-CrPreflight {
         }
     }
 
-    return @{ MachineBlocked = $machineBlocked; BlockedSlots = $blocked; Findings = $findings.ToArray() }
+    # D29 (v10.6): can the tool write the login of an entry with SqlAccess? Only the write conditions; a stopped or
+    # unreachable instance makes the access unknown (Get-CrSqlAccessPlan). Blocks no slot: the accounts it replaces stay enabled.
+    $sqlWriteBlocked = $null
+    if (Test-CrPreflightSqlAccess -Config $Config) {
+        $why = New-Object System.Collections.ArrayList
+        $sql = $State['Sql']
+        if (($sql -is [hashtable]) -and $sql['DefaultInstancePresent'] -and $sql['Connected']) {
+            $major = $null
+            if ($null -ne $sql['MajorVersion']) { $major = [int]$sql['MajorVersion'] }
+            if ($null -eq $major -or $major -lt 9 -or $major -gt 14) {
+                [void]$why.Add(('SQL Server version {0} is not supported (2005-2017, major 9-14)' -f $sql['ProductVersion']))
+            }
+            if ($sql['ConnectedAsSysadmin'] -ne $true) {
+                [void]$why.Add(('the running account ({0}) is not sysadmin; run the tool as an account that is sysadmin through its own Windows login' -f $sql['ConnectedAs']))
+            }
+        }
+        if ($wfDecision['BlockSql']) {
+            [void]$why.Add('write filter: ' + ((ConvertTo-CrArray $wfDecision['Reasons']) -join ' '))
+        }
+        if ($why.Count -gt 0) { $sqlWriteBlocked = ($why.ToArray() -join '; ') }
+    }
+
+    return @{ MachineBlocked = $machineBlocked; BlockedSlots = $blocked; Findings = $findings.ToArray(); SqlWriteBlocked = $sqlWriteBlocked }
+}
+
+# $true if a managed Windows entry of the config has SqlAccess (D29).
+function Test-CrPreflightSqlAccess {
+    param($Config)
+    if (-not ($Config -is [hashtable])) { return $false }
+    foreach ($a in (ConvertTo-CrArray $Config['Accounts'])) {
+        if (($a -is [hashtable]) -and [string]$a['Kind'] -eq 'Windows' -and $a['SqlAccess'] -and -not $a['Mode']) { return $true }
+    }
+    return $false
 }
 
 #endregion

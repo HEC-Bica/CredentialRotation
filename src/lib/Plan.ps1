@@ -1,4 +1,4 @@
-# Plan.ps1 - desired vs actual -> findings (docs/PLAN.md sections 6 step 5, 7, 8, D21-D25; docs/dev/CONTRACTS.md)
+# Plan.ps1 - desired vs actual -> findings (docs/PLAN.md sections 6 step 5, 7, 8, D21-D29; docs/dev/CONTRACTS.md)
 
 # SIDs of the local groups that list $Sid as a direct member.
 function Get-CrDirectGroupSids {
@@ -339,9 +339,11 @@ function Get-CrMovableDependentCount {
 # D24 (v10.4): an account created in this run has a new SID (no SQL login, ACLs or profile of the old account), so
 # nothing is moved to it and the account whose dependents would move stays enabled.
 function Add-CrCreatedTargetFinding {
-    param($Plan, [string]$Name, [string]$Slot, [string]$TargetName)
-    Add-CrPlanFinding $Plan 'HighImpact' 'Accounts' ('Not disabled: ' + $TargetName + ' is created in this run, so the services, scheduled tasks and COM+ applications of ' + $Name + ' are not moved to it; migrate them manually (D24)') $Slot $Name `
-        ('A created account has a new SID: no SQL login, ACLs or profile of ' + $Name)
+    param($Plan, [string]$Name, [string]$Slot, [string]$TargetName, [bool]$SqlLoginGranted = $false)
+    $detail = 'A created account has a new SID: no SQL login, ACLs or profile of ' + $Name
+    # D29: an account with SqlAccess gets its SQL login in this run.
+    if ($SqlLoginGranted) { $detail = 'A created account has a new SID: no ACLs or profile of ' + $Name + '; its SQL Server login is created in this run (D29). A later run moves them' }
+    Add-CrPlanFinding $Plan 'HighImpact' 'Accounts' ('Not disabled: ' + $TargetName + ' is created in this run, so the services, scheduled tasks and COM+ applications of ' + $Name + ' are not moved to it; migrate them manually (D24)') $Slot $Name $detail
 }
 
 # D24: dependents of an account that is disabled in this run. Every movable item is a HighImpact
@@ -371,9 +373,45 @@ function Add-CrDisableDependentFindings {
     }
 }
 
-# D22, D24, D25: accounts replaced by a managed entry.
+# D29 (v10.6): the SQL Server access that the entry's account gets from the accounts it replaces (Get-CrSqlAccessPlan).
+function Add-CrSqlAccessFindings {
+    param($Plan, $State, $Entry, [string]$Slot, $Preflight)
+    $name = $null
+    $sid = $null
+    foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) {
+        if (-not ($a -is [hashtable])) { continue }
+        if (-not $name -and $a['Name']) { $name = [string]$a['Name'] }
+        if (-not $sid -and $a['Sid']) { $sid = [string]$a['Sid'] }
+    }
+    if (-not $name) { $name = [string]$Entry['Id'] }
+    $writeBlocked = $null
+    if ($Preflight -is [hashtable]) { $writeBlocked = [string]$Preflight['SqlWriteBlocked'] }
+    $sp = Get-CrSqlAccessPlan -State $State -Entry $Entry -TargetSid $sid -TargetName $name -WriteBlocked $writeBlocked
+    foreach ($n in (ConvertTo-CrArray $sp['Notes'])) { Add-CrPlanFinding $Plan 'HighImpact' 'SQL' $n $Slot $name }
+    if ($sp['Unknown']) {
+        Add-CrPlanFinding $Plan 'HighImpact' 'SQL' ('The SQL Server access of ' + $name + ' cannot be checked: ' + $sp['Reason'] + ' (D29)') $Slot $name
+        return
+    }
+    $sources = (ConvertTo-CrArray $sp['Sources']) -join ', '
+    if (-not $sp['Needed']) {
+        if ($sources) { Add-CrPlanFinding $Plan 'Info' 'SQL' ('SQL Server: ' + $name + ' has the access of ' + $sources + ' (D29)') $Slot $name }
+        return
+    }
+    $parts = New-Object System.Collections.ArrayList
+    if ($sp['CreateLogin']) { [void]$parts.Add('create the Windows login ' + $sp['LoginName']) }
+    if ($sp['EnableLogin']) { [void]$parts.Add('enable the login ' + $sp['LoginName']) }
+    $missing = ConvertTo-CrArray $sp['MissingRoles']
+    if ($missing.Count -gt 0) { [void]$parts.Add('add it to the server role ' + ($missing -join ', ')) }
+    Add-CrPlanFinding $Plan 'Drift' 'SQL' ('SQL Server: ' + (($parts.ToArray()) -join ', ')) $Slot $name `
+        ('The same access as ' + $sources + ' (D29); written after its logon test, as the running account')
+    if ($sp['Blocked']) {
+        Add-CrPlanFinding $Plan 'HighImpact' 'SQL' ('The SQL Server access of ' + $name + ' cannot be granted now: ' + $sp['Reason'] + ' (D29)') $Slot $name
+    }
+}
+
+# D22, D24, D25, D28, D29: accounts replaced by a managed entry.
 function Add-CrReplacedFindings {
-    param($Plan, $State, $Entry, [string]$Slot, [string]$RunningSid, [string]$OperatorName)
+    param($Plan, $State, $Entry, [string]$Slot, [string]$RunningSid, [string]$OperatorName, $Preflight)
     $newName = $null
     foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) { if ($a['Name']) { $newName = [string]$a['Name']; break } }
     if (-not $newName) { $newName = [string]$Entry['Id'] }
@@ -385,11 +423,18 @@ function Add-CrReplacedFindings {
             continue
         }
         if ($created -and (Get-CrMovableDependentCount -State $State -Sid ([string]$r['Sid'])) -gt 0) {
-            Add-CrCreatedTargetFinding -Plan $Plan -Name $name -Slot $Slot -TargetName $newName
+            Add-CrCreatedTargetFinding -Plan $Plan -Name $name -Slot $Slot -TargetName $newName -SqlLoginGranted (Test-CrSqlAccessEntry $Entry)
+            continue
+        }
+        $blocker = Get-CrReplacementBlocker -State $State -Entry $Entry -ReplacedSid ([string]$r['Sid']) -ReplacedName $name -Preflight $Preflight -RunningSid $RunningSid
+        if ($blocker) {
+            Add-CrPlanFinding $Plan 'HighImpact' 'Accounts' ('Not disabled: ' + $blocker) $Slot $name 'It keeps its current password; a re-run disables it once this is solved'
             continue
         }
         $isRunning = ($RunningSid -and ([string]$r['Sid'] -ieq $RunningSid))
-        $detail = 'D22: disabled only after ' + $newName + ' is verified in this run; groups and password stay unchanged'
+        $detail = 'D22: disabled only after ' + $newName + ' is verified in this run'
+        if (Test-CrSqlAccessEntry $Entry) { $detail = $detail + ' and has their SQL Server access (D29)' }
+        $detail = $detail + '; groups and password stay unchanged'
         if ($isRunning) { $detail = $detail + '; the running account is disabled as the last step (D25)' }
         Add-CrPlanFinding $Plan 'Drift' 'Accounts' ('Disable ' + $name + ' (replaced by ' + $newName + ')') $Slot $name $detail
         if ($isRunning) {
@@ -508,18 +553,129 @@ function Get-CrAutoLogonSlot {
     return $null
 }
 
+# $true for the managed entry marked Operator: the operator's account (D25), SOP-Admin since v10.6.
+function Test-CrOperatorEntry {
+    param($Entry)
+    if (-not ($Entry -is [hashtable])) { return $false }
+    if ($Entry['Operator'] -eq $true) { return $true }
+    return [bool](($Entry['Config'] -is [hashtable]) -and $Entry['Config']['Operator'] -eq $true)
+}
+
 # The operator's account (D25): the managed entry marked Operator. Returns its account name, or $Fallback.
 function Get-CrOperatorAccountName {
     param($Resolved, [string]$Fallback)
-    return (Get-CrManagedAccountName -Resolved $Resolved -Test { param($e) $e['Operator'] -eq $true -or (($e['Config'] -is [hashtable]) -and $e['Config']['Operator'] -eq $true) } -Fallback $Fallback)
+    return (Get-CrManagedAccountName -Resolved $Resolved -Test { param($e) Test-CrOperatorEntry $e } -Fallback $Fallback)
 }
 
-# The application account (D24): the managed entry that replaces accounts (Replaces), i.e. ApplicationUser.
-# Dependents of retired and operator-disabled accounts always move there (v10.4, O5 decided).
+# The application account (D24): the managed entry marked Application, i.e. ApplicationUser (v10.6; until v10.5 the
+# only entry with Replaces). Dependents of retired and operator-disabled accounts always move there (v10.4, O5 decided).
 function Test-CrAppUserEntry {
     param($Entry)
-    if (-not ($Entry -is [hashtable]) -or -not ($Entry['Config'] -is [hashtable])) { return $false }
-    return ((ConvertTo-CrArray $Entry['Config']['Replaces']).Count -gt 0)
+    if (-not ($Entry -is [hashtable])) { return $false }
+    if ($Entry['Application'] -eq $true) { return $true }
+    return [bool](($Entry['Config'] -is [hashtable]) -and $Entry['Config']['Application'] -eq $true)
+}
+
+# $true for a managed entry whose account gets the SQL Server access of the accounts it replaces (D29, v10.6).
+function Test-CrSqlAccessEntry {
+    param($Entry)
+    if (-not ($Entry -is [hashtable])) { return $false }
+    if ([string]$Entry['SqlAccess'] -eq 'FromReplaced') { return $true }
+    return [bool](($Entry['Config'] -is [hashtable]) -and [string]$Entry['Config']['SqlAccess'] -eq 'FromReplaced')
+}
+
+# Returns a copy of $State in which $MemberSid is also a member of $GroupSids (for "after the group adds" right checks).
+function Copy-CrStateWithMember {
+    param($State, [string]$MemberSid, [string[]]$GroupSids)
+    $copy = @{}
+    foreach ($k in $State.Keys) { $copy[$k] = $State[$k] }
+    $groups = New-Object System.Collections.ArrayList
+    foreach ($g in (ConvertTo-CrArray $State['Groups'])) {
+        $members = @()
+        if ($g -is [hashtable]) { $members = ConvertTo-CrArray $g['MemberSids'] }
+        if (($g -is [hashtable]) -and (@($GroupSids) -contains [string]$g['Sid']) -and ($members -notcontains $MemberSid)) {
+            $c = @{}
+            foreach ($k in $g.Keys) { $c[$k] = $g[$k] }
+            $list = New-Object System.Collections.ArrayList
+            foreach ($m in $members) { [void]$list.Add($m) }
+            [void]$list.Add($MemberSid)
+            $c['MemberSids'] = $list.ToArray()
+            [void]$groups.Add($c)
+        } else {
+            [void]$groups.Add($g)
+        }
+    }
+    $copy['Groups'] = $groups.ToArray()
+    return $copy
+}
+
+# D28 (v10.6): the logon types that $ReplacedSid may use and $ReplacementSid may not: 'Interactive' (local) and
+# 'RemoteInteractive' (RDP), from the effective rights (granted and not denied). Comma-returned.
+function Get-CrLogonGaps {
+    param($State, [string]$ReplacementSid, [string]$ReplacedSid)
+    $gaps = New-Object System.Collections.ArrayList
+    if (-not $ReplacementSid -or -not $ReplacedSid) { return , $gaps.ToArray() }
+    $old = Get-CrEffectiveLogonRights -UserSid $ReplacedSid -State $State
+    $new = Get-CrEffectiveLogonRights -UserSid $ReplacementSid -State $State
+    foreach ($t in @('Interactive', 'RemoteInteractive')) {
+        if ($old[$t] -and -not $new[$t]) { [void]$gaps.Add($t) }
+    }
+    return , $gaps.ToArray()
+}
+
+function Get-CrLogonGapText {
+    param($Gaps)
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($g in (ConvertTo-CrArray $Gaps)) {
+        if ($g -eq 'Interactive') { [void]$parts.Add('locally') } elseif ($g -eq 'RemoteInteractive') { [void]$parts.Add('over RDP') }
+    }
+    return (($parts.ToArray()) -join ' and ')
+}
+
+# D28: the logon gaps once the entry's account has its role groups (judged before the run). An account still to be
+# created is represented by the null SID S-1-0-0, which holds no right of its own.
+function Get-CrPlannedLogonGaps {
+    param($State, $Entry, [string]$ReplacedSid, [string]$RunningSid)
+    $sid = $null
+    foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) { if (($a -is [hashtable]) -and $a['Sid']) { $sid = [string]$a['Sid']; break } }
+    if (-not $sid) { $sid = 'S-1-0-0' }
+    $role = $Entry['Role']
+    if (-not ($role -is [hashtable])) { $role = @{} }
+    $after = $State
+    $gp = Get-CrGroupPlan -State $State -Role $role -Sid $sid -RunningSid $RunningSid
+    $add = ConvertTo-CrArray $gp['Add']
+    if (-not $gp['Skip'] -and $add.Count -gt 0) { $after = Copy-CrStateWithMember -State $State -MemberSid $sid -GroupSids $add }
+    $gaps = Get-CrLogonGaps -State $after -ReplacementSid $sid -ReplacedSid $ReplacedSid
+    return , $gaps
+}
+
+# D28, D29 (v10.6): why an account replaced by $Entry stays enabled in this run, judged before it starts, or $null:
+# the replacement can't get the SQL Server access of the accounts it replaces (unknown or blocked), or, for the operator's
+# account, it would not be allowed to log on locally or over RDP where the replaced account can.
+function Get-CrReplacementBlocker {
+    param($State, $Entry, [string]$ReplacedSid, [string]$ReplacedName, $Preflight, [string]$RunningSid)
+    $newName = $null
+    $newSid = $null
+    foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) {
+        if (-not ($a -is [hashtable])) { continue }
+        if (-not $newName -and $a['Name']) { $newName = [string]$a['Name'] }
+        if (-not $newSid -and $a['Sid']) { $newSid = [string]$a['Sid'] }
+    }
+    if (-not $newName) { $newName = [string]$Entry['Id'] }
+    if (Test-CrSqlAccessEntry $Entry) {
+        $writeBlocked = $null
+        if ($Preflight -is [hashtable]) { $writeBlocked = [string]$Preflight['SqlWriteBlocked'] }
+        $sp = Get-CrSqlAccessPlan -State $State -Entry $Entry -TargetSid $newSid -TargetName $newName -WriteBlocked $writeBlocked
+        if ($sp['Unknown']) { return ('the SQL Server access of {0} cannot be checked: {1} (D29)' -f $newName, $sp['Reason']) }
+        if ($sp['Needed'] -and $sp['Blocked']) { return ('{0} cannot get the SQL Server access of the accounts it replaces: {1} (D29)' -f $newName, $sp['Reason']) }
+    }
+    if (Test-CrOperatorEntry $Entry) {
+        $gaps = Get-CrPlannedLogonGaps -State $State -Entry $Entry -ReplacedSid $ReplacedSid -RunningSid $RunningSid
+        if ($gaps.Count -gt 0) {
+            return ('{0} would not be allowed to log on {1} as {2} can (logon right not granted, or denied; D28)' -f $newName, (Get-CrLogonGapText $gaps), $ReplacedName)
+        }
+    }
+    return $null
 }
 
 # $true if the entry's account is created in this run (a ToCreate placeholder, PLAN 8 step 0).
@@ -646,7 +802,8 @@ function New-CrPlan {
             } elseif ($acct['ToCreate']) {
                 # D21: created with the slot password, the role groups and flags (PLAN 8 step 0)
                 Add-CrPlanFinding $plan 'Drift' 'Accounts' ('Create ' + $acct['Name']) $slot $acct['Name'] 'D21: created with the slot password, its role groups and flags'
-                if ($sqlInstalled) {
+                # An entry with SqlAccess gets its login in this run (D29, Add-CrSqlAccessFindings).
+                if ($sqlInstalled -and -not (Test-CrSqlAccessEntry $entry)) {
                     Add-CrPlanFinding $plan 'Info' 'SQL' 'The created account has a new SID, so it has no Windows login in SQL Server (reported, PLAN 1.1)' $slot $acct['Name']
                 }
                 $newUser = @{ Name = [string]$acct['Name']; Sid = $null }
@@ -679,7 +836,8 @@ function New-CrPlan {
             }
         }
         if ($entry['Kind'] -eq 'Windows' -and -not $isCheck) {
-            Add-CrReplacedFindings -Plan $plan -State $State -Entry $entry -Slot $slot -RunningSid $RunningSid -OperatorName $operatorName
+            if (Test-CrSqlAccessEntry $entry) { Add-CrSqlAccessFindings -Plan $plan -State $State -Entry $entry -Slot $slot -Preflight $Preflight }
+            Add-CrReplacedFindings -Plan $plan -State $State -Entry $entry -Slot $slot -RunningSid $RunningSid -OperatorName $operatorName -Preflight $Preflight
         }
     }
 

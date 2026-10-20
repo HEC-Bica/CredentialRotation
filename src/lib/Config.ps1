@@ -15,10 +15,10 @@ function Get-CrConfigSchema {
         AccountKeys          = @('Id', 'Kind', 'Name', 'Names', 'NamePattern', 'Candidates', 'Role', 'Credential', 'Mode',
                                  'LoginsEntry', 'Services', 'ScheduledTasks', 'ComPlus', 'IisReport',
                                  'AutoLogonUser', 'AutoLogon', 'ServerRoles',
-                                 'Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled')
+                                 'Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled', 'Application', 'SqlAccess')
         WindowsOnlyKeys      = @('Names', 'NamePattern', 'Candidates', 'Role', 'Mode', 'Services', 'ScheduledTasks',
                                  'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon',
-                                 'Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled')
+                                 'Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled', 'Application', 'SqlAccess')
         SqlOnlyKeys          = @('ServerRoles')
         SelectionKeys        = @('Name', 'Names', 'NamePattern', 'Candidates')
         DependentKeys        = @('Services', 'ScheduledTasks', 'ComPlus', 'IisReport')
@@ -26,8 +26,9 @@ function Get-CrConfigSchema {
         Kinds                = @('Windows', 'SqlLogin')
         ModeValues           = @('Check', 'Disable', 'Keep')
         PasswordModeValues   = @('Set', 'Change')
+        SqlAccessValues      = @('FromReplaced')
         # Keys of managed (rotated) entries; not valid on Check, Disable or Keep entries
-        ManagedOnlyKeys      = @('Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled')
+        ManagedOnlyKeys      = @('Create', 'Replaces', 'PasswordMode', 'Operator', 'EnableIfDisabled', 'Application', 'SqlAccess')
         # A Disable (D22) or Keep (D26) entry only selects accounts by Name/Names
         DisableForbiddenKeys = @('NamePattern', 'Candidates', 'Role', 'Credential', 'LoginsEntry', 'Services', 'ScheduledTasks',
                                  'ComPlus', 'IisReport', 'AutoLogonUser', 'AutoLogon')
@@ -275,7 +276,8 @@ function Test-CrConfigCredentials {
     return , $slots.ToArray()
 }
 
-# Keys of managed entries (CONTRACTS "v10: account model"): Create, Replaces, PasswordMode, Operator, EnableIfDisabled.
+# Keys of managed entries (CONTRACTS "v10: account model"): Create, Replaces, PasswordMode, Operator, EnableIfDisabled,
+# Application and SqlAccess (v10.6).
 # $ReplacedBy maps upper-cased replaced names to the entry that replaces them (a name may be replaced once).
 function Test-CrConfigManagedKeys {
     param($Schema, $Account, [string]$Where, [bool]$IsRotate, $ReplacedBy, $Errors)
@@ -287,7 +289,7 @@ function Test-CrConfigManagedKeys {
         }
         return
     }
-    foreach ($key in @('Create', 'Operator', 'EnableIfDisabled')) { Test-CrConfigBool -Table $Account -Key $key -Where $Where -Errors $Errors }
+    foreach ($key in @('Create', 'Operator', 'EnableIfDisabled', 'Application')) { Test-CrConfigBool -Table $Account -Key $key -Where $Where -Errors $Errors }
     $singleName = ($Account.ContainsKey('Name') -and -not $Account.ContainsKey('Names') -and
                    -not $Account.ContainsKey('NamePattern') -and -not $Account.ContainsKey('Candidates'))
     if (($Account['Create'] -eq $true) -and -not $singleName) {
@@ -295,6 +297,18 @@ function Test-CrConfigManagedKeys {
     }
     if (($Account['Operator'] -is [bool]) -and $Account['Operator'] -and -not $singleName) {
         [void]$Errors.Add(('{0}: Operator requires a single Name (the operator''s account, D25).' -f $Where))
+    }
+    if (($Account['Application'] -is [bool]) -and $Account['Application'] -and -not $singleName) {
+        [void]$Errors.Add(('{0}: Application requires a single Name (the target of moved dependents, D24).' -f $Where))
+    }
+    # D29 (v10.6): the account gets the SQL Server access of the accounts it replaces.
+    if ($Account.ContainsKey('SqlAccess')) {
+        if ($Schema.SqlAccessValues -notcontains [string]$Account['SqlAccess']) {
+            [void]$Errors.Add(('{0}: SqlAccess must be one of: {1}.' -f $Where, ($Schema.SqlAccessValues -join ', ')))
+        }
+        if (-not $Account.ContainsKey('Replaces')) {
+            [void]$Errors.Add(('{0}: SqlAccess requires Replaces (the accounts whose SQL access it gets).' -f $Where))
+        }
     }
     # D21: the auto-logon accounts are never created.
     if (($Account['Create'] -eq $true) -and $Account.ContainsKey('AutoLogon')) {
@@ -557,6 +571,7 @@ function Test-CrConfig {
         $replacedBy = @{}
         $autoLogonEntries = 0
         $operatorEntries = 0
+        $applicationEntries = 0
         $autoLogonNames = New-Object System.Collections.ArrayList
         $disableNames = New-Object System.Collections.ArrayList
         $keepNames = New-Object System.Collections.ArrayList
@@ -585,6 +600,7 @@ function Test-CrConfig {
                 }
             }
             if (($account['Operator'] -is [bool]) -and $account['Operator']) { $operatorEntries++ }
+            if (($account['Application'] -is [bool]) -and $account['Application']) { $applicationEntries++ }
             if ([string]$account['Mode'] -eq 'Disable') {
                 if ($account['Name']) { [void]$disableNames.Add([string]$account['Name']) }
                 foreach ($n in (ConvertTo-CrArray $account['Names'])) { if ($n) { [void]$disableNames.Add([string]$n) } }
@@ -597,6 +613,7 @@ function Test-CrConfig {
         }
         if ($autoLogonEntries -gt 1) { [void]$errors.Add('Accounts: only one entry may have an AutoLogon block.') }
         if ($operatorEntries -gt 1) { [void]$errors.Add('Accounts: only one entry may be the Operator account (D25).') }
+        if ($applicationEntries -gt 1) { [void]$errors.Add('Accounts: only one entry may be the Application account (D24).') }
         # D18, D22: the auto-logon accounts are never disabled, so they can't be replaced or retired.
         foreach ($n in $autoLogonNames) {
             if ($replacedBy.ContainsKey($n.ToUpperInvariant())) {

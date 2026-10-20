@@ -4,13 +4,15 @@ A PowerShell tool that rotates the local Windows credentials on standalone workg
 
 Design: [docs/PLAN.md](docs/PLAN.md) · Interfaces: [docs/dev/CONTRACTS.md](docs/dev/CONTRACTS.md) · Conventions and dev commands: [CLAUDE.md](CLAUDE.md)
 
-## Status (version 0.5.2, PLAN v10.5)
+## Status (version 0.6.0, PLAN v10.6)
+
+Version 0.6.0 replaces `BiCA Admin` and `BiCA Remote` with `SOP-Admin` (PLAN D28) and gives `SOP-Admin` the SQL Server access of their Windows logins (D29). Its unit tests are written but not yet run; the results below are from 0.5.x.
 
 | Milestone | Content | State |
 |---|---|---|
-| M1 | Read-only audit | tested |
-| M2 | Password prompts, account model, groups, flags, auto-logon policy | code written; `-Apply` of 0.5.x not yet run (see machine state) |
-| M3 | Services, scheduled tasks, COM+ updates and moves | code written; `-Apply` of 0.5.x not yet run |
+| M1 | Read-only audit | tested (0.5.x) |
+| M2 | Password prompts, account model, groups, flags, auto-logon policy | code written; `-Apply` of 0.5.x/0.6.0 not yet run (see machine state) |
+| M3 | Services, scheduled tasks, COM+ updates and moves; the SQL login of `SOP-Admin` | code written; `-Apply` not yet run |
 
 | Machine | Audit (PS 5.1) | Audit (`/PS2`) | Unit tests, lint |
 |---|---|---|---|
@@ -31,7 +33,7 @@ AppLocker blocks scripts on the development machine, so all runs happen on the t
 
 ## Testing on a test machine
 
-**Setup:** copy `src\` and `config\` from `main` to `C:\temp\CredentialRotation\` (on Windows 10 also `tests\` and `build\`; for the inventory `tools\`). Work in an elevated **cmd** ("Run as administrator"), logged on as `BiCA Remote` (otherwise note the account). Type each command on its own line and never put a password on a command line.
+**Setup:** copy `src\` and `config\` from `main` to `C:\temp\CredentialRotation\` (on Windows 10 also `tests\` and `build\`; for the inventory `tools\`). Work in an elevated **cmd** ("Run as administrator"), logged on as `BiCA Remote`, or as `SOP-Admin` once it has replaced the BiCA accounts (otherwise note the account). The account must be `sysadmin` in SQL Server through its own Windows login, so the tool can give `SOP-Admin` its login. Type each command on its own line and never put a password on a command line.
 
 **Output:** save the console output as `ConsoleOutput_<step>_<machine>.txt` and copy it, with the `.log` and `.csv` files from `%ProgramData%\CredentialRotation\logs\`, to `logs\<machine>\` in the repository. Git ignores that folder; the files contain account names and SIDs, so never commit them. Send back each step's output before starting the next one.
 
@@ -69,7 +71,7 @@ C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd > C:\temp\ConsoleOut
 C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 > C:\temp\ConsoleOutput_audit_ps2_%COMPUTERNAME%.txt 2>&1
 ```
 
-Check: `SOP-Admin` and `SP Admin` only as "Kept untouched"; `SYS Admin` and `SYS-Admin` as "Disable … (no replacement)"; nothing about SQL logins; last line `Exit code: 10` or `0`.
+Check: `SP Admin` only as "Kept untouched"; `SOP-Admin` as "Create SOP-Admin" or with "Password set", plus "SQL Server: create the Windows login …"; `BiCA Admin` and `BiCA Remote` as "Disable … (replaced by SOP-Admin)", or "Not disabled: …" with the reason; `SYS Admin` and `SYS-Admin` as "Disable … (no replacement)"; last line `Exit code: 10` or `0`.
 
 Inventory, still open on one Windows Embedded 7 machine (the JSON contains account names and SIDs):
 
@@ -95,13 +97,15 @@ C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 -Apply -Only Ap
 
 `-Apply` without `-Only`, with a new site password per slot that was never used before (password history).
 
-- `BiCAAdmin`, `BiCARemote`: password set; a missing account is created. `BiCARemote` (your account) runs last; update saved RDP credentials afterwards.
 - `AppUser`: changed with its old password; created if missing. The built-in Administrator is disabled and its dependents move to `ApplicationUser`, unless `ApplicationUser` was just created (manual migration, reported).
 - `AutoLogon`: one password for every `PUB-User` and `WinAutoUser`. An active auto-logon as either is kept; any other is turned off (SM machines) or switched to `PUB-User`, else `WinAutoUser`.
+- `SOPAdmin` (your account from now on) runs last: `SOP-Admin` is created, or an existing one gets the new password and is enabled; it joins Administrators, Remote Desktop Users and `Offer Remote Assistance Helpers` (where it exists), and gets a SQL Server login with the server roles of the BiCA logins (`sysadmin`). Then `BiCA Admin` is disabled, its services/tasks/COM+ moved to `SOP-Admin`, and `BiCA Remote`, if you are logged on as it, is disabled as the very last step. Your RDP session continues; log on as `SOP-Admin` next time.
+- `BiCA Admin`/`BiCA Remote` stay enabled (with their old passwords, reported) if the SQL login can't be created or verified, if `SOP-Admin` couldn't log on locally or over RDP where they could, or if `SOP-Admin` was created in this run while the BiCA account runs services (a second run moves them).
 - Rotate all machines of a site in one session. `PUB-User`/`WinAutoUser` are probably used for MSMQ between the machines, which needs the same password on both sides; afterwards restart the machines with an active auto-logon so their sessions use the new password, then check MSMQ. Until then the failed attempts can briefly lock the account on the other machine.
-- `SYS Admin`, `SYS-Admin` and other accounts you choose to disable: their dependents move to `ApplicationUser`, then they are disabled. `SOP-Admin` and `SP Admin` are never touched. SQL logins aren't changed (D27); the SQL Server service gets the new password of `ApplicationUser`.
-- Afterwards update `HKLM\SOFTWARE\BICA\SYSTEM\LOGINS` manually (listed as FOLLOW-UP REQUIRED, exit code 4).
-- Interrupted or failed: re-run with the same passwords. When splitting with `-Only` (`BiCAAdmin`, `AppUser`, `AutoLogon`, `BiCARemote`), run `AutoLogon` before `BiCAAdmin`; retired, other and check-mode accounts are only processed without `-Only`.
+- `SYS Admin`, `SYS-Admin` and other accounts you choose to disable: their dependents move to `ApplicationUser`, then they are disabled. `SP Admin` is never touched. SQL credentials aren't changed (D27); the SQL Server service gets the new password of `ApplicationUser`.
+- Afterwards update `HKLM\SOFTWARE\BICA\SYSTEM\LOGINS` manually: the `ApplicationUser` entry, and the `BiCA Admin`/`BiCA Remote` entries, which now take `SOP-Admin` and its password (listed as FOLLOW-UP REQUIRED, exit code 4).
+- QS-K1 machines (`SOP-Admin` exists, `BiCA Remote` disabled by the WIP build): run as `BiCA Admin` at the console, or as any account that is `sysadmin` through its own login. Logged on as `SOP-Admin` without a SQL login, the SQL step fails with "not sysadmin" or "no connection" and the BiCA accounts stay enabled.
+- Interrupted or failed: re-run with the same passwords. When splitting with `-Only` (`AppUser`, `AutoLogon`, `SOPAdmin`), run `AutoLogon` before `SOPAdmin`; retired, other and check-mode accounts are only processed without `-Only`.
 
 ## Rollout scripts (`rollout\`, admin workstation)
 

@@ -706,3 +706,58 @@ Describe 'Invoke-CrPreflight' {
         (Test-AnyFinding $r 'Blocked' '.') | Should Be $false
     }
 }
+
+Describe 'Invoke-CrPreflight: SqlWriteBlocked (D29, v10.6)' {
+    Mock Test-CrNativeReady { return $true }
+    # The SOP-Admin entry of the v10.6 config, reduced to the keys Preflight reads.
+    $sqlAccessConfig = @{
+        Accounts = @(
+            @{ Id = 'SOPAdmin'; Kind = 'Windows'; Name = 'SOP-Admin'; Role = 'AdminRemote'; Credential = 'SOPAdmin'; Create = $true; Operator = $true
+               Replaces = @('BiCA Admin', 'BiCA Remote'); SqlAccess = 'FromReplaced' }
+        )
+    }
+
+    It 'is $null on a ready machine, and without an entry with SqlAccess' {
+        (Invoke-CrPreflight -State (New-TestPreflightState) -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should BeNullOrEmpty
+        $s = New-TestPreflightState; $s['Sql']['ConnectedAsSysadmin'] = $false
+        (Invoke-CrPreflight -State $s -Config $TestConfig)['SqlWriteBlocked'] | Should BeNullOrEmpty
+    }
+    It 'names a running account that is not sysadmin, and blocks no slot' {
+        $s = New-TestPreflightState; $s['Sql']['ConnectedAsSysadmin'] = $false; $s['Sql']['ConnectedAs'] = 'IPT01-SITEA\SOP-Admin'
+        $r = Invoke-CrPreflight -State $s -Config $sqlAccessConfig
+        $r['SqlWriteBlocked'] | Should Match '^the running account \(IPT01-SITEA\\SOP-Admin\) is not sysadmin'
+        $r['BlockedSlots'].Count | Should Be 0
+        $r['MachineBlocked'] | Should Be $false
+    }
+    It 'refuses versions outside 9 to 14' {
+        foreach ($v in @(8, 15)) {
+            $s = New-TestPreflightState; $s['Sql']['MajorVersion'] = $v
+            (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should Match 'version'
+        }
+        foreach ($v in @(9, 10, 14)) {
+            $s = New-TestPreflightState; $s['Sql']['MajorVersion'] = $v
+            (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should BeNullOrEmpty
+        }
+    }
+    It 'refuses a write filter on the master volume (D19)' {
+        $s = New-TestPreflightState
+        $s['Sql']['MasterFiles'] = @('D:\SQLData\master.mdf')
+        $s['WriteFilter'] = @{ Filters = @((New-TestFilter -Type 'EWF' -Volumes @('D:'))); Error = $null }
+        (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should Match '^write filter: '
+    }
+    It 'leaves a stopped or unreachable instance to the access plan (unknown there, not blocked here)' {
+        $s = New-TestPreflightState; $s['Sql']['ServiceState'] = 'Stopped'; $s['Sql']['Connected'] = $false
+        (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should BeNullOrEmpty
+        $s = New-TestPreflightState; $s['Sql']['DefaultInstancePresent'] = $false
+        (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should BeNullOrEmpty
+    }
+}
+
+Describe 'Test-CrPreflightSqlAccess' {
+    It 'is true only for a managed Windows entry with SqlAccess' {
+        Test-CrPreflightSqlAccess -Config @{ Accounts = @(@{ Id = 'A'; Kind = 'Windows'; SqlAccess = 'FromReplaced' }) } | Should Be $true
+        Test-CrPreflightSqlAccess -Config @{ Accounts = @(@{ Id = 'A'; Kind = 'Windows'; SqlAccess = 'FromReplaced'; Mode = 'Check' }) } | Should Be $false
+        Test-CrPreflightSqlAccess -Config @{ Accounts = @(@{ Id = 'A'; Kind = 'Windows' }) } | Should Be $false
+        Test-CrPreflightSqlAccess -Config 'x' | Should Be $false
+    }
+}

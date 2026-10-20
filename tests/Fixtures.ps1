@@ -6,10 +6,11 @@
 #   Helpers: Get-CrTestUser, Get-CrTestUserSid, Get-CrTestGroup, Add-CrTestUser, Remove-CrTestUser,
 #            Add-CrTestGroup, Add-CrTestGroupMember, Remove-CrTestGroupMember, Set-CrTestRight, Add-CrTestRight
 #
-# Profiles (account model PLAN v10.5: D18, D21-D25):
+# Profiles (account model PLAN v10.6: D18, D21-D29):
 #   SM    (SM-like, Windows Embedded Standard 7, SQL Standard): no PUB-User; built-in Administrator renamed 'LocalAdm'
 #         (disabled; replaced by ApplicationUser); BiCA Admin, BiCA Remote (Administrators + Remote Desktop Users; the
-#         operator's account) - managed, set; WinAutoUser (enabled, password-stored task \KioskTask, updated in place by
+#         operator's account until v10.5) - replaced by SOP-Admin, which doesn't exist (created); both have a sysadmin
+#         Windows login (D29); WinAutoUser (enabled, password-stored task \KioskTask, updated in place by
 #         the AutoLogon slot); ApplicationUser (runs SQL Server, app services, tasks, COM+); SYS Admin (enabled admin,
 #         password-stored task \SpMaintenance; retired); WinUser1-3 (WinUser3 disabled; WinUser1 in RDU + hw_fn_*;
 #         WinUser2 in Power Users), FTP users TEST_FTP + ftpClient in CardCenters + Users; myftpuser (enabled, not an
@@ -17,12 +18,12 @@
 #         hw_fn_usbstor, hw_fn_cdrom, Offer Remote Assistance Helpers (BiCA Admin, BiCA Remote).
 #   IPT01 (IPT01-like, SQL Express): built-in 'Administrator' enabled (replaced by ApplicationUser); SYS-Admin exists
 #         (Administrators only, no dependents; retired, the hyphen spelling of SYS Admin, v10.5); BiCA Admin (runs the
-#         service AppHelper, updated in place), BiCA Remote (Administrators + RDU), ApplicationUser (runs SQL Server),
-#         PUB-User and WinAutoUser; SYS Admin (enabled admin, runs the service LegacySync; retired); no other enabled
-#         accounts; no CardCenters, no Offer Remote Assistance Helpers.
+#         service AppHelper, moved to SOP-Admin unless SOP-Admin is created in the run), BiCA Remote (Administrators +
+#         RDU), ApplicationUser (runs SQL Server), PUB-User and WinAutoUser; SYS Admin (enabled admin, runs the service
+#         LegacySync; retired); no other enabled accounts; no CardCenters, no Offer Remote Assistance Helpers.
 #   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword (SM: turned off; IPT01: switched to PUB-User);
-#         deny rights as on the test sites. SOP-Admin and SP Admin (kept untouched, v10.5) are added by the tests that
-#         need them.
+#         deny rights as on the test sites; the SQL connection runs as BiCA Remote (sysadmin). SOP-Admin (managed,
+#         v10.6) and SP Admin (kept untouched, v10.5) are added by the tests that need them.
 
 $CrFixturesDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -164,8 +165,13 @@ function Add-CrTestRight {
     $State.Rights[$Right] = $list.ToArray()
 }
 
+# -ServerRoles sets the explicit server role memberships (ServerRoles, D29); without it ServerRoles is $null (unknown,
+# IsSysadmin counts).
 function New-CrTestSqlLogin {
-    param([string]$Name, [string]$Type = 'SQL_LOGIN', [string]$Sid, [switch]$Disabled, [switch]$Sysadmin, [switch]$PolicyChecked)
+    param([string]$Name, [string]$Type = 'SQL_LOGIN', [string]$Sid, [switch]$Disabled, [switch]$Sysadmin, [switch]$PolicyChecked,
+          [string[]]$ServerRoles)
+    $roles = $null
+    if ($PSBoundParameters.ContainsKey('ServerRoles')) { $roles = @($ServerRoles) }
     return @{
         Name                = $Name
         Type                = $Type
@@ -177,6 +183,7 @@ function New-CrTestSqlLogin {
         BadPasswordCount    = 0
         PasswordLastSetTime = '2020-01-01 00:00:00'
         IsSysadmin          = $Sysadmin.IsPresent
+        ServerRoles         = $roles
     }
 }
 
@@ -347,6 +354,7 @@ function New-CrTestState {
         (New-CrTestSqlLogin -Name 'SQLScript' -Sid '0x1A2B3C4D5E6F708192A3B4C5D6E7F802' -Sysadmin -PolicyChecked),
         (New-CrTestSqlLogin -Name 'SQLService' -Sid '0x1A2B3C4D5E6F708192A3B4C5D6E7F803' -Sysadmin -PolicyChecked),
         (New-CrTestSqlLogin -Name 'OLD-NAME01\BiCA Admin' -Type 'WINDOWS_LOGIN' -Sid $bicaAdmin -Sysadmin),
+        (New-CrTestSqlLogin -Name 'OLD-NAME01\BiCA Remote' -Type 'WINDOWS_LOGIN' -Sid $bicaRemote -Sysadmin),
         (New-CrTestSqlLogin -Name 'OLD-NAME01\ApplicationUser' -Type 'WINDOWS_LOGIN' -Sid $appUser -Sysadmin)
     )
     $agentJobs = @()
@@ -414,11 +422,11 @@ function New-CrTestSqlConfig {
     param([string]$Path)
     $cfg = New-CrTestConfig -Path $Path
     $credentials = New-Object System.Collections.ArrayList
-    foreach ($c in $cfg.Credentials) { if ($c.Slot -ne 'BiCARemote') { [void]$credentials.Add($c) } }
+    foreach ($c in $cfg.Credentials) { if ($c.Slot -ne 'SOPAdmin') { [void]$credentials.Add($c) } }
     [void]$credentials.Add(@{ Slot = 'SQLApplication'; Order = 40; Label = 'SQL login SQLApplication'; MaxLength = 128 })
     [void]$credentials.Add(@{ Slot = 'SQLScript';      Order = 50; Label = 'SQL login SQLScript';      MaxLength = 128 })
     [void]$credentials.Add(@{ Slot = 'SQLService';     Order = 60; Label = 'SQL login SQLService';     MaxLength = 128 })
-    foreach ($c in $cfg.Credentials) { if ($c.Slot -eq 'BiCARemote') { [void]$credentials.Add($c) } }
+    foreach ($c in $cfg.Credentials) { if ($c.Slot -eq 'SOPAdmin') { [void]$credentials.Add($c) } }
     $cfg.Credentials = $credentials.ToArray()
     $cfg.Accounts = @($cfg.Accounts) + @(
         @{ Id = 'SqlApp';     Kind = 'SqlLogin'; Name = 'SQLApplication'; ServerRoles = @('sysadmin'); Credential = 'SQLApplication'; LoginsEntry = $true },

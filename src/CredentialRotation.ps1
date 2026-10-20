@@ -6,13 +6,14 @@
 .DESCRIPTION
     Discovers the local accounts, groups, rights, dependents, auto-logon, write filter and SQL Server state,
     compares them with the configuration and reports what -Apply would change (audit, changes nothing).
-    With -Apply (account model v10.5, PLAN D18, D21-D27) it lists the enabled local accounts and what happens to each,
+    With -Apply (account model v10.6, PLAN D18, D21-D29) it lists the enabled local accounts and what happens to each,
     asks about the other enabled accounts, prompts for the passwords per credential slot, probes ApplicationUser's old
-    password, shows the plan and, after YES, creates the missing admin accounts (BiCA Admin, BiCA Remote,
-    ApplicationUser), sets the passwords of the managed accounts incl. every existing PUB-User/WinAutoUser
-    (ApplicationUser: changed), enforces groups and flags, updates and moves the dependents, runs the auto-logon step,
-    disables the replaced, retired and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8).
-    SOP-Admin and SP Admin are kept untouched (D26). BiCA Remote, the operator's account, is the last slot.
+    password, shows the plan and, after YES, creates the missing admin accounts (SOP-Admin, ApplicationUser), sets the
+    passwords of the managed accounts incl. every existing PUB-User/WinAutoUser (ApplicationUser: changed), enforces
+    groups and flags, gives SOP-Admin the SQL Server access of BiCA Admin and BiCA Remote, updates and moves the
+    dependents, runs the auto-logon step, disables the replaced (BiCA Admin, BiCA Remote, built-in Administrator), retired
+    and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8). SP Admin is kept untouched (D26).
+    SOP-Admin, the operator's account, is the last slot; a running BiCA Remote is disabled last (D25).
     SQL login credentials are not updated (D27).
     Start it through Start-CredentialRotation.cmd ("Run as administrator").
 
@@ -21,7 +22,7 @@
     the prompts, never on the command line (D4).
 
 .PARAMETER Only
-    Slot names to audit or apply, e.g. BiCAAdmin, AppUser, AutoLogon, BiCARemote. Check-mode accounts, retired accounts
+    Slot names to audit or apply, e.g. AppUser, AutoLogon, SOPAdmin. Check-mode accounts, retired accounts
     and other enabled accounts are only processed without -Only. An unknown slot name stops the tool (exit 2).
 
 .PARAMETER ConfigPath
@@ -48,7 +49,7 @@ if ($UnexpectedArguments) {
 }
 
 $ErrorActionPreference = 'Stop'
-$script:CrToolVersion = '0.5.2'
+$script:CrToolVersion = '0.6.0'
 $script:CrScriptPath = $MyInvocation.MyCommand.Path
 $script:CrScriptDir = Split-Path -Parent $script:CrScriptPath
 
@@ -288,7 +289,7 @@ function Invoke-CrApplyFlow {
         }
         if ($promptFindings.Count -gt 0) { Write-CrFindingsReport -Findings $promptFindings }
         $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Only $Only
-        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions
+        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions -Preflight $Preflight
         $alDecision = Get-CrApplyAutoLogonPreview -State $State -Config $Config -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only
         Write-CrApplySummary -Preview $preview -DisablePlan $disablePlan -Plan $Plan -AutoLogonDecision $alDecision -Only $Only
 
@@ -296,7 +297,7 @@ function Invoke-CrApplyFlow {
         # auto-logon. Dependents of retired and operator-disabled accounts always move to ApplicationUser (D24, v10.4).
         Resolve-CrProbeDecisions -State $State -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Journal $journal -RunId $RunId -Only $Only
         $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $slotSecrets -Probes $probes -Only $Only
-        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions
+        $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $otherDecisions -Preflight $Preflight
         $alDecision = Get-CrApplyAutoLogonPreview -State $State -Config $Config -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only
         $alChoice = $null
         if ($alDecision -is [hashtable] -and $alDecision['Action'] -eq 'Ambiguous') {

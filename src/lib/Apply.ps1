@@ -1,5 +1,5 @@
-# Apply.ps1 - slot sequencing, enforcement phase and exit code of -Apply, account model v10.4
-# (docs/PLAN.md sections 6 steps 6-11, 7.5, 8, D7-D9, D11, D13, D16-D18, D20-D25; docs/dev/CONTRACTS.md
+# Apply.ps1 - slot sequencing, enforcement phase and exit code of -Apply, account model v10.6
+# (docs/PLAN.md sections 6 steps 6-11, 7.5, 8, D7-D9, D11, D13, D16-D18, D20-D25, D28, D29; docs/dev/CONTRACTS.md
 # "Apply.ps1 and the entry point" and "v10: account model").
 # Secrets are SecureStrings. They are handed to the building blocks as -Secret/-OldSecret/-NewSecret and are
 # never converted, compared, printed or logged here (D4). Findings and logs carry names, steps and error codes only.
@@ -125,7 +125,7 @@ function Get-CrApplyEntryAccountSid {
     return $null
 }
 
-# The application account (ApplicationUser): the managed entry that replaces accounts (Test-CrAppUserEntry, Plan.ps1).
+# The application account (ApplicationUser): the managed entry marked Application (Test-CrAppUserEntry, Plan.ps1).
 # Dependents of retired and operator-disabled accounts always move there (D24, v10.4).
 function Get-CrApplyAppUserEntry {
     param($Resolved)
@@ -135,12 +135,11 @@ function Get-CrApplyAppUserEntry {
     return $null
 }
 
-# The operator's account (D25): the managed entry marked Operator (BiCA Remote).
+# The operator's account (D25): the managed entry marked Operator (SOP-Admin, v10.6).
 function Get-CrApplyOperatorEntry {
     param($Resolved)
     foreach ($e in (ConvertTo-CrArray $Resolved)) {
-        if (-not (Test-CrApplyManagedEntry $e)) { continue }
-        if ($e['Operator'] -eq $true -or (($e['Config'] -is [hashtable]) -and $e['Config']['Operator'] -eq $true)) { return $e }
+        if ((Test-CrApplyManagedEntry $e) -and (Test-CrOperatorEntry $e)) { return $e }
     }
     return $null
 }
@@ -713,8 +712,10 @@ function Find-CrApplyPreviewSlot {
 # Replaced accounts only for selected slots; Disable entries and operator-chosen others (D23) only without -Only.
 # Dependents of an account without replacement always move to the application account (D24, O5 decided in v10.4).
 # No move to an account created in this run (new SID): the account keeps its dependents and stays enabled.
+# A replaced account also stays enabled when its replacement can't get their SQL Server access (D29) or, as the
+# operator's account, could not log on where it can (D28) (Get-CrReplacementBlocker; -Preflight for SqlWriteBlocked).
 function Get-CrApplyDisablePlan {
-    param($State, $Resolved, $Preview, [string]$RunningSid, [string[]]$Only, $OtherDecisions)
+    param($State, $Resolved, $Preview, [string]$RunningSid, [string[]]$Only, $OtherDecisions, $Preflight)
     if (-not ($OtherDecisions -is [hashtable])) { $OtherDecisions = @{} }
     $items = New-Object System.Collections.ArrayList
     $seen = New-Object System.Collections.ArrayList
@@ -785,6 +786,13 @@ function Get-CrApplyDisablePlan {
                         $item['Planned'] = $false
                         $item['Reason'] = 'stays enabled: its replacement {0} is skipped ({1})' -f $a['Name'], $a['Reason']
                     }
+                }
+            }
+            if ($item['Planned']) {
+                $blocker = Get-CrReplacementBlocker -State $State -Entry $e -ReplacedSid $sid -ReplacedName $name -Preflight $Preflight -RunningSid $RunningSid
+                if ($blocker) {
+                    $item['Planned'] = $false
+                    $item['Reason'] = 'stays enabled: ' + $blocker
                 }
             }
         } else {
@@ -941,7 +949,8 @@ function Invoke-CrApplyCreateStep {
         Add-CrApplyFinding $Context 'Info' 'Groups' 'The group memberships could not be re-read after creating the account; a re-run removes extra groups' $Slot $name $_.Exception.Message
     }
     $sql = $Context['State']['Sql']
-    if (($sql -is [hashtable]) -and $sql['DefaultInstancePresent']) {
+    # An entry with SqlAccess gets its login in step 7 of this slot (D29).
+    if (($sql -is [hashtable]) -and $sql['DefaultInstancePresent'] -and -not (Test-CrSqlAccessEntry $Item['Entry'])) {
         Add-CrApplyFinding $Context 'Info' 'SQL' 'The created account has a new SID, so it has no Windows login in SQL Server (reported, PLAN 1.1)' $Slot $name
     }
     $Item['Sid'] = $sid
@@ -1244,6 +1253,113 @@ function Invoke-CrApplySlotSteps {
         }
     }
     if ($errors.Count -gt 0) { Stop-CrApplySlot $Context $Result $Items 'Verify' $errors; return }
+
+    # 7 SQL access (D29, v10.6): an entry with SqlAccess gets the SQL Server access of the accounts it replaces. Without it
+    # the slot is not complete, so those accounts stay enabled.
+    foreach ($it in $Items) {
+        if (-not (Test-CrSqlAccessEntry $it['Entry'])) { continue }
+        try {
+            $sqlError = Invoke-CrApplySqlAccess -Context $Context -Item $it -Slot $slot
+            if ($sqlError) { [void]$errors.Add($sqlError) } else { [void]$it['DoneSteps'].Add('SqlAccess') }
+        } catch {
+            [void]$errors.Add(('{0}: SQL Server access failed: {1}' -f $it['Name'], $_.Exception.Message))
+        }
+    }
+    if ($errors.Count -gt 0) { Stop-CrApplySlot $Context $Result $Items 'SqlAccess' $errors; return }
+}
+
+# Step 7 of an entry with SqlAccess (D29, v10.6): the account's Windows login on the default instance gets the fixed server
+# roles of the logins of the accounts it replaces (Get-CrSqlAccessPlan), written as the running account and verified by
+# re-reading the login by SID. Records $Context['SqlAccess'][<entry Id>] = @{ Ok; Reason }. Returns an error text or $null.
+function Invoke-CrApplySqlAccess {
+    param($Context, $Item, [string]$Slot)
+    $entry = $Item['Entry']
+    $id = [string]$entry['Id']
+    $name = [string]$Item['Name']
+    $record = @{ Ok = $false; Reason = $null }
+    $Context['SqlAccess'][$id] = $record
+    $writeBlocked = $null
+    if ($Context['Preflight'] -is [hashtable]) { $writeBlocked = [string]$Context['Preflight']['SqlWriteBlocked'] }
+    $sp = Get-CrSqlAccessPlan -State $Context['State'] -Entry $entry -TargetSid ([string]$Item['Sid']) -TargetName ([string]$Item['UserName']) -WriteBlocked $writeBlocked
+    foreach ($n in (ConvertTo-CrArray $sp['Notes'])) { Add-CrApplyFinding $Context 'HighImpact' 'SQL' $n $Slot $name }
+    $sources = (ConvertTo-CrArray $sp['Sources']) -join ', '
+    if ($sp['Unknown']) {
+        $record['Reason'] = 'it cannot be checked: ' + $sp['Reason']
+        return ('{0}: SQL Server access (D29): {1}' -f $name, $record['Reason'])
+    }
+    if (-not $sp['Needed']) {
+        $record['Ok'] = $true
+        if ($sources) { Add-CrApplyFinding $Context 'Info' 'SQL' ('SQL Server access already in place: the same as ' + $sources + ' (D29)') $Slot $name }
+        return $null
+    }
+    if ($sp['Blocked']) {
+        $record['Reason'] = 'it cannot be granted: ' + $sp['Reason']
+        return ('{0}: SQL Server access (D29): {1}' -f $name, $record['Reason'])
+    }
+    Write-Host ('  {0}: SQL Server login ...' -f $name)
+    $major = 0
+    if ($null -ne $Context['State']['Sql']['MajorVersion']) { $major = [int]$Context['State']['Sql']['MajorVersion'] }
+    $loginName = [string]$sp['LoginName']
+    $g = Grant-CrSqlLoginAccess -LoginName $loginName -CreateLogin ([bool]$sp['CreateLogin']) -EnableLogin ([bool]$sp['EnableLogin']) -Roles (ConvertTo-CrArray $sp['MissingRoles']) -MajorVersion $major
+    foreach ($s in (ConvertTo-CrArray $g['Steps'])) {
+        $text = 'SQL Server: ' + $s + ' ' + $loginName
+        if ($s -eq 'CreateLogin') { $text = 'SQL Server: Windows login ' + $loginName + ' created (D29)' }
+        elseif ($s -eq 'EnableLogin') { $text = 'SQL Server: login ' + $loginName + ' enabled (D29)' }
+        elseif ($s -like 'AddRole *') { $text = 'SQL Server: login ' + $loginName + ' added to the server role ' + $s.Substring(8) + ' (D29)' }
+        Add-CrApplyFinding $Context 'Info' 'SQL' $text $Slot $name
+    }
+    if (-not $g['Success']) {
+        $record['Reason'] = 'SQL Server step {0} failed: {1}' -f $g['FailedStep'], $g['Error']
+        return ('{0}: SQL Server access (D29): {1}' -f $name, $record['Reason'])
+    }
+    $v = Get-CrSqlLoginAccess -Sid ([string]$Item['Sid'])
+    $have = ConvertTo-CrArray $v['Roles']
+    $why = $null
+    if ($v['Error']) { $why = 'the login could not be read back: ' + $v['Error'] }
+    elseif (-not $v['Found']) { $why = 'no login with the SID of ' + $name + ' was found after the grant' }
+    elseif ($v['IsDisabled']) { $why = 'the login ' + $v['Name'] + ' is still disabled' }
+    elseif ($have -notcontains 'sysadmin') {
+        $lacking = New-Object System.Collections.ArrayList
+        foreach ($role in (ConvertTo-CrArray $sp['Roles'])) { if ($have -notcontains $role) { [void]$lacking.Add($role) } }
+        if ($lacking.Count -gt 0) { $why = 'the login ' + $v['Name'] + ' lacks the server role ' + (($lacking.ToArray()) -join ', ') }
+    }
+    if ($why) {
+        $record['Reason'] = 'not verified: ' + $why
+        return ('{0}: SQL Server access (D29): {1}' -f $name, $record['Reason'])
+    }
+    $record['Ok'] = $true
+    Set-CrApplySqlLogin -State $Context['State'] -Sid ([string]$Item['Sid']) -Name ([string]$v['Name']) -Roles $have
+    Add-CrApplyJournalStep $Context ([string]$Item['Sid']) 'SqlAccess'
+    $roleText = 'no server role'
+    if ($have.Count -gt 0) { $roleText = 'server role ' + ($have -join ', ') }
+    Add-CrApplyFinding $Context 'Info' 'SQL' ('SQL Server access verified: login ' + $v['Name'] + ' with ' + $roleText + ', the same as ' + $sources + ' (D29)') $Slot $name
+    return $null
+}
+
+# Keeps $State.Sql.Logins in line with a login granted in this run (D29).
+function Set-CrApplySqlLogin {
+    param($State, [string]$Sid, [string]$Name, $Roles)
+    $sql = $State['Sql']
+    if (-not ($sql -is [hashtable])) { return }
+    $roles = ConvertTo-CrArray $Roles
+    $list = New-Object System.Collections.ArrayList
+    $found = $false
+    foreach ($l in (ConvertTo-CrArray $sql['Logins'])) {
+        if (($l -is [hashtable]) -and [string]$l['Type'] -eq 'WINDOWS_LOGIN' -and ([string]$l['Sid'] -ieq $Sid)) {
+            $l['IsDisabled'] = $false
+            $l['ServerRoles'] = $roles
+            $l['IsSysadmin'] = [bool]($roles -contains 'sysadmin')
+            $found = $true
+        }
+        [void]$list.Add($l)
+    }
+    if (-not $found) {
+        [void]$list.Add(@{
+            Name = $Name; Type = 'WINDOWS_LOGIN'; Sid = $Sid; IsDisabled = $false; IsPolicyChecked = $null; IsExpirationChecked = $null
+            IsLocked = $null; BadPasswordCount = $null; PasswordLastSetTime = $null; IsSysadmin = [bool]($roles -contains 'sysadmin'); ServerRoles = $roles
+        })
+    }
+    $sql['Logins'] = $list.ToArray()
 }
 
 # LOGINS / IIS follow-ups for every account of the slot whose password was created, set or changed in this run
@@ -1253,7 +1369,12 @@ function Add-CrApplyFollowUps {
     foreach ($it in $Items) {
         if (-not $it['Sid'] -or $Context['Changed'] -notcontains $it['Sid']) { continue }
         if ($it['Entry']['LoginsEntry']) {
-            Add-CrApplyFinding $Context 'FollowUp' 'LOGINS' 'Update the LOGINS registry entry with the new password (outside the tool)' $Slot $it['Name']
+            # D28: the entries of the replaced accounts (e.g. BiCA Admin, BiCA Remote) now name this account.
+            $replacedNames = New-Object System.Collections.ArrayList
+            foreach ($r in (ConvertTo-CrArray $it['Entry']['Replaced'])) { if ($r -is [hashtable] -and $r['Name']) { [void]$replacedNames.Add([string]$r['Name']) } }
+            $loginsDetail = $null
+            if ($replacedNames.Count -gt 0) { $loginsDetail = 'Replaces the LOGINS entries of: ' + (($replacedNames.ToArray()) -join ', ') }
+            Add-CrApplyFinding $Context 'FollowUp' 'LOGINS' 'Update the LOGINS registry entry with the new password (outside the tool)' $Slot $it['Name'] $loginsDetail
         }
         # PLAN 8, D25: an RDP client retrying the old saved password would lock the operator's account.
         if ($it['Entry']['Operator']) {
@@ -1287,6 +1408,7 @@ function Invoke-CrApplySlot {
         if (@('Change', 'Set') -contains $a['Path']) { [void]$steps.Add('Secret') }
         if ($a['Enable']) { [void]$steps.Add('Enable') }
         foreach ($s in @('Grants', 'Dependents', 'Verify')) { [void]$steps.Add($s) }
+        if (Test-CrSqlAccessEntry $a['Entry']) { [void]$steps.Add('SqlAccess') }
         $oldSecret = $null
         if ($a['SecretAccount'] -is [hashtable]) { $oldSecret = $a['SecretAccount']['OldSecret'] }
         if ($a['Sid']) {
@@ -1646,7 +1768,8 @@ function Get-CrApplyAutoLogonKeptSid {
     return $null
 }
 
-# Why a planned disable can't run now, or $null. Replaced accounts need an enabled, verified replacement (D22);
+# Why a planned disable can't run now, or $null. Replaced accounts need an enabled, verified replacement (D22) that has
+# their SQL Server access (D29) and, as the operator's account, may log on locally and over RDP wherever they could (D28);
 # moved dependents must all have moved (D24); the Administrators rail applies.
 function Get-CrApplyDisableBlocker {
     param($Context, $Item, [bool]$RunningCounts = $true)
@@ -1664,6 +1787,20 @@ function Get-CrApplyDisableBlocker {
         if (-not $sid -or $Context['Verified'] -notcontains $sid) { return ('its replacement {0} is not verified on its new password in this run' -f $Item['ReplacementName']) }
         $u = Find-CrApplyUser -State $Context['State'] -Sid $sid
         if (-not $u -or $u['Disabled']) { return ('its replacement {0} is not enabled' -f $Item['ReplacementName']) }
+        if (Test-CrSqlAccessEntry $e) {
+            $sa = $Context['SqlAccess'][[string]$e['Id']]
+            if (-not ($sa -is [hashtable]) -or -not $sa['Ok']) {
+                $why = 'not granted in this run'
+                if (($sa -is [hashtable]) -and $sa['Reason']) { $why = [string]$sa['Reason'] }
+                return ('its replacement {0} does not have its SQL Server access ({1}; D29)' -f $Item['ReplacementName'], $why)
+            }
+        }
+        if (Test-CrOperatorEntry $e) {
+            $gaps = Get-CrLogonGaps -State $Context['State'] -ReplacementSid $sid -ReplacedSid ([string]$Item['Sid'])
+            if ($gaps.Count -gt 0) {
+                return ('its replacement {0} is not allowed to log on {1}, which {2} is (D28)' -f $Item['ReplacementName'], (Get-CrLogonGapText $gaps), $Item['Name'])
+            }
+        }
     }
     $rail = Get-CrApplyAdminRailReason -Context $Context -RemoveSid ([string]$Item['Sid']) -RunningCounts $RunningCounts
     if ($rail) { return ('rail: ' + $rail) }
@@ -1700,7 +1837,7 @@ function Invoke-CrApplyDisables {
         if ($item['IsRunning']) { continue }
         if (-not $item['Planned']) {
             $item['Status'] = 'KeptEnabled'
-            Add-CrApplyFinding $Context 'Info' 'Accounts' ('Not disabled: ' + $item['Reason']) $item['ReplacementSlot'] $item['Name']
+            Add-CrApplyFinding $Context 'Info' 'Accounts' ('Not disabled: ' + $item['Reason']) $item['ReplacementSlot'] $item['Name'] 'It keeps its current password'
             if ($item['MigrateManually']) {
                 # D24 (v10.4): reported for a manual migration (FOLLOW-UP REQUIRED, exit 4).
                 Add-CrApplyFinding $Context 'FollowUp' 'Accounts' ('Migrate the services, scheduled tasks and COM+ applications of this account manually, then disable it (D24)') $item['ReplacementSlot'] $item['Name']
@@ -1711,16 +1848,17 @@ function Invoke-CrApplyDisables {
         if ($blocker) {
             $item['Status'] = 'KeptEnabled'
             $item['Reason'] = 'stays enabled: ' + $blocker
-            Add-CrApplyFinding $Context 'HighImpact' 'Accounts' ('Not disabled: ' + $blocker) $item['ReplacementSlot'] $item['Name']
+            Add-CrApplyFinding $Context 'HighImpact' 'Accounts' ('Not disabled: ' + $blocker) $item['ReplacementSlot'] $item['Name'] 'It keeps its current password; a re-run disables it once this is solved'
             continue
         }
         [void](Invoke-CrApplyDisableOne -Context $Context -Item $item)
     }
 }
 
-# 6 the running account last (D25), when it is itself to be disabled (e.g. a retired SYS-Admin): only if the operator's
-# account (the Operator entry, BiCA Remote) is enabled, in Administrators, verified in this run and holds an effective
-# remote-interactive logon right (granted, not denied). The RDP session continues; the next logon is as that account.
+# 6 the running account last (D25), when it is itself to be disabled (e.g. BiCA Remote replaced by SOP-Admin, or a retired
+# SYS-Admin): only if the operator's account (the Operator entry, SOP-Admin) is enabled, in Administrators, verified in
+# this run and holds an effective remote-interactive logon right (granted, not denied). The RDP session continues; the
+# next logon is as that account.
 function Invoke-CrApplyRunningAccountStep {
     param($Context, $DisablePlan)
     $out = @{ Disabled = $false; Reason = $null }
@@ -1834,8 +1972,9 @@ function Invoke-CrApply {
     if (-not ($Plan -is [hashtable])) { $Plan = @{ Findings = @() } }
     if (-not ($SlotSecrets -is [hashtable])) { $SlotSecrets = @{} }
     $ctx = @{
-        State = $State; Config = $Config; Resolved = $Resolved; Plan = $Plan; SlotSecrets = $SlotSecrets
+        State = $State; Config = $Config; Resolved = $Resolved; Plan = $Plan; SlotSecrets = $SlotSecrets; Preflight = $Preflight
         Journal = $Journal; RunId = $RunId; RunningSid = $RunningSid
+        SqlAccess = @{}                                          # entry Id -> @{ Ok; Reason } (D29)
         Findings = (New-Object System.Collections.ArrayList)
         Verified = (New-Object System.Collections.ArrayList)     # logged on with the new password in this run
         OnNew = (New-Object System.Collections.ArrayList)        # on the new password (created, set, changed, D11, D20)
@@ -1864,7 +2003,7 @@ function Invoke-CrApply {
     }
     $preview = Get-CrApplyPreview -Config $Config -Resolved $Resolved -Preflight $Preflight -SlotSecrets $SlotSecrets -Probes $Probes -Only $Only
     # Planned before the slots run: the dependents and users as discovered by the audit.
-    $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $OtherDecisions
+    $disablePlan = Get-CrApplyDisablePlan -State $State -Resolved $Resolved -Preview $preview -RunningSid $RunningSid -Only $Only -OtherDecisions $OtherDecisions -Preflight $Preflight
 
     $slots = New-Object System.Collections.ArrayList
     foreach ($p in $preview) {
@@ -2217,11 +2356,12 @@ function Write-CrApplySummary {
         }
     }
     Write-Host ''
-    Write-Host 'YES confirms, in this order: per slot (BiCA Remote last) the account creation, the password set or change,'
-    Write-Host 'enabling (ApplicationUser only), flags, group additions, logon rights and its own services/tasks/COM+ (no'
-    Write-Host 'restarts, D17) and a logon test; then the group removals, the moves of dependents to the replacements, the'
-    Write-Host 'auto-logon step, the disabling of the replaced, retired and chosen accounts, the check-mode fixes and, last,'
-    Write-Host 'the disabling of your own account if it is one of them (D25).'
+    Write-Host 'YES confirms, in this order: per slot (SOP-Admin last) the account creation, the password set or change,'
+    Write-Host 'enabling, flags, group additions, logon rights and its own services/tasks/COM+ (no restarts, D17), a logon'
+    Write-Host 'test and, for SOP-Admin, its SQL Server login with the access of BiCA Admin/BiCA Remote (D29); then the group'
+    Write-Host 'removals, the moves of dependents to the replacements, the auto-logon step, the disabling of the replaced,'
+    Write-Host 'retired and chosen accounts, the check-mode fixes and, last, the disabling of your own account if it is one'
+    Write-Host 'of them (D25).'
     Write-Host '=================================================='
 }
 

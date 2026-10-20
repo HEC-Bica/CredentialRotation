@@ -68,9 +68,12 @@ function New-CrResolvedEntry {
     if ($Entry.ContainsKey('AutoLogonUser') -and $null -ne $Entry['AutoLogonUser']) { $autoLogonUser = ConvertTo-CrArray $Entry['AutoLogonUser'] }
     # D9 (v10): Windows passwords are set unless the entry asks for a change
     $passwordMode = $null
+    $sqlAccess = $null
     if ($kind -eq 'Windows' -and $mode -eq 'Rotate') {
         $passwordMode = 'Set'
         if ([string]$Entry['PasswordMode'] -eq 'Change') { $passwordMode = 'Change' }
+        # D29 (v10.6): the account gets the SQL Server access of the accounts it replaces.
+        if ($Entry['SqlAccess']) { $sqlAccess = [string]$Entry['SqlAccess'] }
     }
     return @{
         Id            = [string]$Entry['Id']
@@ -88,6 +91,8 @@ function New-CrResolvedEntry {
         PasswordMode  = $passwordMode
         Operator      = ($mode -eq 'Rotate' -and $Entry['Operator'] -eq $true)
         EnableIfDisabled = ($mode -eq 'Rotate' -and $Entry['EnableIfDisabled'] -eq $true)
+        Application   = ($mode -eq 'Rotate' -and $Entry['Application'] -eq $true)
+        SqlAccess     = $sqlAccess
         Replaced      = @()
         AutoLogon     = $Entry['AutoLogon']
         AutoLogonUser = $autoLogonUser
