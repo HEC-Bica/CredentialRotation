@@ -126,6 +126,14 @@ Describe 'Add-CrJournalStep' {
             { Add-CrJournalStep -Journal $j -RunId 'R1' -Sid $sidA -Step 'Password' } | Should Throw
         }
 
+        It 'accepts the step names of the account model, incl. SqlAccess (v10.6, D29)' {
+            $j = @{ Runs = (New-Object System.Collections.ArrayList); Path = $null; LastSaveError = $null }
+            foreach ($s in @('Created', 'Enabled', 'Disabled', 'DependentsMoved', 'SqlAccess')) {
+                { Add-CrJournalStep -Journal $j -RunId 'R1' -Sid $sidA -Step $s } | Should Not Throw
+            }
+            @($j.Runs[0].Accounts[$sidA]).Count | Should Be 5
+        }
+
         It 'starts the run implicitly and records each step once' {
             $j = @{ Runs = (New-Object System.Collections.ArrayList); Path = $null; LastSaveError = $null }
             Add-CrJournalStep -Journal $j -RunId 'R1' -Sid $sidA -Step 'Grants'

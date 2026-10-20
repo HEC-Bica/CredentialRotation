@@ -6,8 +6,9 @@ foreach ($m in @('Compat', 'Config', 'Rights', 'Principals', 'Sql', 'AutoLogon',
 # Pester 3.4 keeps a Mock for the whole Describe/Context it is defined in: every Mock lives in its own Context.
 # Account model PLAN v10.6 (D18, D21-D29): SOP-Admin (the operator's account; replaces BiCA Admin and BiCA Remote and gets
 # their SQL Server access), ApplicationUser (replaces RID-500) and the auto-logon accounts PUB-User / WinAutoUser are
-# managed; SYS Admin (also spelled SYS-Admin) is retired; SP Admin is kept untouched (Mode Keep); the default config has no
-# SQL login slots (D27). The fixtures have no SOP-Admin, so it is created unless a test adds it.
+# managed; SP Admin is managed too (v10.7, D30: created if missing, Administrators only, nothing else); SYS Admin (also
+# spelled SYS-Admin) is retired; no account is kept untouched (Mode Keep); the default config has no SQL login slots (D27).
+# The fixtures have neither SOP-Admin nor SP Admin, so they are created unless a test adds them.
 # v10.4 (D24): the dependents of retired and operator-disabled accounts always move to ApplicationUser; nothing moves to
 # an account created in this run (the account with dependents stays enabled).
 
@@ -36,11 +37,14 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
         It 'reports drift' {
             $plan['Drift'] | Should Be $true
         }
-        It 'creates only SOP-Admin (D28); PUB-User is never created (D21)' {
-            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' $null 'Create*')
+        It 'creates SOP-Admin (D28) and SP Admin (D30); PUB-User is never created (D21)' {
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' $null 'Create*').Count | Should Be 2
+            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Create SOP-Admin')
             $f.Count | Should Be 1
-            $f[0]['Account'] | Should Be 'SOP-Admin'
             $f[0]['Slot'] | Should Be 'SOPAdmin'
+            $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SP Admin' 'Create SP Admin')
+            $f.Count | Should Be 1
+            $f[0]['Slot'] | Should Be 'SPAdmin'
             @(Get-CrTestFindings $plan $null $null 'PUB-User' 'Create PUB-User').Count | Should Be 0
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'PUB-User' 'Account not found (never created): PUB-User').Count | Should Be 1
         }
@@ -102,8 +106,13 @@ Describe 'New-CrPlan on an SM-like machine (account model v10.6)' {
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS Admin' 'Account not found*').Count | Should Be 0
             @(Get-CrTestFindings $plan 'Info' 'Accounts' 'SYS-Admin' 'Account not found (nothing to disable)*').Count | Should Be 1
         }
-        It 'says nothing about the missing SP Admin (Mode Keep, v10.5)' {
-            @(Get-CrTestFindings $plan $null $null 'SP Admin').Count | Should Be 0
+        It 'creates SP Admin in Administrators only and gives it nothing else: no SQL login, no LOGINS follow-up (D30, v10.7)' {
+            @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SP Admin' 'Add to Administrators').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SP Admin').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Drift' 'SQL' 'SP Admin').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Info' 'SQL' 'SP Admin' '*no Windows login in SQL Server*').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'FollowUp' $null 'SP Admin').Count | Should Be 0
+            @(Get-CrTestFindings $plan $null $null 'SP Admin' 'Kept untouched*').Count | Should Be 0
         }
         It 'moves the dependents of SYS Admin to ApplicationUser (D24, v10.4)' {
             $f = @(Get-CrTestFindings $plan 'HighImpact' 'Tasks' 'SYS Admin' 'Move scheduled task \SpMaintenance from SYS Admin to ApplicationUser (D24)')
@@ -164,10 +173,11 @@ Describe 'New-CrPlan on an IPT01-like machine (account model v10.6)' {
     $state = New-CrTestState -Profile IPT01
     $plan = New-CrTestPlan -State $state
 
-    It 'creates only SOP-Admin and adds it to Administrators and Remote Desktop Users (the optional helpers group is missing)' {
+    It 'creates SOP-Admin and SP Admin; SOP-Admin goes to Administrators and Remote Desktop Users (the optional helpers group is missing)' {
         $f = @(Get-CrTestFindings $plan 'Drift' 'Accounts' $null 'Create*')
-        $f.Count | Should Be 1
+        $f.Count | Should Be 2
         $f[0]['Message'] | Should Be 'Create SOP-Admin'
+        $f[1]['Message'] | Should Be 'Create SP Admin'
         @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin' 'Add to Administrators').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin' 'Add to Remote Desktop Users').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin').Count | Should Be 2
@@ -273,7 +283,7 @@ Describe 'New-CrPlan: created and disabled accounts and the auto-logon step' {
         $plan = New-CrTestPlan -State $state
 
         It 'sets the password of SOP-Admin and enforces its role (no Keep entry any more)' {
-            @(Get-CrTestFindings $plan 'Drift' 'Accounts' $null 'Create*').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Create*').Count | Should Be 0
             @(Get-CrTestFindings $plan 'Info' 'Password' 'SOP-Admin' 'Password set (D9: no old password)').Count | Should Be 1
             @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin' 'Add to Remote Desktop Users').Count | Should Be 1
             @(Get-CrTestFindings $plan 'Drift' 'Flags' 'SOP-Admin' 'Set "user cannot change password"').Count | Should Be 1
@@ -717,14 +727,29 @@ Describe 'New-CrPlan account state findings' {
         @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'SYS-Admin' 'The running account SYS-Admin is disabled at the end; log on as SOP-Admin next time (D25)').Count | Should Be 1
         @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SYS-Admin' 'Disable SYS-Admin (no replacement)')[0]['Detail'] | Should Match 'last step \(D25\)'
     }
-    It 'keeps SP Admin untouched (Mode Keep, v10.5): one Info, not disabled, not asked about' {
+    It 'sets the password of an existing SP Admin and keeps it in Administrators only; not disabled, not asked about (D30, v10.7)' {
         $state = New-CrTestState -Profile IPT01
-        [void](Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators') -PasswordNeverExpires)
+        [void](Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators', 'Remote Desktop Users') -PasswordNeverExpires)
         $plan = New-CrTestPlan -State $state
-        $f = @(Get-CrTestFindings $plan $null $null 'SP Admin')
+        $f = @(Get-CrTestFindings $plan 'Info' 'Password' 'SP Admin' 'Password set (D9: no old password)')
+        $f.Count | Should Be 1
+        $f[0]['Slot'] | Should Be 'SPAdmin'
+        @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SP Admin' 'Remove from Remote Desktop Users (enforcement phase)').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Drift' 'Flags' 'SP Admin' 'Set "user cannot change password"').Count | Should Be 1
+        @(Get-CrTestFindings $plan $null $null 'SP Admin' 'Kept untouched*').Count | Should Be 0
+        @(Get-CrTestFindings $plan $null 'Accounts' 'SP Admin' 'Disable*').Count | Should Be 0
+        @(Get-CrTestFindings $plan 'Ambiguous' $null 'SP Admin').Count | Should Be 0
+        @(Get-CrTestFindings $plan $null 'SQL' 'SP Admin').Count | Should Be 0
+    }
+    It 'still keeps an account of a Mode Keep entry untouched (D26; the default config has none since v10.7)' {
+        $state = New-CrTestState -Profile IPT01
+        [void](Add-CrTestUser -State $state -Name 'Kept Admin' -Groups @('Administrators') -PasswordNeverExpires)
+        $config = New-CrTestConfig
+        $config.Accounts = @($config.Accounts) + @(@{ Id = 'Untouched'; Kind = 'Windows'; Names = @('Kept Admin'); Mode = 'Keep' })
+        $plan = New-CrTestPlan -State $state -Config $config
+        $f = @(Get-CrTestFindings $plan $null $null 'Kept Admin')
         $f.Count | Should Be 1
         $f[0]['Severity'] | Should Be 'Info'
-        $f[0]['Area'] | Should Be 'Accounts'
         $f[0]['Message'] | Should Be 'Kept untouched (config: Mode Keep)'
         $f[0]['Slot'] | Should BeNullOrEmpty
     }
@@ -760,8 +785,8 @@ Describe 'New-CrPlan account state findings' {
     It 'blocks every Windows entry and asks nothing when the Users part failed' {
         $state = New-CrTestState -Profile IPT01 -Parts @{ Users = @{ Error = 'access denied' } }
         $plan = New-CrTestPlan -State $state
-        # SOPAdmin, AppUser, AutoLogon, Retired, WinUsers, FtpUsers
-        @(Get-CrTestFindings $plan 'Blocked' 'Accounts').Count | Should Be 6
+        # SOPAdmin, AppUser, SPAdmin, AutoLogon, Retired, WinUsers, FtpUsers
+        @(Get-CrTestFindings $plan 'Blocked' 'Accounts').Count | Should Be 7
         @(Get-CrTestFindings $plan $null 'Accounts' $null 'Create*').Count | Should Be 0
         @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides*').Count | Should Be 0
     }
@@ -774,7 +799,7 @@ Describe 'New-CrPlan with -Only' {
         $plan = New-CrTestPlan -State $state -Only @('SOPAdmin')
 
         It 'skips other slots, check-mode accounts, retired and other accounts' {
-            foreach ($n in @('ApplicationUser', 'WinAutoUser', 'WinUser1', 'SYS Admin', 'LocalAdm')) {
+            foreach ($n in @('ApplicationUser', 'WinAutoUser', 'WinUser1', 'SYS Admin', 'LocalAdm', 'SP Admin')) {
                 @(Get-CrTestFindings $plan $null $null $n).Count | Should Be 0
             }
             @(Get-CrTestFindings $plan 'Ambiguous' 'Accounts' $null 'Operator decides: disable or keep*').Count | Should Be 0
@@ -796,8 +821,8 @@ Describe 'New-CrPlan with -Only' {
         $state = New-CrTestState -Profile SM
         $plan = New-CrTestPlan -State $state -Only @('AppUser')
 
-        It 'neither creates SOP-Admin nor touches the BiCA accounts nor grants SQL access' {
-            foreach ($n in @('SOP-Admin', 'BiCA Admin', 'BiCA Remote')) {
+        It 'neither creates SOP-Admin or SP Admin nor touches the BiCA accounts nor grants SQL access' {
+            foreach ($n in @('SOP-Admin', 'SP Admin', 'BiCA Admin', 'BiCA Remote')) {
                 @(Get-CrTestFindings $plan $null $null $n).Count | Should Be 0
             }
             @(Get-CrTestFindings $plan $null 'SQL').Count | Should Be 0

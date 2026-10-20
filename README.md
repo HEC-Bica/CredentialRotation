@@ -4,14 +4,14 @@ A PowerShell tool that rotates the local Windows credentials on standalone workg
 
 Design: [docs/PLAN.md](docs/PLAN.md) · Interfaces: [docs/dev/CONTRACTS.md](docs/dev/CONTRACTS.md) · Conventions and dev commands: [CLAUDE.md](CLAUDE.md)
 
-## Status (version 0.6.0, PLAN v10.6)
+## Status (version 0.7.0, PLAN v10.7)
 
-Version 0.6.0 replaces `BiCA Admin` and `BiCA Remote` with `SOP-Admin` (PLAN D28) and gives `SOP-Admin` the SQL Server access of their Windows logins (D29). Its unit tests are written but not yet run; the results below are from 0.5.x.
+Version 0.6.0 replaced `BiCA Admin` and `BiCA Remote` with `SOP-Admin` (PLAN D28); they get no new password and are only disabled. `SOP-Admin` gets the SQL Server access of their Windows logins (D29). Version 0.7.0 makes `SP Admin` a managed account (D30) and fixes the review findings on 0.6.0. The unit tests of 0.6.0/0.7.0 are written but not yet run; the results below are from 0.5.x.
 
 | Milestone | Content | State |
 |---|---|---|
 | M1 | Read-only audit | tested (0.5.x) |
-| M2 | Password prompts, account model, groups, flags, auto-logon policy | code written; `-Apply` of 0.5.x/0.6.0 not yet run (see machine state) |
+| M2 | Password prompts, account model, groups, flags, auto-logon policy | code written; `-Apply` of 0.5.x–0.7.0 not yet run (see machine state) |
 | M3 | Services, scheduled tasks, COM+ updates and moves; the SQL login of `SOP-Admin` | code written; `-Apply` not yet run |
 
 | Machine | Audit (PS 5.1) | Audit (`/PS2`) | Unit tests, lint |
@@ -71,7 +71,7 @@ C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd > C:\temp\ConsoleOut
 C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 > C:\temp\ConsoleOutput_audit_ps2_%COMPUTERNAME%.txt 2>&1
 ```
 
-Check: `SP Admin` only as "Kept untouched"; `SOP-Admin` as "Create SOP-Admin" or with "Password set", plus "SQL Server: create the Windows login …"; `BiCA Admin` and `BiCA Remote` as "Disable … (replaced by SOP-Admin)", or "Not disabled: …" with the reason; `SYS Admin` and `SYS-Admin` as "Disable … (no replacement)"; last line `Exit code: 10` or `0`.
+Check: `SP Admin` as "Create SP Admin" or with "Password set", and no SQL finding of its own except "no Windows login in SQL Server" when created; `SOP-Admin` as "Create SOP-Admin" or with "Password set", plus "SQL Server: create the Windows login …"; no password finding for `BiCA Admin` or `BiCA Remote`; `BiCA Admin` and `BiCA Remote` as "Disable … (replaced by SOP-Admin)", or "Not disabled: …" with the reason; `SYS Admin` and `SYS-Admin` as "Disable … (no replacement)"; last line `Exit code: 10` or `0`.
 
 Inventory, still open on one Windows Embedded 7 machine (the JSON contains account names and SIDs):
 
@@ -99,13 +99,14 @@ C:\temp\CredentialRotation\src\Start-CredentialRotation.cmd /PS2 -Apply -Only Ap
 
 - `AppUser`: changed with its old password; created if missing. The built-in Administrator is disabled and its dependents move to `ApplicationUser`, unless `ApplicationUser` was just created (manual migration, reported).
 - `AutoLogon`: one password for every `PUB-User` and `WinAutoUser`. An active auto-logon as either is kept; any other is turned off (SM machines) or switched to `PUB-User`, else `WinAutoUser`.
+- `SPAdmin`: `SP Admin` gets the new password, or is created if missing; Administrators only, nothing else (no SQL login). A disabled `SP Admin` stays disabled.
 - `SOPAdmin` (your account from now on) runs last: `SOP-Admin` is created, or an existing one gets the new password and is enabled; it joins Administrators, Remote Desktop Users and `Offer Remote Assistance Helpers` (where it exists), and gets a SQL Server login with the server roles of the BiCA logins (`sysadmin`). Then `BiCA Admin` is disabled, its services/tasks/COM+ moved to `SOP-Admin`, and `BiCA Remote`, if you are logged on as it, is disabled as the very last step. Your RDP session continues; log on as `SOP-Admin` next time.
 - `BiCA Admin`/`BiCA Remote` stay enabled (with their old passwords, reported) if the SQL login can't be created or verified, if `SOP-Admin` couldn't log on locally or over RDP where they could, or if `SOP-Admin` was created in this run while the BiCA account runs services (a second run moves them).
 - Rotate all machines of a site in one session. `PUB-User`/`WinAutoUser` are probably used for MSMQ between the machines, which needs the same password on both sides; afterwards restart the machines with an active auto-logon so their sessions use the new password, then check MSMQ. Until then the failed attempts can briefly lock the account on the other machine.
-- `SYS Admin`, `SYS-Admin` and other accounts you choose to disable: their dependents move to `ApplicationUser`, then they are disabled. `SP Admin` is never touched. SQL credentials aren't changed (D27); the SQL Server service gets the new password of `ApplicationUser`.
+- `SYS Admin`, `SYS-Admin` and other accounts you choose to disable: their dependents move to `ApplicationUser`, then they are disabled. `BiCA Admin` and `BiCA Remote` never get a new password. SQL credentials aren't changed (D27); the SQL Server service gets the new password of `ApplicationUser`.
 - Afterwards update `HKLM\SOFTWARE\BICA\SYSTEM\LOGINS` manually: the `ApplicationUser` entry, and the `BiCA Admin`/`BiCA Remote` entries, which now take `SOP-Admin` and its password (listed as FOLLOW-UP REQUIRED, exit code 4).
 - QS-K1 machines (`SOP-Admin` exists, `BiCA Remote` disabled by the WIP build): run as `BiCA Admin` at the console, or as any account that is `sysadmin` through its own login. Logged on as `SOP-Admin` without a SQL login, the SQL step fails with "not sysadmin" or "no connection" and the BiCA accounts stay enabled.
-- Interrupted or failed: re-run with the same passwords. When splitting with `-Only` (`AppUser`, `AutoLogon`, `SOPAdmin`), run `AutoLogon` before `SOPAdmin`; retired, other and check-mode accounts are only processed without `-Only`.
+- Interrupted or failed: re-run with the same passwords. When splitting with `-Only` (`AppUser`, `AutoLogon`, `SPAdmin`, `SOPAdmin`), run `AutoLogon` before `SOPAdmin`; retired, other and check-mode accounts are only processed without `-Only`.
 
 ## Rollout scripts (`rollout\`, admin workstation)
 

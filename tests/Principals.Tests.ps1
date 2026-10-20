@@ -39,9 +39,9 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $resolved.Count | Should Be 7
         $resolved[0].Id | Should Be 'SOPAdmin'
         $resolved[1].Id | Should Be 'AppUser'
-        $resolved[2].Id | Should Be 'AutoLogon'
-        $resolved[3].Id | Should Be 'Retired'
-        $resolved[4].Id | Should Be 'Untouched'
+        $resolved[2].Id | Should Be 'SPAdmin'
+        $resolved[3].Id | Should Be 'AutoLogon'
+        $resolved[4].Id | Should Be 'Retired'
         $resolved[6].Id | Should Be 'FtpUsers'
     }
 
@@ -180,22 +180,40 @@ Describe 'Resolve-CrAccounts on an SM-like machine' {
         $e.NotApplicable | Should Be $false
     }
 
-    It 'resolves the Keep entry (v10.5) as not applicable when SP Admin is missing' {
-        $e = Get-TestEntry $resolved 'Untouched'
+    It 'resolves a missing SP Admin to a placeholder of its own slot, with nothing else (D30, v10.7)' {
+        $e = Get-TestEntry $resolved 'SPAdmin'
         $e.Kind | Should Be 'Windows'
-        $e.Mode | Should Be 'Keep'
-        $e.Slot | Should BeNullOrEmpty
-        $e.PasswordMode | Should BeNullOrEmpty
-        $e.Create | Should Be $false
+        $e.Mode | Should Be 'Rotate'
+        $e.Slot | Should Be 'SPAdmin'
+        $e.RoleName | Should Be 'Admin'
+        $e.PasswordMode | Should Be 'Set'
+        $e.Create | Should Be $true
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].Name | Should Be 'SP Admin'
+        $e.Accounts[0].ToCreate | Should Be $true
         $e.Operator | Should Be $false
         $e.EnableIfDisabled | Should Be $false
         $e.Application | Should Be $false
         $e.SqlAccess | Should BeNullOrEmpty
+        $e.LoginsEntry | Should Be $false
         $e.Replaced.Count | Should Be 0
-        $e.Accounts.Count | Should Be 0
+        $e.Missing.Count | Should Be 0
+        $e.NotApplicable | Should Be $false
+    }
+
+    It 'still resolves a Mode Keep entry (D26; the default config has none since v10.7)' {
+        $c = New-CrTestConfig
+        $c.Accounts = @($c.Accounts) + @(@{ Id = 'Untouched'; Kind = 'Windows'; Names = @('Kept Admin', 'OtherAdmin'); Mode = 'Keep' })
+        $e = Get-TestEntry (Resolve-CrAccounts -Config $c -State $state) 'Untouched'
+        $e.Mode | Should Be 'Keep'
+        $e.Slot | Should BeNullOrEmpty
+        $e.PasswordMode | Should BeNullOrEmpty
+        $e.Create | Should Be $false
+        $e.SqlAccess | Should BeNullOrEmpty
+        $e.Accounts.Count | Should Be 1
+        $e.Accounts[0].Name | Should Be 'OtherAdmin'
         $e.Missing.Count | Should Be 1
-        $e.Missing[0] | Should Be 'SP Admin'
-        $e.NotApplicable | Should Be $true
+        $e.Missing[0] | Should Be 'Kept Admin'
     }
 
     It 'compares names case-insensitively' {
@@ -280,23 +298,25 @@ Describe 'Resolve-CrAccounts on an IPT01-like machine' {
         }
     }
 
-    It 'selects an existing SP Admin only by the Keep entry (v10.5) and an existing SOP-Admin only by its managed entry (v10.6)' {
+    It 'selects an existing SP Admin and SOP-Admin only by their managed entries (v10.6, v10.7), never creates them' {
         $s = New-CrTestState -Profile 'IPT01'
         [void](Add-CrTestUser -State $s -Name 'SOP-Admin' -Groups @('Administrators') -PasswordNeverExpires)
         [void](Add-CrTestUser -State $s -Name 'SP Admin' -Groups @('Administrators') -PasswordNeverExpires)
         $res = Resolve-CrAccounts -Config (New-CrTestConfig) -State $s
-        $e = Get-TestEntry $res 'Untouched'
-        $e.Mode | Should Be 'Keep'
+        $e = Get-TestEntry $res 'SPAdmin'
+        $e.Mode | Should Be 'Rotate'
+        $e.Create | Should Be $false
         $e.NotApplicable | Should Be $false
         $e.Missing.Count | Should Be 0
         $e.Accounts.Count | Should Be 1
         $e.Accounts[0].Name | Should Be 'SP Admin'
         $e.Accounts[0].Sid | Should Be (Get-CrTestUserSid $s 'SP Admin')
+        $e.Accounts[0].ToCreate | Should BeNullOrEmpty
         $sop = Get-TestEntry $res 'SOPAdmin'
         $sop.Create | Should Be $false
         $sop.Accounts[0].Sid | Should Be (Get-CrTestUserSid $s 'SOP-Admin')
         foreach ($r in $res) {
-            if ($r.Id -ne 'Untouched') { ((Get-TestAccountNames $r) -contains 'SP Admin') | Should Be $false }
+            if ($r.Id -ne 'SPAdmin') { ((Get-TestAccountNames $r) -contains 'SP Admin') | Should Be $false }
             if ($r.Id -ne 'SOPAdmin') { ((Get-TestAccountNames $r) -contains 'SOP-Admin') | Should Be $false }
         }
         (Find-CrSidOverlap -Resolved $res).Count | Should Be 0
@@ -497,14 +517,14 @@ Describe 'Get-CrOtherEnabledAccounts' {
         foreach ($n in @('PUB-User', 'WinAutoUser', 'SYS-Admin', 'SYS Admin')) { ($names -contains $n) | Should Be $true }
     }
 
-    It 'excludes an enabled SOP-Admin (managed) and SP Admin (Keep entry, v10.5), and lists them without those entries' {
+    It 'excludes an enabled SOP-Admin and SP Admin (both managed), and lists them without those entries' {
         $state = New-CrTestState -Profile 'IPT01'
         [void](Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators') -PasswordNeverExpires)
         [void](Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators') -PasswordNeverExpires)
         $c = New-CrTestConfig
         (Get-CrOtherEnabledAccounts -State $state -Resolved (Resolve-CrAccounts -Config $c -State $state)).Count | Should Be 0
         $kept = @()
-        foreach ($a in $c.Accounts) { if (@('Untouched', 'SOPAdmin') -notcontains $a.Id) { $kept += $a } }
+        foreach ($a in $c.Accounts) { if (@('SPAdmin', 'SOPAdmin') -notcontains $a.Id) { $kept += $a } }
         $c.Accounts = $kept
         $others = Get-CrOtherEnabledAccounts -State $state -Resolved (Resolve-CrAccounts -Config $c -State $state)
         $names = @(); foreach ($u in $others) { $names += $u.Name }

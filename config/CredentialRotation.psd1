@@ -24,6 +24,7 @@
     Credentials = @(
         @{ Slot = 'AppUser';        Order = 20; Label = 'ApplicationUser' }
         @{ Slot = 'AutoLogon';      Order = 30; Label = 'Auto-logon users (PUB-User / WinAutoUser)' }
+        @{ Slot = 'SPAdmin';        Order = 40; Label = 'SP Admin' }
         @{ Slot = 'SOPAdmin';       Order = 90; Label = 'SOP-Admin (your logon account from now on)' }   # last (D25)
     )
 
@@ -44,6 +45,10 @@
            PasswordMode = 'Change'                                               # D9: keep DPAPI data
            Replaces = @('RID-500'); LoginsEntry = $true
            Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto'; IisReport = 'Auto' }
+        # SP Admin (D30, v10.7): created if missing (Administrators only), its own new password on every rotation;
+        # no SQL access, replaces nothing.
+        @{ Id = 'SPAdmin';  Kind = 'Windows'; Name = 'SP Admin'; Role = 'Admin'; Credential = 'SPAdmin'; Create = $true
+           Services = 'Auto'; ScheduledTasks = 'Auto'; ComPlus = 'Auto' }
         # Auto-logon accounts (D18, D21): every existing one, enabled or disabled, gets the slot password;
         # never created, never enabled or disabled.
         @{ Id = 'AutoLogon'; Kind = 'Windows'; Names = @('PUB-User', 'WinAutoUser'); Role = 'User'; Credential = 'AutoLogon'
@@ -53,8 +58,8 @@
         # Retired without replacement (D22); their dependents move to ApplicationUser (D24, v10.4).
         # 'SYS-Admin' is the same account as 'SYS Admin', spelled with a hyphen on some machines (v10.5).
         @{ Id = 'Retired';  Kind = 'Windows'; Names = @('SYS Admin', 'SYS-Admin'); Mode = 'Disable' }
-        # Never changed and not put to the operator (D26, v10.5; SOP-Admin is managed since v10.6)
-        @{ Id = 'Untouched'; Kind = 'Windows'; Names = @('SP Admin'); Mode = 'Keep' }
+        # No account is kept untouched any more (D26: SOP-Admin is managed since v10.6, SP Admin since v10.7); an entry
+        # with Mode = 'Keep' would never change its accounts.
         # Kept and checked (no password change)
         @{ Id = 'WinUsers'; Kind = 'Windows'; Names = @('WinUser1', 'WinUser2', 'WinUser3'); Role = 'WinUser'; Mode = 'Check' }
         @{ Id = 'FtpUsers'; Kind = 'Windows'; NamePattern = '^ftp|ftp$'; Role = 'Ftp'; Mode = 'Check' }

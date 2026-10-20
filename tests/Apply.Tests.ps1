@@ -40,7 +40,7 @@ function Grant-CrSqlLoginAccess { param([string]$LoginName, [bool]$CreateLogin, 
 function Get-CrSqlLoginAccess { param([string]$Sid) }
 
 # SIDs the New-CrManagedAccount mock hands out for created accounts (synthetic, unused RIDs of the SM fixture).
-$global:CrTestNewSids = @{ 'SOP-Admin' = 'S-1-5-21-1000-2000-3000-1110'; 'ApplicationUser' = 'S-1-5-21-1000-2000-3000-1109' }
+$global:CrTestNewSids = @{ 'SOP-Admin' = 'S-1-5-21-1000-2000-3000-1110'; 'ApplicationUser' = 'S-1-5-21-1000-2000-3000-1109'; 'SP Admin' = 'S-1-5-21-1000-2000-3000-1111' }
 
 # Slot secrets as Read-CrSlotSecrets returns them (v10): old password only for existing Change accounts.
 # The SecureStrings are empty (only identity matters here).
@@ -119,7 +119,7 @@ function Add-TestService {
 # Runs Invoke-CrApply on a fixture state; the slot secrets are kept in $global:CrTestSlotSecrets for the filters.
 function Invoke-TestApply {
     param(
-        $State, [string[]]$Slots = @('AppUser', 'AutoLogon', 'SOPAdmin'), [hashtable]$Outcomes = @{}, [hashtable]$Paths = @{},
+        $State, [string[]]$Slots = @('AppUser', 'AutoLogon', 'SPAdmin', 'SOPAdmin'), [hashtable]$Outcomes = @{}, [hashtable]$Paths = @{},
         [string[]]$ReapplySids = @(), [string[]]$Only, [string]$RunningSid, $Preflight, [string]$AutoLogonChoice,
         [hashtable]$OtherDecisions = @{}, $Journal, $Config
     )
@@ -191,7 +191,7 @@ function Get-TestFindings {
     })
 }
 
-$CrTestSlotOrder = 'AppUser,AutoLogon,SOPAdmin'
+$CrTestSlotOrder = 'AppUser,AutoLogon,SPAdmin,SOPAdmin'
 
 Describe 'Get-CrApplySlotDefinitions' {
     It 'orders the slots by Order: AppUser first, SOPAdmin last (D25)' {
@@ -295,7 +295,7 @@ Describe 'Get-CrApplyPreview / Get-CrApplyAccountFates (SM: SOP-Admin missing, W
     (Get-CrTestUser $state 'WinAutoUser')['Disabled'] = $true
     $config = New-CrTestConfig
     $resolved = Resolve-CrAccounts -Config $config -State $state
-    $ss = New-TestSlotSecrets -Resolved $resolved -Slots @('AppUser', 'AutoLogon', 'SOPAdmin')
+    $ss = New-TestSlotSecrets -Resolved $resolved -Slots @('AppUser', 'AutoLogon', 'SPAdmin', 'SOPAdmin')
     $probes = New-TestProbes -SlotSecrets $ss
     $pf = @{ MachineBlocked = $false; BlockedSlots = @{}; Findings = @() }
     $preview = Get-CrApplyPreview -Config $config -Resolved $resolved -Preflight $pf -SlotSecrets $ss -Probes $probes -Only $null
@@ -315,6 +315,7 @@ Describe 'Get-CrApplyPreview / Get-CrApplyAccountFates (SM: SOP-Admin missing, W
         $sop['Path'] | Should Be 'Create'
         @((Find-CrApplyPreviewSlot $preview 'SOPAdmin')['Accounts']).Count | Should Be 1
         $null -eq (Find-CrApplyPreviewSlot $preview 'BiCARemote') | Should Be $true
+        $null -eq (Find-CrApplyPreviewSlot $preview 'BiCAAdmin') | Should Be $true
         ((Find-CrApplyPreviewSlot $preview 'AppUser')['Accounts'][0])['Path'] | Should Be 'Change'
         $null -eq (Find-CrApplyPreviewSlot $preview 'SQLApplication') | Should Be $true
         [bool]((Find-CrApplyPreviewSlot $preview 'AppUser')['Unsupported']) | Should Be $false
@@ -327,8 +328,17 @@ Describe 'Get-CrApplyPreview / Get-CrApplyAccountFates (SM: SOP-Admin missing, W
         $autoLogonAccounts[0]['StaysDisabled'] | Should Be $true
         Get-CrApplyPathText $autoLogonAccounts[0] | Should Match 'stays disabled'
     }
-    It 'lists the fate of every enabled account and the account to create' {
+    It 'creates the missing SP Admin in its own slot, with no other step (D30, v10.7)' {
+        $sp = @((Find-CrApplyPreviewSlot $preview 'SPAdmin')['Accounts'])
+        $sp.Count | Should Be 1
+        $sp[0]['Name'] | Should Be 'SP Admin'
+        $sp[0]['Path'] | Should Be 'Create'
+        $sp[0]['Enable'] | Should Be $false
+        (Find-CrApplyPreviewSlot $preview 'SPAdmin')['Status'] | Should Be 'Apply'
+    }
+    It 'lists the fate of every enabled account and the accounts to create' {
         $fate['SOP-Admin'] | Should Be 'create'
+        $fate['SP Admin'] | Should Be 'create'
         $fate['BiCA Admin'] | Should Be 'disable'
         $fate['BiCA Remote'] | Should Be 'disable'
         $fate['ApplicationUser'] | Should Be 'change'
@@ -356,7 +366,7 @@ Describe 'Get-CrApplyPreview / Get-CrApplyAccountFates (SM: SOP-Admin missing, W
     }
 }
 
-Describe 'Get-CrApplyAccountFates / Get-CrApplyDisablePlan: SP Admin kept untouched (v10.5), an existing SOP-Admin managed (v10.6)' {
+Describe 'Get-CrApplyAccountFates / Get-CrApplyDisablePlan: existing SOP-Admin (v10.6) and SP Admin (v10.7) managed' {
     $state = New-CrTestState -Profile IPT01
     $sop = Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators') -PasswordNeverExpires
     [void](Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators') -PasswordNeverExpires)
@@ -371,9 +381,9 @@ Describe 'Get-CrApplyAccountFates / Get-CrApplyDisablePlan: SP Admin kept untouc
     It 'is not one of the other enabled accounts the operator is asked about (D23)' {
         @($others).Count | Should Be 0
     }
-    It 'keeps SP Admin and says why, sets the password of SOP-Admin; the retired SYS Admin and SYS-Admin are disabled' {
-        $fate['SP Admin']['Fate'] | Should Be 'keep'
-        $fate['SP Admin']['Detail'] | Should Be 'kept untouched (config: Mode Keep)'
+    It 'sets the passwords of SP Admin and SOP-Admin; the retired SYS Admin and SYS-Admin are disabled' {
+        $fate['SP Admin']['Fate'] | Should Be 'set'
+        $fate['SP Admin']['Detail'] | Should Be 'managed account (slot SPAdmin): password set (D9)'
         $fate['SOP-Admin']['Fate'] | Should Be 'set'
         $fate['SOP-Admin']['Detail'] | Should Be 'managed account (slot SOPAdmin): password set (D9)'
         $fate['SYS Admin']['Fate'] | Should Be 'disable'
@@ -455,7 +465,7 @@ Describe 'Get-CrApplyDisablePlan: dependents of retired and other accounts alway
         Add-TestService -State $state -Name 'OtherService' -Sid $otherAdminSid -StartName '.\OtherAdmin'
         $config = New-CrTestConfig
         $resolved = Resolve-CrAccounts -Config $config -State $state
-        $ss = New-TestSlotSecrets -Resolved $resolved -Slots @('AppUser', 'AutoLogon', 'SOPAdmin')
+        $ss = New-TestSlotSecrets -Resolved $resolved -Slots @('AppUser', 'AutoLogon', 'SPAdmin', 'SOPAdmin')
         $probes = New-TestProbes -SlotSecrets $ss
         $pf = @{ MachineBlocked = $false; BlockedSlots = @{}; Findings = @() }
         $preview = Get-CrApplyPreview -Config $config -Resolved $resolved -Preflight $pf -SlotSecrets $ss -Probes $probes -Only $null
@@ -608,17 +618,21 @@ Describe 'Invoke-CrApply' {
         $sysSid = Get-CrTestUserSid $state 'SYS Admin'
         $sysHyphenSid = Get-CrTestUserSid $state 'SYS-Admin'
         $sopSid = $global:CrTestNewSids['SOP-Admin']
+        $spSid = $global:CrTestNewSids['SP Admin']
         $result = Invoke-TestApply -State $state -RunningSid $sysHyphenSid
 
         It 'runs the slots in Order, SOPAdmin last (D25); there are no BiCA and no SQL slots (D27, D28)' {
             Get-TestSlotOrder $result['Slots'] | Should Be $CrTestSlotOrder
-            foreach ($s in @('AppUser', 'AutoLogon', 'SOPAdmin')) { (Get-TestSlot $result $s)['Status'] | Should Be 'Done' }
+            foreach ($s in @('AppUser', 'AutoLogon', 'SPAdmin', 'SOPAdmin')) { (Get-TestSlot $result $s)['Status'] | Should Be 'Done' }
             $null -eq (Get-TestSlot $result 'SQLApplication') | Should Be $true
         }
-        It 'creates SOP-Admin with the SOPAdmin slot secret, sets PUB-User and WinAutoUser and changes ApplicationUser (D9)' {
-            Assert-MockCalled New-CrManagedAccount -Times 1 -Exactly -Scope Context
+        It 'creates SOP-Admin and SP Admin with their slot secrets, sets PUB-User and WinAutoUser and changes ApplicationUser (D9)' {
+            Assert-MockCalled New-CrManagedAccount -Times 2 -Exactly -Scope Context
             Assert-MockCalled New-CrManagedAccount -Times 1 -Exactly -Scope Context -ParameterFilter {
                 $Name -eq 'SOP-Admin' -and [object]::ReferenceEquals($Secret, $global:CrTestSlotSecrets['SOPAdmin']['NewSecret'])
+            }
+            Assert-MockCalled New-CrManagedAccount -Times 1 -Exactly -Scope Context -ParameterFilter {
+                $Name -eq 'SP Admin' -and [object]::ReferenceEquals($Secret, $global:CrTestSlotSecrets['SPAdmin']['NewSecret'])
             }
             Assert-MockCalled Invoke-CrPasswordSet -Times 2 -Exactly -Scope Context
             Assert-MockCalled Invoke-CrPasswordSet -Times 1 -Exactly -Scope Context -ParameterFilter { $User['Sid'] -eq $pubSid }
@@ -627,11 +641,22 @@ Describe 'Invoke-CrApply' {
             Assert-MockCalled Enable-CrAccount -Times 0 -Exactly -Scope Context
             (@($result['VerifiedSids']) -contains $sopSid) | Should Be $true
         }
-        It 'adds SOP-Admin to Administrators and Remote Desktop Users (the optional helpers group is missing)' {
-            Assert-MockCalled Invoke-CrGroupMembershipChange -Times 1 -Exactly -Scope Context
+        It 'adds SOP-Admin to Administrators and Remote Desktop Users (the optional helpers group is missing), SP Admin to Administrators only' {
+            Assert-MockCalled Invoke-CrGroupMembershipChange -Times 2 -Exactly -Scope Context
             Assert-MockCalled Invoke-CrGroupMembershipChange -Times 1 -Exactly -Scope Context -ParameterFilter {
                 $MemberSid -eq $sopSid -and @($AddGroupSids) -contains 'S-1-5-32-544' -and @($AddGroupSids) -contains 'S-1-5-32-555' -and @($AddGroupSids).Count -eq 2
             }
+            Assert-MockCalled Invoke-CrGroupMembershipChange -Times 1 -Exactly -Scope Context -ParameterFilter {
+                $MemberSid -eq $spSid -and (@($AddGroupSids) -join ',') -eq 'S-1-5-32-544'
+            }
+        }
+        It 'verifies SP Admin and gives it nothing else: no SQL login, no LOGINS or RDP follow-up, nothing disabled for it (D30)' {
+            (@($result['VerifiedSids']) -contains $spSid) | Should Be $true
+            Assert-MockCalled Grant-CrSqlLoginAccess -Times 1 -Exactly -Scope Context
+            Assert-MockCalled Get-CrSqlLoginAccess -Times 0 -Exactly -Scope Context -ParameterFilter { $Sid -eq $spSid }
+            @(Get-TestFindings $result 'Info' 'SQL' 'SP Admin' '*no Windows login in SQL Server*').Count | Should Be 1
+            @(Get-TestFindings $result 'FollowUp' $null 'SP Admin').Count | Should Be 0
+            $null -eq (Get-TestDisable $result 'SP Admin') | Should Be $true
         }
         It 'grants SOP-Admin the SQL Server login with sysadmin as the running account and verifies it (D29)' {
             Assert-MockCalled Grant-CrSqlLoginAccess -Times 1 -Exactly -Scope Context -ParameterFilter {
@@ -695,7 +720,10 @@ Describe 'Invoke-CrApply' {
         $global:CrTestDisabled = New-Object System.Collections.ArrayList
         $state = New-CrTestState -Profile SM
         $newSid = $global:CrTestNewSids['SOP-Admin']
-        $global:CrTestGroupsAfterCreate = New-TestGroupsWithMember -State $state -GroupSid 'S-1-5-32-545' -MemberSid $newSid
+        $spSid = $global:CrTestNewSids['SP Admin']
+        # What Get-CrLocalGroups reads after each NetUserAdd: both created accounts in Users.
+        $withSop = New-TestGroupsWithMember -State $state -GroupSid 'S-1-5-32-545' -MemberSid $newSid
+        $global:CrTestGroupsAfterCreate = New-TestGroupsWithMember -State @{ Groups = $withSop } -GroupSid 'S-1-5-32-545' -MemberSid $spSid
         $bicaSid = Get-CrTestUserSid $state 'BiCA Admin'
         $remoteSid = Get-CrTestUserSid $state 'BiCA Remote'
         $appSid = Get-CrTestUserSid $state 'ApplicationUser'
@@ -706,21 +734,22 @@ Describe 'Invoke-CrApply' {
         $helpersSid = (Get-CrTestGroup $state 'Offer Remote Assistance Helpers').Sid
         $result = Invoke-TestApply -State $state -OtherDecisions @{ $otherAdminSid = 'Disable'; $myftpSid = 'Keep' }
 
-        It 'creates the missing SOP-Admin with the SOPAdmin slot secret (D21, D28)' {
-            Assert-MockCalled New-CrManagedAccount -Times 1 -Exactly -Scope Context
+        It 'creates the missing SP Admin (slot SPAdmin) and SOP-Admin (slot SOPAdmin, last) with their slot secrets (D21, D28, D30)' {
+            Assert-MockCalled New-CrManagedAccount -Times 2 -Exactly -Scope Context
             Assert-MockCalled New-CrManagedAccount -Times 1 -Exactly -Scope Context -ParameterFilter {
                 $Name -eq 'SOP-Admin' -and [object]::ReferenceEquals($Secret, $global:CrTestSlotSecrets['SOPAdmin']['NewSecret'])
             }
-            (@($result['CreatedSids']) -join ',') | Should Be $newSid
+            (@($result['CreatedSids']) -join ',') | Should Be ($spSid + ',' + $newSid)
             (Get-TestSlot $result 'SOPAdmin')['Status'] | Should Be 'Done'
+            (Get-TestSlot $result 'SPAdmin')['Status'] | Should Be 'Done'
         }
         It 'sets WinAutoUser and changes ApplicationUser; the BiCA accounts and the created account get no password step' {
             Assert-MockCalled Invoke-CrPasswordSet -Times 1 -Exactly -Scope Context
             Assert-MockCalled Invoke-CrPasswordSet -Times 1 -Exactly -Scope Context -ParameterFilter { $User['Sid'] -eq $winAutoSid }
             Assert-MockCalled Invoke-CrPasswordRotation -Times 1 -Exactly -Scope Context -ParameterFilter { $User['Sid'] -eq $appSid }
         }
-        It 're-reads the groups after the creation, adds SOP-Admin to its three role groups and removes it from Users later' {
-            Assert-MockCalled Get-CrLocalGroups -Times 1 -Exactly -Scope Context
+        It 're-reads the groups after each creation, adds SOP-Admin to its three role groups and removes it from Users later' {
+            Assert-MockCalled Get-CrLocalGroups -Times 2 -Exactly -Scope Context
             Assert-MockCalled Invoke-CrGroupMembershipChange -Times 1 -Exactly -Scope Context -ParameterFilter {
                 $MemberSid -eq $newSid -and @($AddGroupSids) -contains 'S-1-5-32-544' -and @($AddGroupSids) -contains 'S-1-5-32-555' -and @($AddGroupSids) -contains $helpersSid
             }
@@ -1045,7 +1074,7 @@ Describe 'Invoke-CrApply' {
         $state = New-CrTestState -Profile IPT01
         $state['AutoLogon']['DefaultUserName'] = 'SYS-Admin'
         # No AutoLogon slot password: PUB-User is not on the new password, so the switch is ambiguous; no choice = leave unchanged.
-        $result = Invoke-TestApply -State $state -Slots @('AppUser', 'SOPAdmin')
+        $result = Invoke-TestApply -State $state -Slots @('AppUser', 'SPAdmin', 'SOPAdmin')
 
         It 'leaves the auto-logon unchanged (D13)' {
             Assert-MockCalled Invoke-CrAutoLogonAction -Times 0 -Exactly -Scope Context
@@ -1290,8 +1319,9 @@ Describe 'Invoke-CrApply' {
         $bicaSid = Get-CrTestUserSid $state 'BiCA Admin'
         $result = Invoke-TestApply -State $state
 
-        It 'sets the password of SOP-Admin and creates nothing' {
-            Assert-MockCalled New-CrManagedAccount -Times 0 -Exactly -Scope Context
+        It 'sets the password of SOP-Admin and does not create it (only the missing SP Admin is created)' {
+            Assert-MockCalled New-CrManagedAccount -Times 0 -Exactly -Scope Context -ParameterFilter { $Name -eq 'SOP-Admin' }
+            Assert-MockCalled New-CrManagedAccount -Times 1 -Exactly -Scope Context -ParameterFilter { $Name -eq 'SP Admin' }
             Assert-MockCalled Invoke-CrPasswordSet -Times 1 -Exactly -Scope Context -ParameterFilter {
                 $User['Sid'] -eq $sop.Sid -and [object]::ReferenceEquals($NewSecret, $global:CrTestSlotSecrets['SOPAdmin']['NewSecret'])
             }
@@ -1310,6 +1340,71 @@ Describe 'Invoke-CrApply' {
         }
         It 'disables BiCA Admin and, last, the running BiCA Remote' {
             (@($global:CrTestDisabled) -join ',') | Should Be 'BiCA Admin,Administrator,SYS Admin,SYS-Admin,BiCA Remote'
+        }
+    }
+
+    Context 'IPT01: the SQL grant for an existing SOP-Admin fails: the service of BiCA Admin stays where it is (D24, D29)' {
+        Mock Grant-CrSqlLoginAccess { @{ Success = $false; Steps = @(); FailedStep = 'CreateLogin'; Error = 'permission denied' } }
+        $global:CrTestDisabled = New-Object System.Collections.ArrayList
+        $state = New-CrTestState -Profile IPT01
+        [void](Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators', 'Remote Desktop Users') -PasswordNeverExpires -CannotChangePassword)
+        $bicaSid = Get-CrTestUserSid $state 'BiCA Admin'
+        $result = Invoke-TestApply -State $state
+
+        It 'stops the SOPAdmin slot at SqlAccess' {
+            (Get-TestSlot $result 'SOPAdmin')['FailedStep'] | Should Be 'SqlAccess'
+        }
+        It 'moves no dependent of BiCA Admin to SOP-Admin and keeps both BiCA accounts enabled' {
+            Assert-MockCalled Move-CrServiceAccount -Times 0 -Exactly -Scope Context -ParameterFilter { $FromSid -eq $bicaSid }
+            (Get-TestDisable $result 'BiCA Admin')['Status'] | Should Be 'KeptEnabled'
+            (Get-TestDisable $result 'BiCA Admin')['MovedTo'] | Should BeNullOrEmpty
+            ($global:CrTestDisabled -contains 'BiCA Admin') | Should Be $false
+            ($global:CrTestDisabled -contains 'BiCA Remote') | Should Be $false
+        }
+        It 'still moves the service of the retired SYS Admin to ApplicationUser and exits with 1' {
+            Assert-MockCalled Move-CrServiceAccount -Times 1 -Exactly -Scope Context -ParameterFilter { $ToAccount -eq '.\ApplicationUser' }
+            $result['ExitCode'] | Should Be 1
+        }
+    }
+
+    Context 'IPT01: an existing SP Admin in Administrators and Remote Desktop Users, and a disabled one (D30, v10.7)' {
+        $global:CrTestDisabled = New-Object System.Collections.ArrayList
+        $state = New-CrTestState -Profile IPT01
+        $sp = Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators', 'Remote Desktop Users') -PasswordNeverExpires
+        $result = Invoke-TestApply -State $state -Slots @('SPAdmin') -Only @('SPAdmin')
+
+        It 'sets its password with the SPAdmin secret and creates nothing' {
+            Assert-MockCalled New-CrManagedAccount -Times 0 -Exactly -Scope Context
+            Assert-MockCalled Invoke-CrPasswordSet -Times 1 -Exactly -Scope Context
+            Assert-MockCalled Invoke-CrPasswordSet -Times 1 -Exactly -Scope Context -ParameterFilter {
+                $User['Sid'] -eq $sp.Sid -and [object]::ReferenceEquals($NewSecret, $global:CrTestSlotSecrets['SPAdmin']['NewSecret'])
+            }
+            (Get-TestSlot $result 'SPAdmin')['Status'] | Should Be 'Done'
+            (@($result['VerifiedSids']) -contains $sp.Sid) | Should Be $true
+        }
+        It 'removes it from Remote Desktop Users (Administrators only, D10)' {
+            Assert-MockCalled Invoke-CrGroupMembershipChange -Times 1 -Exactly -Scope Context -ParameterFilter {
+                $MemberSid -eq $sp.Sid -and (@($RemoveGroupSids) -join ',') -eq 'S-1-5-32-555'
+            }
+        }
+        It 'gives it no SQL login and disables nothing' {
+            Assert-MockCalled Grant-CrSqlLoginAccess -Times 0 -Exactly -Scope Context
+            Assert-MockCalled Disable-CrAccount -Times 0 -Exactly -Scope Context
+            @(Get-TestFindings $result 'FollowUp' 'LOGINS').Count | Should Be 0
+        }
+    }
+
+    Context 'IPT01: a disabled SP Admin gets the new password and stays disabled (D21)' {
+        $global:CrTestDisabled = New-Object System.Collections.ArrayList
+        $state = New-CrTestState -Profile IPT01
+        $sp = Add-CrTestUser -State $state -Name 'SP Admin' -Groups @('Administrators') -PasswordNeverExpires -Disabled
+        $result = Invoke-TestApply -State $state -Slots @('SPAdmin') -Only @('SPAdmin')
+
+        It 'sets it, does not enable it and does not logon-test it' {
+            Assert-MockCalled Invoke-CrPasswordSet -Times 1 -Exactly -Scope Context -ParameterFilter { $User['Sid'] -eq $sp.Sid }
+            Assert-MockCalled Enable-CrAccount -Times 0 -Exactly -Scope Context
+            Assert-MockCalled Invoke-CrLogonTest -Times 0 -Exactly -Scope Context -ParameterFilter { $UserName -eq 'SP Admin' }
+            (Get-TestSlot $result 'SPAdmin')['Status'] | Should Be 'Done'
         }
     }
 

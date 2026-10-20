@@ -745,6 +745,15 @@ Describe 'Invoke-CrPreflight: SqlWriteBlocked (D29, v10.6)' {
         $s['WriteFilter'] = @{ Filters = @((New-TestFilter -Type 'EWF' -Volumes @('D:'))); Error = $null }
         (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should Match '^write filter: '
     }
+    It 'refuses when the master files are unknown while a write filter driver is installed (D19)' {
+        $s = New-TestPreflightState
+        $s['Sql']['MasterFiles'] = @()
+        $s['WriteFilter'] = @{ Filters = @((New-TestFilter -Type 'FBWF' -Volumes @('D:'))); Error = $null }
+        (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should Match 'master files could not be read while a write filter driver is installed'
+        $s = New-TestPreflightState
+        $s['Sql']['MasterFiles'] = @()
+        (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should BeNullOrEmpty
+    }
     It 'leaves a stopped or unreachable instance to the access plan (unknown there, not blocked here)' {
         $s = New-TestPreflightState; $s['Sql']['ServiceState'] = 'Stopped'; $s['Sql']['Connected'] = $false
         (Invoke-CrPreflight -State $s -Config $sqlAccessConfig)['SqlWriteBlocked'] | Should BeNullOrEmpty

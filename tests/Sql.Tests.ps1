@@ -447,10 +447,12 @@ Describe 'Get-CrSqlAccessPlan (D29)' {
         return @{ Name = $Name; Type = 'WINDOWS_LOGIN'; Sid = $Sid; IsDisabled = $Disabled; IsSysadmin = $Sysadmin; ServerRoles = $Roles }
     }
     function New-TestSqlAccessState {
-        param($Logins, [string]$ServiceState = 'Running', [bool]$Connected = $true, $OtherInstances = @(), $AgentJobs = @(), [bool]$Present = $true, [string]$SqlError)
+        param($Logins, [string]$ServiceState = 'Running', [bool]$Connected = $true, $OtherInstances = @(), $AgentJobs = @(), [bool]$Present = $true, [string]$SqlError,
+              [bool]$Sysadmin = $true)
         return @{
             Computer = @{ Name = 'SM-TEST01' }
             Sql      = @{ DefaultInstancePresent = $Present; ServiceState = $ServiceState; Connected = $Connected; Error = $SqlError; MajorVersion = 10
+                          ConnectedAs = 'SM-TEST01\BiCA Remote'; ConnectedAsSysadmin = $Sysadmin
                           Logins = @($Logins); OtherInstances = @($OtherInstances); AgentJobs = @($AgentJobs) }
         }
     }
@@ -491,6 +493,27 @@ Describe 'Get-CrSqlAccessPlan (D29)' {
         $p.Unknown | Should Be $true
         $p.Reason | Should Match 'no connection.*Login failed'
         $p.Reason | Should Match 'sysadmin through its own Windows login, e\.g\. BiCA Admin, BiCA Remote'
+    }
+
+    It 'is unknown when the running account is not sysadmin: it cannot see the other logins' {
+        # Only the own login would be visible, so the BiCA logins would look absent.
+        $p = Get-CrSqlAccessPlan -State (New-TestSqlAccessState -Logins @() -Sysadmin $false) -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin'
+        $p.Unknown | Should Be $true
+        $p.Needed | Should Be $false
+        $p.Reason | Should Match '^the running account \(SM-TEST01\\BiCA Remote\) is not sysadmin, so it cannot see the SQL Server logins of BiCA Admin, BiCA Remote'
+    }
+
+    It 'is unknown when the SQL Server discovery section failed' {
+        $p = Get-CrSqlAccessPlan -State @{ Computer = @{ Name = 'SM-TEST01' }; Sql = @{ Error = 'registry denied' } } -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin'
+        $p.Unknown | Should Be $true
+        $p.Reason | Should Be 'the SQL Server discovery failed (registry denied)'
+    }
+
+    It 'is unknown when the server roles of a source login that is not sysadmin could not be read' {
+        $logins = @((New-TestWindowsLogin -Name 'OLD-NAME01\BiCA Admin' -Sid $bicaAdmin -Roles $null -Sysadmin $false))
+        $p = Get-CrSqlAccessPlan -State (New-TestSqlAccessState -Logins $logins -SqlError 'ServerRoles: denied') -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin'
+        $p.Unknown | Should Be $true
+        $p.Reason | Should Be 'the server roles of the SQL Server login OLD-NAME01\BiCA Admin could not be read (ServerRoles: denied)'
     }
 
     It 'is unknown when the logins could not be read' {

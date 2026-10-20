@@ -6,14 +6,14 @@
 .DESCRIPTION
     Discovers the local accounts, groups, rights, dependents, auto-logon, write filter and SQL Server state,
     compares them with the configuration and reports what -Apply would change (audit, changes nothing).
-    With -Apply (account model v10.6, PLAN D18, D21-D29) it lists the enabled local accounts and what happens to each,
+    With -Apply (account model v10.7, PLAN D18, D21-D30) it lists the enabled local accounts and what happens to each,
     asks about the other enabled accounts, prompts for the passwords per credential slot, probes ApplicationUser's old
-    password, shows the plan and, after YES, creates the missing admin accounts (SOP-Admin, ApplicationUser), sets the
-    passwords of the managed accounts incl. every existing PUB-User/WinAutoUser (ApplicationUser: changed), enforces
-    groups and flags, gives SOP-Admin the SQL Server access of BiCA Admin and BiCA Remote, updates and moves the
+    password, shows the plan and, after YES, creates the missing admin accounts (SOP-Admin, ApplicationUser, SP Admin),
+    sets the passwords of the managed accounts incl. every existing PUB-User/WinAutoUser (ApplicationUser: changed),
+    enforces groups and flags, gives SOP-Admin the SQL Server access of BiCA Admin and BiCA Remote, updates and moves the
     dependents, runs the auto-logon step, disables the replaced (BiCA Admin, BiCA Remote, built-in Administrator), retired
-    and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8). SP Admin is kept untouched (D26).
-    SOP-Admin, the operator's account, is the last slot; a running BiCA Remote is disabled last (D25).
+    and chosen accounts and runs the check-mode fixes (PLAN sections 6 and 8). BiCA Admin and BiCA Remote get no new
+    password. SOP-Admin, the operator's account, is the last slot; a running BiCA Remote is disabled last (D25).
     SQL login credentials are not updated (D27).
     Start it through Start-CredentialRotation.cmd ("Run as administrator").
 
@@ -22,7 +22,7 @@
     the prompts, never on the command line (D4).
 
 .PARAMETER Only
-    Slot names to audit or apply, e.g. AppUser, AutoLogon, SOPAdmin. Check-mode accounts, retired accounts
+    Slot names to audit or apply, e.g. AppUser, AutoLogon, SPAdmin, SOPAdmin. Check-mode accounts, retired accounts
     and other enabled accounts are only processed without -Only. An unknown slot name stops the tool (exit 2).
 
 .PARAMETER ConfigPath
@@ -49,7 +49,7 @@ if ($UnexpectedArguments) {
 }
 
 $ErrorActionPreference = 'Stop'
-$script:CrToolVersion = '0.6.0'
+$script:CrToolVersion = '0.7.0'
 $script:CrScriptPath = $MyInvocation.MyCommand.Path
 $script:CrScriptDir = Split-Path -Parent $script:CrScriptPath
 

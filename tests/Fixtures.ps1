@@ -23,7 +23,7 @@
 #         LegacySync; retired); no other enabled accounts; no CardCenters, no Offer Remote Assistance Helpers.
 #   Both: auto-logon on as BiCA Admin with a plain-text DefaultPassword (SM: turned off; IPT01: switched to PUB-User);
 #         deny rights as on the test sites; the SQL connection runs as BiCA Remote (sysadmin). SOP-Admin (managed,
-#         v10.6) and SP Admin (kept untouched, v10.5) are added by the tests that need them.
+#         v10.6) and SP Admin (managed, v10.7) don't exist (created); tests that need them existing add them.
 
 $CrFixturesDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 

@@ -4,7 +4,8 @@
 
 $script:CrJournalFileName = 'journal.clixml'
 $script:CrJournalSteps = @('PreSteps', 'CcpCleared', 'CcpRestored', 'Unlocked', 'Secret', 'Dependents', 'Grants', 'Verified', 'AutoLogon',
-                           'Created', 'Enabled', 'Disabled', 'DependentsMoved')   # v10 account model (D21-D25)
+                           'Created', 'Enabled', 'Disabled', 'DependentsMoved',   # v10 account model (D21-D25)
+                           'SqlAccess')                                           # v10.6: SOP-Admin's SQL login (D29)
 
 function New-CrJournalObject {
     param([string]$Path)

@@ -21,6 +21,14 @@ function Add-TestAccount {
     $Config.Accounts = @($Config.Accounts) + @($Entry)
 }
 
+# A Mode = 'Keep' entry (D26): the default config has none since v10.7, the mode stays supported.
+function Add-TestKeepEntry {
+    param($Config)
+    $entry = @{ Id = 'Untouched'; Kind = 'Windows'; Names = @('Kept Admin'); Mode = 'Keep' }
+    Add-TestAccount $Config $entry
+    return $entry
+}
+
 Describe 'Import-CrConfig' {
     $defaultPath = Join-Path $here '..\config\CredentialRotation.psd1'
 
@@ -29,7 +37,7 @@ Describe 'Import-CrConfig' {
         ($c -is [hashtable]) | Should Be $true
         $c.SchemaVersion | Should Be 1
         @($c.Accounts).Count | Should Be 7
-        @($c.Credentials).Count | Should Be 3
+        @($c.Credentials).Count | Should Be 4
         $c.Roles.ContainsKey('AdminRemote') | Should Be $true
         $c.Roles.ContainsKey('Operator') | Should Be $false
         $c.Roles.ContainsKey('RotateOnly') | Should Be $false
@@ -40,8 +48,8 @@ Describe 'Import-CrConfig' {
         $c = Import-CrConfig -Path $defaultPath
         $slots = @(); $orders = @()
         foreach ($cr in $c.Credentials) { $slots += $cr.Slot; $orders += $cr.Order }
-        ($slots -join ',') | Should Be 'AppUser,AutoLogon,SOPAdmin'
-        ($orders -join ',') | Should Be '20,30,90'
+        ($slots -join ',') | Should Be 'AppUser,AutoLogon,SPAdmin,SOPAdmin'
+        ($orders -join ',') | Should Be '20,30,40,90'
     }
 
     It 'has SOP-Admin replacing BiCA Admin and BiCA Remote (created if missing, the operator, SQL access; D28, D29)' {
@@ -100,13 +108,26 @@ Describe 'Import-CrConfig' {
         (@($r.Names) -join ',') | Should Be 'SYS Admin,SYS-Admin'
     }
 
-    It 'keeps only SP Admin untouched with a Keep entry (v10.5; SOP-Admin is managed since v10.6)' {
+    It 'has SP Admin as a managed account: created if missing, Administrators only, its own slot, nothing else (D30, v10.7)' {
         $c = Import-CrConfig -Path $defaultPath
-        $k = Get-TestAccount $c 'Untouched'
-        $k.Mode | Should Be 'Keep'
-        $k.Kind | Should Be 'Windows'
-        (@($k.Names) -join ',') | Should Be 'SP Admin'
-        (@($k.Keys | Sort-Object) -join ',') | Should Be 'Id,Kind,Mode,Names'
+        $sp = Get-TestAccount $c 'SPAdmin'
+        $sp.Kind | Should Be 'Windows'
+        $sp.Name | Should Be 'SP Admin'
+        $sp.Role | Should Be 'Admin'
+        $sp.Credential | Should Be 'SPAdmin'
+        $sp.Create | Should Be $true
+        $sp.Services | Should Be 'Auto'
+        $sp.ScheduledTasks | Should Be 'Auto'
+        $sp.ComPlus | Should Be 'Auto'
+        foreach ($k in @('Replaces', 'SqlAccess', 'Operator', 'Application', 'EnableIfDisabled', 'PasswordMode', 'LoginsEntry', 'Mode')) {
+            $sp.ContainsKey($k) | Should Be $false
+        }
+        (@($c.Roles.Admin.Groups) -join ',') | Should Be 'S-1-5-32-544'
+    }
+
+    It 'keeps no account untouched any more (D26: SOP-Admin managed since v10.6, SP Admin since v10.7)' {
+        $c = Import-CrConfig -Path $defaultPath
+        foreach ($a in $c.Accounts) { [string]$a.Mode | Should Not Be 'Keep' }
     }
 
     It 'has no SQL login entries (D27, v10.5)' {
@@ -638,21 +659,21 @@ Describe 'Test-CrConfig' {
     Context 'Keep entries (v10.5)' {
         It 'a Keep entry with a Role or a Credential' {
             $c = New-CrTestConfig
-            $k = Get-TestAccount $c 'Untouched'; $k.Role = 'Admin'; $k.Credential = 'AppUser'
+            $k = Add-TestKeepEntry $c; $k.Role = 'Admin'; $k.Credential = 'AppUser'
             $errors = @(Test-CrConfig -Config $c)
             Test-HasConfigError $errors "Untouched': key 'Role' is not valid for Mode 'Keep'" | Should Be $true
             Test-HasConfigError $errors "Untouched': key 'Credential' is not valid for Mode 'Keep'" | Should Be $true
         }
         It 'a Keep entry with dependents or LoginsEntry' {
             $c = New-CrTestConfig
-            $k = Get-TestAccount $c 'Untouched'; $k.Services = 'Auto'; $k.LoginsEntry = $true
+            $k = Add-TestKeepEntry $c; $k.Services = 'Auto'; $k.LoginsEntry = $true
             $errors = @(Test-CrConfig -Config $c)
             Test-HasConfigError $errors "Untouched': key 'Services' is not valid for Mode 'Keep'" | Should Be $true
             Test-HasConfigError $errors "Untouched': key 'LoginsEntry' is not valid for Mode 'Keep'" | Should Be $true
         }
         It 'a Keep entry with Create, Replaces or PasswordMode' {
             $c = New-CrTestConfig
-            $k = Get-TestAccount $c 'Untouched'; $k.Create = $true; $k.Replaces = @('Kiosk'); $k.PasswordMode = 'Set'
+            $k = Add-TestKeepEntry $c; $k.Create = $true; $k.Replaces = @('Kiosk'); $k.PasswordMode = 'Set'
             $errors = @(Test-CrConfig -Config $c)
             Test-HasConfigError $errors "Untouched': key 'Create' is not valid for Mode 'Keep'" | Should Be $true
             Test-HasConfigError $errors "Untouched': key 'Replaces' is not valid for Mode 'Keep'" | Should Be $true
@@ -669,7 +690,7 @@ Describe 'Test-CrConfig' {
             @(Test-CrConfig -Config $c).Count | Should Be 0
         }
         It 'an auto-logon account in a Keep entry (case-insensitive)' {
-            $c = New-CrTestConfig; (Get-TestAccount $c 'Untouched').Names = @('SP Admin', 'pub-user')
+            $c = New-CrTestConfig; $k = Add-TestKeepEntry $c; $k.Names = @('Kept Admin', 'pub-user')
             Test-HasConfigError @(Test-CrConfig -Config $c) "the auto-logon account 'PUB-User' must not be in a Keep entry" | Should Be $true
         }
         It 'Mode Keep on a SQL login' {
@@ -747,10 +768,11 @@ Describe 'Test-CrConfig' {
 Describe 'Get-CrConfigSlotNames' {
     It 'returns the slot names in file order' {
         $names = Get-CrConfigSlotNames -Config (New-CrTestConfig)
-        $names.Count | Should Be 3
+        $names.Count | Should Be 4
         $names[0] | Should Be 'AppUser'
         $names[1] | Should Be 'AutoLogon'
-        $names[2] | Should Be 'SOPAdmin'
+        $names[2] | Should Be 'SPAdmin'
+        $names[3] | Should Be 'SOPAdmin'
         ($names -contains 'SQLApplication') | Should Be $false
         ($names -contains 'BiCAAdmin') | Should Be $false
         ($names -contains 'BiCARemote') | Should Be $false
@@ -782,7 +804,7 @@ Describe 'Get-CrUnknownOnlySlots' {
     $c = New-CrTestConfig
 
     It 'returns nothing for known slots' {
-        (Get-CrUnknownOnlySlots -Config $c -Only @('AppUser', 'AutoLogon', 'SOPAdmin')).Count | Should Be 0
+        (Get-CrUnknownOnlySlots -Config $c -Only @('AppUser', 'AutoLogon', 'SPAdmin', 'SOPAdmin')).Count | Should Be 0
     }
 
     It 'compares case-insensitively' {

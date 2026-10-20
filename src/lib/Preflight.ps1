@@ -722,6 +722,14 @@ function Invoke-CrPreflight {
             if ($sql['ConnectedAsSysadmin'] -ne $true) {
                 [void]$why.Add(('the running account ({0}) is not sysadmin; run the tool as an account that is sysadmin through its own Windows login' -f $sql['ConnectedAs']))
             }
+            # D19: without the master file paths the write filter decision can't see a protected SQL volume.
+            $filterInstalled = $false
+            if ($State['WriteFilter'] -is [hashtable]) {
+                foreach ($f in (ConvertTo-CrArray $State['WriteFilter']['Filters'])) { if (($f -is [hashtable]) -and $f['DriverInstalled']) { $filterInstalled = $true } }
+            }
+            if ($filterInstalled -and (ConvertTo-CrArray $sql['MasterFiles']).Count -eq 0) {
+                [void]$why.Add('the SQL Server master files could not be read while a write filter driver is installed (D19)')
+            }
         }
         if ($wfDecision['BlockSql']) {
             [void]$why.Add('write filter: ' + ((ConvertTo-CrArray $wfDecision['Reasons']) -join ' '))

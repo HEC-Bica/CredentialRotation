@@ -1554,6 +1554,9 @@ function Invoke-CrApplyMoves {
             Add-CrApplyFinding $Context 'HighImpact' 'Tasks' ('Scheduled task runs as this account without a stored password (LogonType ' + $t['LogonType'] + '); it is not moved and stops running once the account is disabled: ' + $t['Path']) $null $name
         }
         if (-not $item['HasDependents']) { continue }
+        # A replaced account keeps its dependents while its replacement can't take over (D22, D28, D29); the disabling
+        # step reports the same reason and keeps it enabled.
+        if ($item['Kind'] -eq 'Replaced' -and (Get-CrApplyReplacementReason -Context $Context -Item $item)) { continue }
         $target = Get-CrApplyMoveTarget -Context $Context -Item $item
         $slot = $null
         if ($item['MoveEntry'] -is [hashtable]) { $slot = [string]$item['MoveEntry']['Slot'] }
@@ -1779,31 +1782,43 @@ function Get-CrApplyDisableBlocker {
         return ('auto-logon as {0} breaks when {0} is disabled, and the auto-logon was not switched or turned off in this run' -f $Item['Name'])
     }
     if ($Item['Kind'] -eq 'Replaced') {
-        $e = $Item['ReplacementEntry']
-        $sid = $Context['EntrySids'][[string]$e['Id']]
-        if (-not $sid) { $sid = Get-CrApplyEntryAccountSid $e }
-        $slotResult = Find-CrApplySlotResult -Slots $Context['SlotResults'] -Slot ([string]$e['Slot'])
-        if ($slotResult -and $slotResult['Status'] -ne 'Done') { return ('the slot of its replacement {0} did not complete ({1})' -f $Item['ReplacementName'], $slotResult['Status']) }
-        if (-not $sid -or $Context['Verified'] -notcontains $sid) { return ('its replacement {0} is not verified on its new password in this run' -f $Item['ReplacementName']) }
-        $u = Find-CrApplyUser -State $Context['State'] -Sid $sid
-        if (-not $u -or $u['Disabled']) { return ('its replacement {0} is not enabled' -f $Item['ReplacementName']) }
-        if (Test-CrSqlAccessEntry $e) {
-            $sa = $Context['SqlAccess'][[string]$e['Id']]
-            if (-not ($sa -is [hashtable]) -or -not $sa['Ok']) {
-                $why = 'not granted in this run'
-                if (($sa -is [hashtable]) -and $sa['Reason']) { $why = [string]$sa['Reason'] }
-                return ('its replacement {0} does not have its SQL Server access ({1}; D29)' -f $Item['ReplacementName'], $why)
-            }
-        }
-        if (Test-CrOperatorEntry $e) {
-            $gaps = Get-CrLogonGaps -State $Context['State'] -ReplacementSid $sid -ReplacedSid ([string]$Item['Sid'])
-            if ($gaps.Count -gt 0) {
-                return ('its replacement {0} is not allowed to log on {1}, which {2} is (D28)' -f $Item['ReplacementName'], (Get-CrLogonGapText $gaps), $Item['Name'])
-            }
-        }
+        $why = Get-CrApplyReplacementReason -Context $Context -Item $Item
+        if ($why) { return $why }
     }
     $rail = Get-CrApplyAdminRailReason -Context $Context -RemoveSid ([string]$Item['Sid']) -RunningCounts $RunningCounts
     if ($rail) { return ('rail: ' + $rail) }
+    return $null
+}
+
+# Why the replacement of a replaced account (Kind 'Replaced') can't take over now, or $null: its slot completed (incl.
+# the SQL access step, D29), it is verified on its new password in this run and enabled, has the SQL access of the
+# accounts it replaces (D29) and, as the operator's account, may log on wherever the replaced account can (D28).
+# The dependent moves (D24) and the disabling (D22) use the same conditions.
+function Get-CrApplyReplacementReason {
+    param($Context, $Item)
+    $e = $Item['ReplacementEntry']
+    if (-not ($e -is [hashtable])) { return 'it has no replacement entry' }
+    $sid = $Context['EntrySids'][[string]$e['Id']]
+    if (-not $sid) { $sid = Get-CrApplyEntryAccountSid $e }
+    $slotResult = Find-CrApplySlotResult -Slots $Context['SlotResults'] -Slot ([string]$e['Slot'])
+    if ($slotResult -and $slotResult['Status'] -ne 'Done') { return ('the slot of its replacement {0} did not complete ({1})' -f $Item['ReplacementName'], $slotResult['Status']) }
+    if (-not $sid -or $Context['Verified'] -notcontains $sid) { return ('its replacement {0} is not verified on its new password in this run' -f $Item['ReplacementName']) }
+    $u = Find-CrApplyUser -State $Context['State'] -Sid $sid
+    if (-not $u -or $u['Disabled']) { return ('its replacement {0} is not enabled' -f $Item['ReplacementName']) }
+    if (Test-CrSqlAccessEntry $e) {
+        $sa = $Context['SqlAccess'][[string]$e['Id']]
+        if (-not ($sa -is [hashtable]) -or -not $sa['Ok']) {
+            $why = 'not granted in this run'
+            if (($sa -is [hashtable]) -and $sa['Reason']) { $why = [string]$sa['Reason'] }
+            return ('its replacement {0} does not have its SQL Server access ({1}; D29)' -f $Item['ReplacementName'], $why)
+        }
+    }
+    if (Test-CrOperatorEntry $e) {
+        $gaps = Get-CrLogonGaps -State $Context['State'] -ReplacementSid $sid -ReplacedSid ([string]$Item['Sid'])
+        if ($gaps.Count -gt 0) {
+            return ('its replacement {0} is not allowed to log on {1}, which {2} is (D28)' -f $Item['ReplacementName'], (Get-CrLogonGapText $gaps), $Item['Name'])
+        }
+    }
     return $null
 }
 

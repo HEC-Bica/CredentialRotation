@@ -511,6 +511,12 @@ function Get-CrSqlAccessPlan {
         $p['Reason'] = 'the SQL Server state is not available'
         return $p
     }
+    # A failed discovery section is @{ Error = ... }: whether SQL Server is installed is unknown, not "absent".
+    if (-not $sql.ContainsKey('DefaultInstancePresent')) {
+        $p['Unknown'] = $true
+        $p['Reason'] = 'the SQL Server discovery failed ({0})' -f $sql['Error']
+        return $p
+    }
     foreach ($inst in (ConvertTo-CrArray $sql['OtherInstances'])) {
         if ($inst) { [void]$notes.Add(('SQL Server instance {0} is not covered: give {1} the access of {2} there manually (D29)' -f $inst, $TargetName, $replacedText)) }
     }
@@ -528,6 +534,13 @@ function Get-CrSqlAccessPlan {
         $p['Reason'] = 'no connection to the default SQL Server instance ({0}); {1}' -f $sql['Error'], $hint
         return $p
     }
+    # A login that is not sysadmin sees only itself, the system logins and the fixed roles in sys.server_principals:
+    # the logins of the replaced accounts would look absent.
+    if ($sql['ConnectedAsSysadmin'] -ne $true) {
+        $p['Unknown'] = $true
+        $p['Reason'] = 'the running account ({0}) is not sysadmin, so it cannot see the SQL Server logins of {1}; {2}' -f $sql['ConnectedAs'], $replacedText, $hint
+        return $p
+    }
     if ($logins.Count -eq 0) {
         $p['Unknown'] = $true
         $p['Reason'] = 'the SQL Server logins could not be read ({0})' -f $sql['Error']
@@ -539,6 +552,7 @@ function Get-CrSqlAccessPlan {
     $sources = New-Object System.Collections.ArrayList
     $sourceLogins = New-Object System.Collections.ArrayList
     $notCopied = New-Object System.Collections.ArrayList
+    $rolesUnknown = New-Object System.Collections.ArrayList
     $anySysadmin = $false
     foreach ($r in $replaced) {
         foreach ($login in $logins) {
@@ -549,6 +563,8 @@ function Get-CrSqlAccessPlan {
             }
             [void]$sources.Add(('{0} ({1})' -f $r['Name'], $login['Name']))
             [void]$sourceLogins.Add([string]$login['Name'])
+            # Without the ServerRoles query only sysadmin is known; other fixed roles would be lost.
+            if ($null -eq $login['ServerRoles'] -and -not $login['IsSysadmin']) { [void]$rolesUnknown.Add([string]$login['Name']) }
             $loginRoles = Get-CrSqlLoginRoles -Login $login
             if ($loginRoles -contains 'sysadmin') { $anySysadmin = $true }
             foreach ($role in $loginRoles) {
@@ -561,6 +577,12 @@ function Get-CrSqlAccessPlan {
         }
     }
     $p['Sources'] = $sources.ToArray()
+    if ($rolesUnknown.Count -gt 0) {
+        $p['Unknown'] = $true
+        $p['Reason'] = 'the server roles of the SQL Server login {0} could not be read ({1})' -f (($rolesUnknown.ToArray()) -join ', '), $sql['Error']
+        $p['Notes'] = $notes.ToArray()
+        return $p
+    }
     if ($notCopied.Count -gt 0) {
         [void]$notes.Add(('Server roles that are not fixed server roles are not copied to {0}: {1} (D29)' -f $TargetName, (($notCopied.ToArray()) -join ', ')))
     }
