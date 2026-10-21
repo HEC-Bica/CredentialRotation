@@ -419,6 +419,25 @@ Describe 'Invoke-CrPasswordRotation' {
         }
     }
 
+    Context 'CCP of a member of Administrators cannot be cleared (1322)' {
+        It 'changes the password with CCP set, warns and restores nothing' {
+            Mock Set-CrUserFlags {
+                [void]$tcFake.Calls.Add(('SetFlags:{0:X}' -f $Flags))
+                return @{ Success = $false; Win32Error = 1322 }
+            }
+            $tcFake = New-TestFakeAccount 0x10241
+            $user = @{ Name = 'TestUser1'; Sid = $tcSid }
+            $r = Invoke-CrPasswordRotation -User $user -OldSecret (New-TestSecret 'Dummy-0a') -NewSecret (New-TestSecret) `
+                -Path 'Change' -Journal $tcJournal -RunId 'run1'
+            $r['Success'] | Should Be $true
+            $r['CcpRestoreFailed'] | Should Be $false
+            ($tcFake.Calls -join ',') | Should Be 'GetInfo,SetFlags:10201,Change,Journal:Secret'
+            ($r['Steps'] -join ',') | Should Be 'Secret'
+            @($r['Warnings']).Count | Should Be 1
+            @($r['Warnings'])[0] | Should Match 'members of Administrators \(error 1322\)'
+        }
+    }
+
     Context 'account information cannot be read' {
         It 'stops without any write' {
             Mock Get-CrUserInfo { return @{ Success = $false; Win32Error = 2221; Flags = $null } }
@@ -555,6 +574,72 @@ Describe 'Set-CrAccountFlags' {
             $r['Changed'] | Should Be $false
             $r['Success'] | Should Be $false
             $r['Win32Error'] | Should Be 5
+            $r['CcpNotSet'] | Should Be $false
+        }
+    }
+
+    Context 'a member of Administrators without CCP' {
+        It 'sets PNE and clears NOTREQD, but not CCP, and says so' {
+            $tcFake = New-TestFakeAccount 0x221
+            $r = Set-CrAccountFlags -User $user -Role $roleAdmin -InAdministrators $true
+            $r['Changed'] | Should Be $true
+            $r['Success'] | Should Be $true
+            $r['CcpNotSet'] | Should Be $true
+            $tcFake.Flags | Should Be 0x10201
+            Assert-MockCalled Set-CrUserFlags -Times 1 -Exactly -ParameterFilter { $Flags -eq 0x10201 }
+        }
+    }
+
+    Context 'a member of Administrators that only lacks CCP' {
+        It 'does not write' {
+            $tcFake = New-TestFakeAccount 0x10201
+            $r = Set-CrAccountFlags -User $user -Role $roleAdmin -InAdministrators $true
+            $r['Changed'] | Should Be $false
+            $r['Success'] | Should Be $true
+            $r['CcpNotSet'] | Should Be $true
+            Assert-MockCalled Set-CrUserFlags -Times 0 -Exactly
+        }
+    }
+
+    Context 'a member of Administrators that has CCP' {
+        It 'keeps it and reports nothing' {
+            $tcFake = New-TestFakeAccount 0x10241
+            $r = Set-CrAccountFlags -User $user -Role $roleAdmin -InAdministrators $true
+            $r['Changed'] | Should Be $false
+            $r['CcpNotSet'] | Should Be $false
+            Assert-MockCalled Set-CrUserFlags -Times 0 -Exactly
+        }
+    }
+
+    Context 'setting CCP fails with 1322 (membership not known)' {
+        It 'writes again without CCP and says so' {
+            Mock Set-CrUserFlags {
+                [void]$tcFake.Calls.Add(('SetFlags:{0:X}' -f $Flags))
+                if ($Flags -band 0x40) { return @{ Success = $false; Win32Error = 1322 } }
+                $tcFake.Flags = $Flags
+                return @{ Success = $true; Win32Error = 0 }
+            }
+            $tcFake = New-TestFakeAccount 0x221
+            $r = Set-CrAccountFlags -User $user -Role $roleAdmin
+            $r['Changed'] | Should Be $true
+            $r['Success'] | Should Be $true
+            $r['CcpNotSet'] | Should Be $true
+            ($tcFake.Calls -join ',') | Should Be 'GetInfo,SetFlags:10241,SetFlags:10201'
+        }
+    }
+
+    Context 'a write without a CCP change fails with 1322' {
+        It 'does not retry and reports the error' {
+            Mock Set-CrUserFlags {
+                [void]$tcFake.Calls.Add(('SetFlags:{0:X}' -f $Flags))
+                return @{ Success = $false; Win32Error = 1322 }
+            }
+            $tcFake = New-TestFakeAccount 0x241
+            $r = Set-CrAccountFlags -User $user -Role $roleAdmin
+            $r['Success'] | Should Be $false
+            $r['Win32Error'] | Should Be 1322
+            $r['CcpNotSet'] | Should Be $false
+            ($tcFake.Calls -join ',') | Should Be 'GetInfo,SetFlags:10241'
         }
     }
 

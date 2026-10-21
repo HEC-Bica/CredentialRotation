@@ -146,12 +146,14 @@ function Get-CrPasswordErrorText {
 # Internal: the flags the role asks for (Admin, Operator, User, WinUser, Ftp ...). Only sets PNE / CCP and clears
 # NOTREQD when the role says so; an empty or missing role leaves the flags as they are. Never touches
 # UF_ACCOUNTDISABLE (Enable-CrAccount / Disable-CrAccount) or UF_LOCKOUT (Unlock-CrAccount).
+# -InAdministrators leaves CCP as it is: Windows refuses to change CCP of a member of Administrators (NetUserSetInfo
+# fails with 1322, ERROR_LAST_ADMIN, also when other administrators exist).
 function Get-CrDesiredUserFlags {
-    param([int]$Flags, $Role)
+    param([int]$Flags, $Role, [bool]$InAdministrators)
     $desired = $Flags
     if (-not ($Role -is [hashtable])) { return $desired }
     if ($Role['PasswordNeverExpires']) { $desired = $desired -bor 0x10000 }
-    if ($Role['CannotChangePassword']) { $desired = $desired -bor 0x40 }
+    if ($Role['CannotChangePassword'] -and -not $InAdministrators) { $desired = $desired -bor 0x40 }
     if ($Role['PasswordRequired']) { $desired = $desired -band (-bnot 0x20) }
     return $desired
 }
@@ -189,22 +191,33 @@ function Unlock-CrAccount {
 
 # Sets the account flags the role asks for (PNE 0x10000 and CCP 0x40 set; NOTREQD 0x20 cleared when PasswordRequired).
 # Reads the current flags with Get-CrUserInfo and writes only when they differ. Works for every role (incl. the v10
-# Operator role); an empty role (no flag keys) or $null = no change. Returns @{ Changed; Success; Win32Error }.
+# Operator role); an empty role (no flag keys) or $null = no change. CCP is not set on a member of Administrators
+# (-InAdministrators, Get-CrDesiredUserFlags); a write that sets CCP and still fails with 1322 (membership not known)
+# is repeated once without CCP. Returns @{ Changed; Success; Win32Error; CcpNotSet }; CcpNotSet: the role asks for CCP,
+# the account lacks it and Windows doesn't allow setting it now.
 function Set-CrAccountFlags {
-    param($User, $Role)
+    param($User, $Role, [bool]$InAdministrators)
     if (-not ($User -is [hashtable]) -or -not $User['Name']) { throw 'Set-CrAccountFlags: -User needs a Name.' }
     $name = [string]$User['Name']
     $info = Get-CrUserInfo -UserName $name
     if (-not ($info -and $info['Success'])) {
         $code = 0
         if ($info) { $code = [int]$info['Win32Error'] }
-        return @{ Changed = $false; Success = $false; Win32Error = $code }
+        return @{ Changed = $false; Success = $false; Win32Error = $code; CcpNotSet = $false }
     }
     $current = [int]$info['Flags']
-    $desired = Get-CrDesiredUserFlags -Flags $current -Role $Role
-    if ($desired -eq $current) { return @{ Changed = $false; Success = $true; Win32Error = 0 } }
+    $ccpMissing = [bool](($Role -is [hashtable]) -and $Role['CannotChangePassword'] -and -not ($current -band 0x40))
+    $ccpNotSet = ($ccpMissing -and $InAdministrators)
+    $desired = Get-CrDesiredUserFlags -Flags $current -Role $Role -InAdministrators $InAdministrators
+    if ($desired -eq $current) { return @{ Changed = $false; Success = $true; Win32Error = 0; CcpNotSet = $ccpNotSet } }
     $set = Set-CrUserFlags -UserName $name -Flags $desired
-    return @{ Changed = [bool]$set['Success']; Success = [bool]$set['Success']; Win32Error = [int]$set['Win32Error'] }
+    if (-not $set['Success'] -and [int]$set['Win32Error'] -eq 1322 -and $ccpMissing -and ($desired -band 0x40)) {
+        $ccpNotSet = $true
+        $desired = Get-CrDesiredUserFlags -Flags $current -Role $Role -InAdministrators $true
+        if ($desired -eq $current) { return @{ Changed = $false; Success = $true; Win32Error = 0; CcpNotSet = $true } }
+        $set = Set-CrUserFlags -UserName $name -Flags $desired
+    }
+    return @{ Changed = [bool]$set['Success']; Success = [bool]$set['Success']; Win32Error = [int]$set['Win32Error']; CcpNotSet = $ccpNotSet }
 }
 
 # Internal: the pre-step shared by the change and the set path (PLAN sections 7.1 and 8, step 1): reads the flags,
@@ -266,6 +279,7 @@ function Complete-CrRotationResult {
 # Invoke-CrPasswordSet.
 #   1. unlock if locked (journal 'Unlocked'); the lock state is then re-checked and a relock stops here
 #   2. change path only (PLAN section 8): clear CCP if set (journal 'CcpCleared'). 'PreSteps' is journaled by the caller.
+#      Refused with 1322 (a member of Administrators): a warning, and the change is tried with CCP set.
 #   3. Invoke-CrNetPasswordChange (old + new) or Invoke-CrNetPasswordReset (new)
 #   4. CCP restored in 'finally', also when step 3 failed or threw (journal 'CcpRestored')
 #   5. journal 'Secret' only when step 3 succeeded
@@ -301,13 +315,18 @@ function Invoke-CrPasswordRotation {
     $ccpCleared = $false
     if ($Path -eq 'Change' -and ($flags -band 0x40)) {
         $clear = Set-CrUserFlags -UserName $name -Flags ($flags -band (-bnot 0x40))
-        if (-not $clear['Success']) {
+        if ($clear['Success']) {
+            $ccpCleared = $true
+            $flags = $flags -band (-bnot 0x40)
+            Add-CrAccountJournalStep -Journal $Journal -RunId $RunId -Sid $sid -Step 'CcpCleared' -Steps $steps -Warnings $warnings
+        } elseif ([int]$clear['Win32Error'] -eq 1322) {
+            # A member of Administrators: Windows refuses to change its CCP. The change is tried with CCP set; a
+            # refusal comes back as the change's own error.
+            [void]$warnings.Add(('"User cannot change password" of {0} could not be cleared: Windows refuses that for members of Administrators (error 1322); the password change is tried with it set.' -f $name))
+        } else {
             $code = [int]$clear['Win32Error']
             return Complete-CrRotationResult $result $steps $warnings $code ('"User cannot change password" of {0} could not be cleared (error {1}).' -f $name, $code)
         }
-        $ccpCleared = $true
-        $flags = $flags -band (-bnot 0x40)
-        Add-CrAccountJournalStep -Journal $Journal -RunId $RunId -Sid $sid -Step 'CcpCleared' -Steps $steps -Warnings $warnings
     }
 
     # Password step; CCP is restored in 'finally' whatever happens (also on a throw or Ctrl+C).

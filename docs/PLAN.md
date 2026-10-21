@@ -99,7 +99,7 @@ A PowerShell tool run **locally** on standalone workgroup machines (Windows 7 SP
 | FTP users (0–3 per machine) | name starts or ends with `ftp`, case-insensitive | **check + fix**, no password change | CardCenters only · PNE · CCP. **Removed from Users** too (confirmed; `SM-102575` has `AG_FTP` and `LVSTG_FTP` in CardCenters + Users). If `CardCenters` doesn't exist: report, leave groups unchanged | — |
 | `SQLApplication`, `SQLScript`, `SQLService` | SQL logins on the default instance | **not managed** (D27, v10.5): no password or role change, no `LOGINS` follow-up | unchanged | — |
 
-- PNE = password never expires. CCP = user cannot change password. PR = password required: the flag `UF_PASSWD_NOTREQD` (0x20) is cleared after the new password is set. `BiCA Admin` has that flag on all four test machines today; it is no longer managed (v10.6).
+- PNE = password never expires. CCP = user cannot change password; **not set on a member of Administrators**: Windows refuses that change with error 1322 (ERROR_LAST_ADMIN), also when other administrators exist (seen on `SM-QS-K1`, 0.8.2, §7.1). PR = password required: the flag `UF_PASSWD_NOTREQD` (0x20) is cleared after the new password is set. `BiCA Admin` has that flag on all four test machines today; it is no longer managed (v10.6).
 - "X only" = member of X and removed from all other local groups, except the listed allowed extra groups.
 - Each slot has its own password. The auto-logon slot covers `PUB-User` only (v10.8). The same password is used on every machine of a **site** (2–3 machines).
 - **End state (D31, v10.8):** `SOP-Admin`, `SP Admin` and `PUB-User` exist and are enabled on every machine; `ApplicationUser` exists if and only if it existed before the run.
@@ -464,6 +464,10 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
   - **reset/set** (`NetUserSetInfo` level 1003): every other rotated account, and `ApplicationUser` when the operator chooses set (DPAPI warning).
   - Flags and unlock use `NetUserGetInfo` / `NetUserSetInfo` level 1008; services use `ChangeServiceConfigW`; only Task Scheduler and COM+ need a managed string, inside `Adapters.ps1`. On both test sites, `BiCA Admin`, `BiCA Remote` and `ApplicationUser` have DPAPI master keys, up to 34 key files on 102575; `PUB-User` has them on `IPT01-QS-K1`.
 - **CCP:** cleared just before `ChangePassword` and re-set immediately after; this is recorded in the run journal. CCP is only cleared temporarily if it is set. None of the managed accounts on the test sites has CCP set today.
+- **CCP and Administrators (0.8.2):** Windows refuses to set or clear CCP of a member of Administrators: `NetUserSetInfo` fails with 1322 (ERROR_LAST_ADMIN, "could result in an administration account being disabled, deleted or unable to logon"), also when other administrators exist. The `ApplicationUser` slot stopped at its grants step on `SM-QS-K1` (2026-10-21) because of this. Therefore:
+  - the audit reports a missing CCP on a member of Administrators as Info, not as drift; the grants step leaves CCP as it is there (PNE and PR are still set) and reports it; a write that sets CCP and still fails with 1322 is repeated once without CCP
+  - an account the tool creates gets CCP from `NetUserAdd`, before it joins Administrators; an existing account that only joins Administrators in this run gets CCP in its grants step, before its groups are added
+  - on the change path, a CCP clear refused with 1322 is reported and `ChangePassword` is tried with CCP set; a refusal comes back as the change's own error
 - **PR (password required):** `UF_PASSWD_NOTREQD` (0x20) is cleared in step 3 (grants) of every rotated account, after its new password is set. Replaced and retired accounts are only disabled and keep their flags (D22), e.g. the built-in Administrator on 102575 keeps the flag.
 - **Unlocking:**
   - `$user.psbase.InvokeSet('IsAccountLocked', $false)` + `CommitChanges()`; the fallback is clearing `UF_LOCKOUT` (0x10)
@@ -697,7 +701,8 @@ Everything takes effect at the next logon. The tool never reboots. The auto-logo
 2  secret       skip if "already on new secret" (incl. re-apply, D20); lock state re-checked; ChangePassword/SetPassword for every
                 account of the slot, or ALTER LOGIN (+UNLOCK); budget re-checked first; then enable if disabled
                 and EnableIfDisabled (every managed account of the default config since v10.8)
-3  grants       target groups added (incl. '?' groups that exist), PNE/CCP set, NOTREQD cleared (PR),
+3  grants       target groups added (incl. '?' groups that exist), PNE/CCP set (CCP not on members of
+                Administrators, §7.1), NOTREQD cleared (PR),
                 required rights (before the dependents: a task registration logs on as a batch job), sysadmin ensured
 4  dependents   SCM -> tasks -> COM+   (auto-logon is a separate step after all slots, §7.5)
 5  restart      none (D17): services and COM+ applications are reported as "restart pending"

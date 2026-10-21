@@ -302,7 +302,9 @@ Describe 'New-CrPlan: created and disabled accounts and the auto-logon step' {
             @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'SOP-Admin' 'Create*').Count | Should Be 0
             @(Get-CrTestFindings $plan 'Info' 'Password' 'SOP-Admin' 'Password set (D9: no old password)').Count | Should Be 1
             @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SOP-Admin' 'Add to Remote Desktop Users').Count | Should Be 1
-            @(Get-CrTestFindings $plan 'Drift' 'Flags' 'SOP-Admin' 'Set "user cannot change password"').Count | Should Be 1
+            # In Administrators: Windows refuses CCP (1322), so it is reported, not drift.
+            @(Get-CrTestFindings $plan 'Drift' 'Flags' 'SOP-Admin' 'Set "user cannot change password"').Count | Should Be 0
+            @(Get-CrTestFindings $plan 'Info' 'Flags' 'SOP-Admin' (Get-CrCcpNotSetText)).Count | Should Be 1
             @(Get-CrTestFindings $plan $null $null 'SOP-Admin' 'Kept untouched*').Count | Should Be 0
         }
         It 'counts SOP-Admin as verified for the auto-logon decision' {
@@ -1044,7 +1046,8 @@ Describe 'New-CrPlan account state findings' {
         $f.Count | Should Be 1
         $f[0]['Slot'] | Should Be 'SPAdmin'
         @(Get-CrTestFindings $plan 'Drift' 'Groups' 'SP Admin' 'Remove from Remote Desktop Users (enforcement phase)').Count | Should Be 1
-        @(Get-CrTestFindings $plan 'Drift' 'Flags' 'SP Admin' 'Set "user cannot change password"').Count | Should Be 1
+        @(Get-CrTestFindings $plan 'Drift' 'Flags' 'SP Admin' 'Set "user cannot change password"').Count | Should Be 0
+        @(Get-CrTestFindings $plan 'Info' 'Flags' 'SP Admin' (Get-CrCcpNotSetText)).Count | Should Be 1
         @(Get-CrTestFindings $plan $null $null 'SP Admin' 'Kept untouched*').Count | Should Be 0
         @(Get-CrTestFindings $plan $null 'Accounts' 'SP Admin' 'Disable*').Count | Should Be 0
         @(Get-CrTestFindings $plan 'Ambiguous' $null 'SP Admin').Count | Should Be 0

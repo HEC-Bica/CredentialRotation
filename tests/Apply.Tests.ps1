@@ -22,7 +22,7 @@ function Invoke-CrPasswordSet { param($User, $NewSecret, $Journal, [string]$RunI
 function New-CrManagedAccount { param([string]$Name, $Secret, [string]$Comment, $Journal, [string]$RunId) }
 function Enable-CrAccount { param($User) }
 function Disable-CrAccount { param($User, $Journal, [string]$RunId) }
-function Set-CrAccountFlags { param($User, $Role) }
+function Set-CrAccountFlags { param($User, $Role, $InAdministrators) }
 function Get-CrLocalGroups { param() }
 function Invoke-CrGroupMembershipChange { param($State, [string]$MemberSid, [string[]]$AddGroupSids, [string[]]$RemoveGroupSids) }
 function Grant-CrDependentRights { param([string]$Sid, [string[]]$Rights) }
@@ -1229,6 +1229,22 @@ Describe 'Invoke-CrApply' {
             Assert-MockCalled Invoke-CrLogonTest -Times 1 -Exactly -Scope Context -ParameterFilter { $UserName -eq 'ApplicationUser' }
             (@($result['VerifiedSids']) -contains $appSid) | Should Be $true
             (@($global:CrTestDisabled) -join ',') | Should Be 'Administrator'
+        }
+    }
+
+    Context 'ApplicationUser in Administrators without CCP: Windows refuses CCP (1322), the slot still completes' {
+        Mock Set-CrAccountFlags -ParameterFilter { $User['Name'] -eq 'ApplicationUser' } { @{ Changed = $false; Success = $true; Win32Error = 0; CcpNotSet = $true } }
+        $global:CrTestDisabled = New-Object System.Collections.ArrayList
+        $state = New-CrTestState -Profile IPT01
+        $appSid = Get-CrTestUserSid $state 'ApplicationUser'
+        $result = Invoke-TestApply -State $state -Slots @('AppUser') -Only @('AppUser')
+
+        It 'tells Set-CrAccountFlags that ApplicationUser is a member of Administrators' {
+            Assert-MockCalled Set-CrAccountFlags -Times 1 -Exactly -Scope Context -ParameterFilter { $User['Sid'] -eq $appSid -and $InAdministrators -eq $true }
+        }
+        It 'reports CCP as not set and completes the slot' {
+            @(Get-TestFindings $result 'Info' 'Flags' 'ApplicationUser' (Get-CrCcpNotSetText)).Count | Should Be 1
+            (Get-TestSlot $result 'AppUser')['Status'] | Should Be 'Done'
         }
     }
 

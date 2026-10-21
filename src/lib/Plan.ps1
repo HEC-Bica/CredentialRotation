@@ -97,14 +97,24 @@ function Add-CrPlanFinding {
     if ($Severity -eq 'Drift') { $Plan['Drift'] = $true }
 }
 
+# Windows refuses to change "user cannot change password" of a member of Administrators (NetUserSetInfo: 1322,
+# ERROR_LAST_ADMIN, also when other administrators exist), so it is reported, not drift (Set-CrAccountFlags).
+function Get-CrCcpNotSetText {
+    return 'Not set: "user cannot change password"; Windows refuses that for members of Administrators (error 1322)'
+}
+
 function Add-CrAccountFlagFindings {
-    param($Plan, $Role, $User, [string]$Slot)
+    param($Plan, $Role, $User, [string]$Slot, [bool]$InAdministrators)
     $name = $User['Name']
     if ($Role['PasswordNeverExpires'] -and -not $User['PasswordNeverExpires']) {
         Add-CrPlanFinding $Plan 'Drift' 'Flags' 'Set "password never expires"' $Slot $name
     }
     if ($Role['CannotChangePassword'] -and -not $User['CannotChangePassword']) {
-        Add-CrPlanFinding $Plan 'Drift' 'Flags' 'Set "user cannot change password"' $Slot $name
+        if ($InAdministrators) {
+            Add-CrPlanFinding $Plan 'Info' 'Flags' (Get-CrCcpNotSetText) $Slot $name
+        } else {
+            Add-CrPlanFinding $Plan 'Drift' 'Flags' 'Set "user cannot change password"' $Slot $name
+        }
     }
     if ($Role['PasswordRequired'] -and $User['PasswordNotRequired']) {
         Add-CrPlanFinding $Plan 'Drift' 'Flags' 'Clear "password not required" (UF_PASSWD_NOTREQD)' $Slot $name
@@ -916,7 +926,7 @@ function New-CrPlan {
                     Add-CrDependentFindings -Plan $plan -State $State -Entry $entry -User $u -Slot $slot
                     if (-not $slotBlocked -and -not $staysDisabled) { [void]$verified.Add($acct['Sid']) }
                 }
-                Add-CrAccountFlagFindings -Plan $plan -Role $role -User $u -Slot $slot
+                Add-CrAccountFlagFindings -Plan $plan -Role $role -User $u -Slot $slot -InAdministrators (Test-CrIsAdmin -UserSid ([string]$u['Sid']) -State $State)
                 # Only completed rotate slots leave Administrators before the auto-logon step (PLAN 8);
                 # check-mode fixes run after it and blocked slots never complete.
                 $adminSink = $removedAdmins

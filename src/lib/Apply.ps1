@@ -1157,12 +1157,13 @@ function Invoke-CrApplySlotSteps {
         try {
             $role = $it['Entry']['Role']
             if (-not ($role -is [hashtable])) { $role = @{} }
-            $f = Set-CrAccountFlags -User $it['User'] -Role $role
+            $f = Set-CrAccountFlags -User $it['User'] -Role $role -InAdministrators (Test-CrIsAdmin -UserSid ([string]$sid) -State $State)
             if (-not ($f -is [hashtable]) -or -not $f['Success']) {
                 [void]$errors.Add(('{0}: {1}' -f $it['Name'], (Get-CrApplyResultText $f 'Setting the account flags')))
             } elseif ($f['Changed']) {
                 Add-CrApplyFinding $Context 'Info' 'Flags' 'Account flags set as the role requires' $slot $it['Name']
             }
+            if (($f -is [hashtable]) -and $f['CcpNotSet']) { Add-CrApplyFinding $Context 'Info' 'Flags' (Get-CrCcpNotSetText) $slot $it['Name'] }
             $gp = Get-CrGroupPlan -State $State -Role $role -Sid $sid -RunningSid $Context['RunningSid']
             foreach ($n in (ConvertTo-CrArray $gp['Notes'])) { Add-CrApplyFinding $Context 'Info' 'Groups' $n $slot $it['Name'] }
             if (-not $gp['Skip']) {
@@ -1974,12 +1975,13 @@ function Invoke-CrApplyCheckFixes {
             $name = [string]$acct['Name']
             $sid = [string]$acct['Sid']
             try {
-                $f = Set-CrAccountFlags -User $acct['User'] -Role $role
+                $f = Set-CrAccountFlags -User $acct['User'] -Role $role -InAdministrators (Test-CrIsAdmin -UserSid $sid -State $Context['State'])
                 if (-not ($f -is [hashtable]) -or -not $f['Success']) {
                     [void]$errors.Add(('{0}: {1}' -f $name, (Get-CrApplyResultText $f 'Setting the account flags')))
                 } elseif ($f['Changed']) {
                     Add-CrApplyFinding $Context 'Info' 'Flags' 'Account flags set as the role requires (check mode)' $e['Id'] $name
                 }
+                if (($f -is [hashtable]) -and $f['CcpNotSet']) { Add-CrApplyFinding $Context 'Info' 'Flags' (Get-CrCcpNotSetText) $e['Id'] $name }
                 $gp = Get-CrGroupPlan -State $Context['State'] -Role $role -Sid $sid -RunningSid $Context['RunningSid']
                 foreach ($n in (ConvertTo-CrArray $gp['Notes'])) { Add-CrApplyFinding $Context 'Info' 'Groups' $n $e['Id'] $name }
                 foreach ($rail in (ConvertTo-CrArray $gp['Rail'])) { Add-CrApplyFinding $Context 'Info' 'Groups' ('Rail: ' + $rail) $e['Id'] $name }
