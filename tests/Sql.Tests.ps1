@@ -288,7 +288,8 @@ Describe 'Get-CrSqlState' {
             Assert-MockCalled Close-CrSqlConnection -Times 1 -Exactly
         }
         It 'has exactly the contract keys' {
-            $expected = 'AgentJobs,ConnectErrorNumber,Connected,ConnectedAs,ConnectedAsSysadmin,Credentials,DefaultInstancePresent,Edition,Error,IsExpress,IsIntegratedSecurityOnly,LinkedLogins,Logins,MajorVersion,MasterFiles,OtherInstances,ProductVersion,Proxies,ServiceAccount,ServiceAccountSid,ServiceName,ServiceState'
+            # Sort-Object compares by culture (not ordinal): ConnectedAsSysadmin sorts before ConnectErrorNumber.
+            $expected = 'AgentJobs,Connected,ConnectedAs,ConnectedAsSysadmin,ConnectErrorNumber,Credentials,DefaultInstancePresent,Edition,Error,IsExpress,IsIntegratedSecurityOnly,LinkedLogins,Logins,MajorVersion,MasterFiles,OtherInstances,ProductVersion,Proxies,ServiceAccount,ServiceAccountSid,ServiceName,ServiceState'
             ((@($r.Keys) | Sort-Object) -join ',') | Should Be $expected
         }
     }
@@ -317,6 +318,94 @@ Describe 'Get-CrSqlErrorNumber' {
         Get-CrSqlErrorNumber $er | Should BeNullOrEmpty
         $wrapped = New-Object System.Management.Automation.MethodInvocationException('Exception calling "Open"', (New-Object System.InvalidOperationException('inner')))
         Get-CrSqlErrorNumber $wrapped | Should BeNullOrEmpty
+    }
+    It 'reads the number an ADO connection error carries in Data, also from the thrown error record' {
+        $ex = New-Object System.Exception -ArgumentList 'Fehler bei der Anmeldung.', (New-Object System.Runtime.InteropServices.COMException('inner'))
+        $ex.Data['CrSqlNumber'] = 18456
+        Get-CrSqlErrorNumber $ex | Should Be 18456
+        try { throw $ex } catch { $er = $_ }
+        Get-CrSqlErrorNumber $er | Should Be 18456
+    }
+}
+
+Describe 'SQL client selection (0.9.0: ADO on PS 2.0)' {
+    It 'uses ADO on PS 2.0 and SqlClient otherwise' {
+        $expected = 'SqlClient'
+        if ($PSVersionTable.PSVersion.Major -lt 3) { $expected = 'Ado' }
+        Get-CrSqlClientKind | Should Be $expected
+    }
+
+    Context 'Open-CrSqlConnection with ADO' {
+        Mock Get-CrSqlClientKind { 'Ado' }
+        Mock Open-CrSqlAdoConnection { 'ado-connection' }
+        It 'opens the ADO connection' {
+            Open-CrSqlConnection | Should Be 'ado-connection'
+            Assert-MockCalled Open-CrSqlAdoConnection -Times 1 -Exactly
+        }
+    }
+
+    Context 'queries and commands on an ADO connection' {
+        Mock Invoke-CrSqlAdoCommand { , @(@{ Text = $Text; Count = @($Parameters).Count; Query = [bool]$Query }) }
+        $cn = New-Object -ComObject ADODB.Connection
+        It 'sends a constant query to ADO' {
+            $rows = @(Invoke-CrSqlQuery -Connection $cn -Name 'MasterFiles')
+            $rows.Count | Should Be 1
+            $rows[0]['Text'] | Should Be (Get-CrSqlQueryText -Name 'MasterFiles')
+            $rows[0]['Query'] | Should Be $true
+        }
+        It 'sends a command with its parameters to ADO' {
+            $p = @(@{ Name = 'login'; Type = 'NVarChar'; Value = 'SM-TEST01\SOP-Admin' })
+            $rows = @(Invoke-CrSqlCommand -Connection $cn -Text (Get-CrSqlWriteText -Name 'EnableLogin') -Parameters $p)
+            $rows[0]['Count'] | Should Be 1
+            $rows[0]['Query'] | Should Be $false
+        }
+    }
+}
+
+Describe 'Get-CrSqlAdoCommandText' {
+    It 'declares each parameter as a batch variable bound by position, then runs the constant text' {
+        $p = @(@{ Name = 'login'; Type = 'NVarChar'; Value = 'x' }, @{ Name = 'role'; Type = 'NVarChar'; Value = 'sysadmin' })
+        $t = Get-CrSqlAdoCommandText -Text 'EXEC sp_addsrvrolemember @loginame = @login, @rolename = @role;' -Parameters $p
+        $t | Should Be 'SET NOCOUNT ON; DECLARE @login nvarchar(128); SET @login = ?; DECLARE @role nvarchar(128); SET @role = ?; EXEC sp_addsrvrolemember @loginame = @login, @rolename = @role;'
+    }
+    It 'declares a SID as varbinary(85) and needs no prefix without parameters' {
+        (Get-CrSqlAdoCommandText -Text 'SELECT 1 WHERE @sid IS NOT NULL' -Parameters @(@{ Name = 'sid'; Type = 'VarBinary'; Value = [byte[]](1) })) |
+            Should Be 'SET NOCOUNT ON; DECLARE @sid varbinary(85); SET @sid = ?; SELECT 1 WHERE @sid IS NOT NULL'
+        (Get-CrSqlAdoCommandText -Text 'SELECT 1' -Parameters @()) | Should Be 'SET NOCOUNT ON; SELECT 1'
+    }
+    It 'rejects a parameter name that is not a plain word' {
+        { Get-CrSqlAdoCommandText -Text 'SELECT 1' -Parameters @(@{ Name = 'x; DROP'; Type = 'NVarChar'; Value = 'y' }) } | Should Throw
+    }
+}
+
+Describe 'Read-CrSqlAdoRows' {
+    # A disconnected in-memory ADO recordset (ADO ships with Windows); no SQL Server is involved.
+    It 'returns hashtables with NULL as $null, a varbinary as byte[] and typed bit and int columns' {
+        $rs = New-Object -ComObject ADODB.Recordset
+        $rs.Fields.Append('name', 202, 128, 0x20)
+        $rs.Fields.Append('sid', 204, 85, 0x20)
+        $rs.Fields.Append('is_disabled', 11, 0, 0x20)
+        $rs.Fields.Append('IsSysadmin', 3, 0, 0x20)
+        $rs.Open()
+        $rs.AddNew(); $rs.Fields.Item('name').Value = 'SM-TEST01\SOP-Admin'; $rs.Fields.Item('sid').Value = (Get-TestSidBytes 'S-1-5-21-1000-2000-3000-1040')
+        $rs.Fields.Item('is_disabled').Value = $false; $rs.Fields.Item('IsSysadmin').Value = 1; $rs.Update()
+        $rs.AddNew(); $rs.Fields.Item('name').Value = 'sa'; $rs.Update()
+        $rs.MoveFirst()
+        $rows = @(Read-CrSqlAdoRows -Recordset $rs)
+        $rows.Count | Should Be 2
+        $rows[0]['name'] | Should Be 'SM-TEST01\SOP-Admin'
+        ($rows[0]['sid'] -is [byte[]]) | Should Be $true
+        (ConvertTo-CrSidString -Bytes $rows[0]['sid']) | Should Be 'S-1-5-21-1000-2000-3000-1040'
+        $rows[0]['is_disabled'] | Should Be $false
+        $rows[0]['IsSysadmin'] | Should Be 1
+        $rows[1]['sid'] | Should BeNullOrEmpty
+        ($null -eq $rows[1]['is_disabled']) | Should Be $true
+        $rs.State | Should Be 0
+    }
+    It 'returns an empty array for no recordset' {
+        $rows = Read-CrSqlAdoRows -Recordset $null
+        ($rows -is [array]) | Should Be $true
+        $rows.Count | Should Be 0
     }
 }
 

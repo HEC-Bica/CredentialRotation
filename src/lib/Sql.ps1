@@ -2,6 +2,8 @@
 # Read side: read-only SELECTs. All query texts are constants (Get-CrSqlQueryText); nothing is built from external input.
 # Write side (D29, v10.6): the Windows login of the account that replaces others and its fixed server roles. Constant
 # command texts (Get-CrSqlWriteText) whose names are parameters, quoted with QUOTENAME inside the batch. No passwords.
+# Client (0.9.0): .NET SqlClient on PS 3+; on PS 2.0 ADO over SQLOLEDB, the OLE DB provider that ships with Windows
+# (Get-CrSqlClientKind). Both connect to '.' with integrated security as the running account.
 
 # --- internal: external access (mocked in tests) ---
 
@@ -27,10 +29,20 @@ function Get-CrSqlServiceWmi {
     return (Get-WmiObject -Class Win32_Service -Filter "Name='MSSQLSERVER'" -ErrorAction Stop)
 }
 
+# Which client the SQL access uses: 'SqlClient' on PS 3+, 'Ado' on PS 2.0. Under CLR 2, SqlClient reads
+# powershell.exe.config when it starts and fails where WMF 5.1 or .NET 4 put a .NET 4 section there (PLAN 10, seen on
+# SM-QS-K1: "Unrecognized configuration section uri"). ADO is COM and doesn't read it.
+function Get-CrSqlClientKind {
+    param()
+    if ($PSVersionTable.PSVersion.Major -lt 3) { return 'Ado' }
+    return 'SqlClient'
+}
+
 # Opens a non-pooled integrated connection to the default instance. The object is created without
 # arguments and the connection string is set afterwards (PLAN 7.9). Disposed again if Open fails.
 function Open-CrSqlConnection {
     param()
+    if ((Get-CrSqlClientKind) -eq 'Ado') { return , (Open-CrSqlAdoConnection) }
     $cn = New-Object System.Data.SqlClient.SqlConnection
     $cn.ConnectionString = 'Data Source=.;Initial Catalog=master;Integrated Security=SSPI;Pooling=false;Connect Timeout=15;Application Name=CredentialRotation (audit)'
     try {
@@ -42,11 +54,37 @@ function Open-CrSqlConnection {
     return $cn
 }
 
+# The same over ADO (ADODB.Connection, provider SQLOLEDB; 'OLE DB Services=-2' turns pooling off). A failed Open throws
+# an exception whose Data['CrSqlNumber'] is the SQL Server error number (18456 = login failed; Get-CrSqlErrorNumber).
+function Open-CrSqlAdoConnection {
+    param()
+    $cn = New-Object -ComObject ADODB.Connection
+    $cn.ConnectionTimeout = 15
+    $cn.CommandTimeout = 30
+    try {
+        $cn.Open('Provider=SQLOLEDB;Data Source=.;Initial Catalog=master;Integrated Security=SSPI;OLE DB Services=-2;Application Name=CredentialRotation (audit)')
+    } catch {
+        $number = $null
+        try {
+            for ($i = 0; $i -lt $cn.Errors.Count; $i++) {
+                $n = [int]$cn.Errors.Item($i).NativeError
+                if ($n -ne 0) { $number = $n; break }
+            }
+        } catch { }
+        $ex = New-Object System.Exception -ArgumentList (Get-CrInnermostMessage $_), $_.Exception
+        if ($null -ne $number) { $ex.Data['CrSqlNumber'] = $number }
+        Close-CrSqlConnection -Connection $cn
+        throw $ex
+    }
+    return , $cn
+}
+
 function Close-CrSqlConnection {
     param($Connection)
     if ($null -eq $Connection) { return }
     try { $Connection.Close() } catch { }
     try { $Connection.Dispose() } catch { }
+    if ($Connection -is [System.__ComObject]) { try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($Connection) } catch { } }
 }
 
 # Runs the command's reader; rows as hashtables (column name -> value; DBNull -> $null, byte[] and datetime kept).
@@ -70,10 +108,86 @@ function Read-CrSqlRows {
     return , $rows.ToArray()
 }
 
+# The rows of an ADO recordset as hashtables, like Read-CrSqlRows (NULL -> $null, varbinary as byte[]). Recordsets of
+# statements without a result set (State 0 = closed) are skipped. Closes the recordset.
+function Read-CrSqlAdoRows {
+    param($Recordset)
+    $rows = New-Object System.Collections.ArrayList
+    $rs = $Recordset
+    $guard = 0
+    while ($null -ne $rs -and $rs.State -eq 0 -and $guard -lt 50) { $rs = $rs.NextRecordset(); $guard++ }
+    if ($null -eq $rs -or $rs.State -eq 0) { return , $rows.ToArray() }
+    try {
+        $fields = $rs.Fields
+        while (-not $rs.EOF) {
+            $row = @{}
+            for ($i = 0; $i -lt $fields.Count; $i++) {
+                $f = $fields.Item($i)
+                $v = $f.Value
+                if ($v -is [System.DBNull]) { $v = $null }
+                $row[[string]$f.Name] = $v
+            }
+            [void]$rows.Add($row)
+            $rs.MoveNext()
+        }
+    } finally {
+        try { $rs.Close() } catch { }
+    }
+    return , $rows.ToArray()
+}
+
+# The batch ADO runs for a constant text: SQLOLEDB binds parameters by position ('?'), so each parameter first becomes a
+# variable of the batch and the constant text uses @<name> as with SqlClient. Parameter names are code constants.
+function Get-CrSqlAdoCommandText {
+    param([string]$Text, $Parameters)
+    $prefix = 'SET NOCOUNT ON; '
+    foreach ($p in (ConvertTo-CrArray $Parameters)) {
+        $name = [string]$p['Name']
+        if ($name -notmatch '^[A-Za-z]+$') { throw ('Invalid SQL parameter name: ' + $name) }
+        $type = 'nvarchar(128)'
+        if ([string]$p['Type'] -eq 'VarBinary') { $type = 'varbinary(85)' }
+        $prefix = $prefix + ('DECLARE @{0} {1}; SET @{0} = ?; ' -f $name, $type)
+    }
+    return ($prefix + $Text)
+}
+
+# Runs a constant text over ADO with parameters @(@{ Name; Type ('NVarChar'|'VarBinary'); Value }) in their order.
+# -Query: the rows (Read-CrSqlAdoRows); otherwise every result is read, so an error of a later statement still throws.
+function Invoke-CrSqlAdoCommand {
+    param($Connection, [string]$Text, $Parameters, [switch]$Query)
+    $rows = @()
+    $cmd = New-Object -ComObject ADODB.Command
+    try {
+        $cmd.ActiveConnection = $Connection
+        $cmd.CommandType = 1                                                           # adCmdText
+        $cmd.CommandTimeout = 30
+        foreach ($p in (ConvertTo-CrArray $Parameters)) {
+            if ([string]$p['Type'] -eq 'VarBinary') {
+                $prm = $cmd.CreateParameter([string]$p['Name'], 204, 1, 85, $p['Value'])            # adVarBinary, input
+            } else {
+                $prm = $cmd.CreateParameter([string]$p['Name'], 202, 1, 128, [string]$p['Value'])   # adVarWChar, input
+            }
+            $cmd.Parameters.Append($prm)
+        }
+        $cmd.CommandText = Get-CrSqlAdoCommandText -Text $Text -Parameters $Parameters
+        $rs = $cmd.Execute()
+        if ($Query) {
+            $rows = Read-CrSqlAdoRows -Recordset $rs
+        } else {
+            $guard = 0
+            while ($null -ne $rs -and $guard -lt 50) { $rs = $rs.NextRecordset(); $guard++ }
+        }
+    } finally {
+        try { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($cmd) } catch { }
+    }
+    return , $rows
+}
+
 # Runs the constant query Name; rows as hashtables (Read-CrSqlRows).
 function Invoke-CrSqlQuery {
     param($Connection, [string]$Name)
     $text = Get-CrSqlQueryText -Name $Name
+    if ($Connection -is [System.__ComObject]) { return , (Invoke-CrSqlAdoCommand -Connection $Connection -Text $text -Parameters @() -Query) }
     $cmd = $Connection.CreateCommand()
     try {
         $cmd.CommandText = $text
@@ -89,6 +203,7 @@ function Invoke-CrSqlQuery {
 # -Query: returns the rows (Read-CrSqlRows); otherwise ExecuteNonQuery and an empty array.
 function Invoke-CrSqlCommand {
     param($Connection, [string]$Text, $Parameters, [switch]$Query)
+    if ($Connection -is [System.__ComObject]) { return , (Invoke-CrSqlAdoCommand -Connection $Connection -Text $Text -Parameters $Parameters -Query:$Query) }
     $cmd = $Connection.CreateCommand()
     $rows = @()
     try {
@@ -225,14 +340,15 @@ function Invoke-CrSqlQuerySafe {
     }
 }
 
-# The SQL Server error number of a failed call (SqlException.Number, e.g. 18456 = login failed), or $null. PowerShell
-# wraps the SqlException of a method call, so the inner exceptions are searched. The number doesn't depend on the
-# OS language, unlike the message.
+# The SQL Server error number of a failed call (SqlException.Number, or Data['CrSqlNumber'] from ADO, e.g. 18456 =
+# login failed), or $null. PowerShell wraps the SqlException of a method call, so the inner exceptions are searched.
+# The number doesn't depend on the OS language, unlike the message.
 function Get-CrSqlErrorNumber {
     param($ErrorRecord)
     $ex = $ErrorRecord
     if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ex = $ErrorRecord.Exception }
     while ($ex) {
+        if ($ex.Data -and $ex.Data.Contains('CrSqlNumber')) { return [int]$ex.Data['CrSqlNumber'] }
         if ($ex.GetType().FullName -eq 'System.Data.SqlClient.SqlException') { return [int]$ex.Number }
         $ex = $ex.InnerException
     }
@@ -386,13 +502,7 @@ function Get-CrSqlState {
         } catch {
             $label = 'Connect: '
             if ($result['Connected']) { $label = 'Read: ' } else { $result['ConnectErrorNumber'] = Get-CrSqlErrorNumber $_ }
-            $msg = Get-CrInnermostMessage $_
-            # PS 2.0 (CLR 2) can't parse .NET 4 elements in powershell.exe.config (e.g. <uri><schemeSettings>),
-            # and SqlClient reads the configuration when it starts. Seen on Windows 10 with /PS2.
-            if ($PSVersionTable.PSVersion.Major -eq 2 -and $_.Exception.Message -match 'SqlConnection') {
-                $msg = $msg + ' (PowerShell 2.0 could not read this machine''s powershell.exe.config; SQL works when the tool runs on PowerShell 5.1)'
-            }
-            [void]$errors.Add(($label + $msg))
+            [void]$errors.Add(($label + (Get-CrInnermostMessage $_)))
         } finally {
             Close-CrSqlConnection -Connection $cn
         }

@@ -306,7 +306,8 @@ Describe 'Test-CrConfig' {
         }
         It 'RequireEnabled in AutoLogonUser (removed in v10.1; only Name)' {
             $c = New-CrTestConfig
-            $item = @((Get-TestAccount $c 'AutoLogon').AutoLogonUser)[1]
+            # v10.8: PUB-User is the only AutoLogonUser entry.
+            $item = @((Get-TestAccount $c 'AutoLogon').AutoLogonUser)[0]
             $item.RequireEnabled = $true
             Test-HasConfigError @(Test-CrConfig -Config $c) "Account 'AutoLogon' AutoLogonUser: unknown key 'RequireEnabled'" | Should Be $true
         }
