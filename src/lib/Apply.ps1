@@ -1301,7 +1301,8 @@ function Invoke-CrApplySqlAccess {
     $Context['SqlAccess'][$id] = $record
     $writeBlocked = $null
     if ($Context['Preflight'] -is [hashtable]) { $writeBlocked = [string]$Context['Preflight']['SqlWriteBlocked'] }
-    $sp = Get-CrSqlAccessPlan -State $Context['State'] -Entry $entry -TargetSid ([string]$Item['Sid']) -TargetName ([string]$Item['UserName']) -WriteBlocked $writeBlocked
+    $sp = Get-CrSqlAccessPlan -State $Context['State'] -Entry $entry -TargetSid ([string]$Item['Sid']) -TargetName ([string]$Item['UserName']) -WriteBlocked $writeBlocked `
+        -RunningSid ([string]$Context['RunningSid'])
     foreach ($n in (ConvertTo-CrArray $sp['Notes'])) { Add-CrApplyFinding $Context 'HighImpact' 'SQL' $n $Slot $name }
     $sources = (ConvertTo-CrArray $sp['Sources']) -join ', '
     if ($sp['Unknown']) {

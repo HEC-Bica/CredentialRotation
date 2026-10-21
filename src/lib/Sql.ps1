@@ -225,10 +225,25 @@ function Invoke-CrSqlQuerySafe {
     }
 }
 
+# The SQL Server error number of a failed call (SqlException.Number, e.g. 18456 = login failed), or $null. PowerShell
+# wraps the SqlException of a method call, so the inner exceptions are searched. The number doesn't depend on the
+# OS language, unlike the message.
+function Get-CrSqlErrorNumber {
+    param($ErrorRecord)
+    $ex = $ErrorRecord
+    if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { $ex = $ErrorRecord.Exception }
+    while ($ex) {
+        if ($ex.GetType().FullName -eq 'System.Data.SqlClient.SqlException') { return [int]$ex.Number }
+        $ex = $ex.InnerException
+    }
+    return $null
+}
+
 # --- public ---
 
 # Default instance only. Missing instance / stopped service = no Error (expected absence).
 # Error collects the connection error and the errors of individual queries ('Query: message; ...').
+# ConnectErrorNumber: the SQL Server error number of a failed connection (18456 = login failed), else $null.
 function Get-CrSqlState {
     param()
     $result = @{
@@ -239,6 +254,7 @@ function Get-CrSqlState {
         ServiceAccountSid        = $null
         OtherInstances           = @()
         Connected                = $false
+        ConnectErrorNumber       = $null
         Error                    = $null
         MajorVersion             = $null
         ProductVersion           = $null
@@ -369,7 +385,7 @@ function Get-CrSqlState {
             }
         } catch {
             $label = 'Connect: '
-            if ($result['Connected']) { $label = 'Read: ' }
+            if ($result['Connected']) { $label = 'Read: ' } else { $result['ConnectErrorNumber'] = Get-CrSqlErrorNumber $_ }
             $msg = Get-CrInnermostMessage $_
             # PS 2.0 (CLR 2) can't parse .NET 4 elements in powershell.exe.config (e.g. <uri><schemeSettings>),
             # and SqlClient reads the configuration when it starts. Seen on Windows 10 with /PS2.
@@ -485,11 +501,12 @@ function Grant-CrSqlLoginAccess {
 # D29: what the account of a managed entry with SqlAccess needs on the default instance to have the SQL Server access of
 # the accounts it replaces: their enabled Windows logins (by SID) and those logins' fixed server roles ('sysadmin' covers
 # the others). -TargetSid is $null while the account is still to be created; -WriteBlocked is Preflight's reason why the
-# tool can't write to the default instance now ($null when it can).
+# tool can't write to the default instance now ($null when it can); -RunningSid only words the reason when the running
+# account is the target itself and can't log on to SQL Server.
 # Returns @{ Unknown; Needed; Blocked; Reason; LoginName; Login; CreateLogin; EnableLogin; Roles = @(); MissingRoles = @();
 #            Sources = @('<account> (<login>)'); Notes = @(<report-only texts>) }. Unknown and Blocked come with Reason.
 function Get-CrSqlAccessPlan {
-    param($State, $Entry, [string]$TargetSid, [string]$TargetName, [string]$WriteBlocked)
+    param($State, $Entry, [string]$TargetSid, [string]$TargetName, [string]$WriteBlocked, [string]$RunningSid)
     $p = @{
         Unknown = $false; Needed = $false; Blocked = $false; Reason = $null; LoginName = $null; Login = $null
         CreateLogin = $false; EnableLogin = $false; Roles = @(); MissingRoles = @(); Sources = @(); Notes = @()
@@ -502,7 +519,11 @@ function Get-CrSqlAccessPlan {
     foreach ($r in (ConvertTo-CrArray $Entry['Replaced'])) { if (($r -is [hashtable]) -and $r['Sid']) { [void]$replaced.Add($r) } }
     if ($replaced.Count -eq 0) { return $p }
     $replacedNames = New-Object System.Collections.ArrayList
-    foreach ($r in $replaced) { [void]$replacedNames.Add([string]$r['Name']) }
+    $enabledNames = New-Object System.Collections.ArrayList
+    foreach ($r in $replaced) {
+        [void]$replacedNames.Add([string]$r['Name'])
+        if ($r['Enabled'] -ne $false) { [void]$enabledNames.Add([string]$r['Name']) }
+    }
     $replacedText = ($replacedNames.ToArray()) -join ', '
 
     $sql = $State['Sql']
@@ -522,7 +543,15 @@ function Get-CrSqlAccessPlan {
     }
     $p['Notes'] = $notes.ToArray()
     if (-not $sql['DefaultInstancePresent']) { return $p }
-    $hint = 'run the tool as an account that is sysadmin through its own Windows login, e.g. ' + $replacedText
+    # Only a replaced account that is still enabled can log on to run the tool.
+    $hint = 'run the tool as an account that is sysadmin through its own Windows login'
+    if ($enabledNames.Count -gt 0) {
+        $hint = $hint + ', e.g. ' + (($enabledNames.ToArray()) -join ', ')
+    } else {
+        $verb = 'is'
+        if ($replacedNames.Count -gt 1) { $verb = 'are' }
+        $hint = $hint + ' (' + $replacedText + ' ' + $verb + ' disabled: enable one for the run, or create the login in SQL Server manually)'
+    }
     $logins = ConvertTo-CrArray $sql['Logins']
     if ([string]$sql['ServiceState'] -ne 'Running') {
         $p['Unknown'] = $true
@@ -532,6 +561,15 @@ function Get-CrSqlAccessPlan {
     if (-not $sql['Connected']) {
         $p['Unknown'] = $true
         $p['Reason'] = 'no connection to the default SQL Server instance ({0}); {1}' -f $sql['Error'], $hint
+        # 18456: the running account has no login it can use (none, or a disabled one). The usual case is the target
+        # itself, e.g. an existing SOP-Admin that the operator logged on with: it can't give itself a login.
+        if ($sql['ConnectErrorNumber'] -eq 18456) {
+            if ($RunningSid -and $TargetSid -and ($RunningSid -ieq $TargetSid)) {
+                $p['Reason'] = '{0} is the running account and cannot log on to SQL Server ({1}): it has no login there, or a disabled one, so it cannot give itself the access of {2}; {3}' -f $TargetName, $sql['Error'], $replacedText, $hint
+            } else {
+                $p['Reason'] = 'the running account cannot log on to the default SQL Server instance ({0}): it has no login there, or a disabled one; {1}' -f $sql['Error'], $hint
+            }
+        }
         return $p
     }
     # A login that is not sysadmin sees only itself, the system logins and the fixed roles in sys.server_principals:

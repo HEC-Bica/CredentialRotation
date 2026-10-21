@@ -477,6 +477,28 @@ Describe 'New-CrPlan: SQL Server access and logon rights of SOP-Admin (D28, D29)
         }
     }
 
+    Context 'SOP-Admin is the running account and has no SQL Server login; BiCA Remote is disabled (QS-K1)' {
+        Mock Get-CrPathAllowSids { return , @() }
+        $state = New-CrTestState -Profile SM
+        $sop = Add-CrTestUser -State $state -Name 'SOP-Admin' -Groups @('Administrators', 'Remote Desktop Users', 'Offer Remote Assistance Helpers') -PasswordNeverExpires -CannotChangePassword
+        (Get-CrTestUser $state 'BiCA Remote')['Disabled'] = $true
+        $state.Sql.Connected = $false
+        $state.Sql.ConnectErrorNumber = 18456
+        $state.Sql.Error = 'Connect: Login failed for user'
+        $state.Sql.Logins = @()
+        $plan = New-CrTestPlan -State $state -RunningSid $sop.Sid
+
+        It 'says that SOP-Admin cannot give itself access and names BiCA Admin to run as' {
+            $f = @(Get-CrTestFindings $plan 'HighImpact' 'SQL' 'SOP-Admin' 'The SQL Server access of SOP-Admin cannot be checked: SOP-Admin is the running account and cannot log on to SQL Server*')
+            $f.Count | Should Be 1
+            $f[0]['Message'] | Should Match 'cannot give itself the access of BiCA Admin, BiCA Remote; run the tool as an account that is sysadmin through its own Windows login, e\.g\. BiCA Admin \(D29\)$'
+        }
+        It 'keeps BiCA Admin enabled' {
+            @(Get-CrTestFindings $plan 'HighImpact' 'Accounts' 'BiCA Admin' 'Not disabled: the SQL Server access of SOP-Admin cannot be checked: SOP-Admin is the running account*').Count | Should Be 1
+            @(Get-CrTestFindings $plan 'Drift' 'Accounts' 'BiCA Admin' 'Disable*').Count | Should Be 0
+        }
+    }
+
     Context 'SOP-Admin exists and its login is sysadmin already' {
         Mock Get-CrPathAllowSids { return , @() }
         $state = New-CrTestState -Profile SM

@@ -281,13 +281,42 @@ Describe 'Get-CrSqlState' {
             $r['Error'] | Should Match '^Connect: Login failed'
             Assert-MockCalled Invoke-CrSqlQuery -Times 0 -Exactly
         }
+        It 'has no SQL Server error number for an error that is not a SqlException' {
+            $r['ConnectErrorNumber'] | Should BeNullOrEmpty
+        }
         It 'still calls the close helper' {
             Assert-MockCalled Close-CrSqlConnection -Times 1 -Exactly
         }
         It 'has exactly the contract keys' {
-            $expected = 'AgentJobs,Connected,ConnectedAs,ConnectedAsSysadmin,Credentials,DefaultInstancePresent,Edition,Error,IsExpress,IsIntegratedSecurityOnly,LinkedLogins,Logins,MajorVersion,MasterFiles,OtherInstances,ProductVersion,Proxies,ServiceAccount,ServiceAccountSid,ServiceName,ServiceState'
+            $expected = 'AgentJobs,ConnectErrorNumber,Connected,ConnectedAs,ConnectedAsSysadmin,Credentials,DefaultInstancePresent,Edition,Error,IsExpress,IsIntegratedSecurityOnly,LinkedLogins,Logins,MajorVersion,MasterFiles,OtherInstances,ProductVersion,Proxies,ServiceAccount,ServiceAccountSid,ServiceName,ServiceState'
             ((@($r.Keys) | Sort-Object) -join ',') | Should Be $expected
         }
+    }
+
+    Context 'login failed (SQL Server error 18456)' {
+        Mock Get-CrSqlInstanceNames {
+            @{ View = 'HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server'; Name = 'MSSQLSERVER'; InstanceId = 'MSSQL14.MSSQLSERVER' }
+        }
+        Mock Get-CrSqlServiceWmi { New-Object PSObject -Property @{ State = 'Running'; StartName = '.\ApplicationUser' } }
+        Mock Open-CrSqlConnection { throw 'Fehler bei der Anmeldung.' }
+        Mock Get-CrSqlErrorNumber { 18456 }
+        $r = Get-CrSqlState
+
+        It 'records the error number next to the localized message' {
+            $r['Connected'] | Should Be $false
+            $r['ConnectErrorNumber'] | Should Be 18456
+            $r['Error'] | Should Be 'Connect: Fehler bei der Anmeldung.'
+        }
+    }
+}
+
+Describe 'Get-CrSqlErrorNumber' {
+    It 'returns $null without a SqlException' {
+        Get-CrSqlErrorNumber $null | Should BeNullOrEmpty
+        try { throw 'Login failed for user.' } catch { $er = $_ }
+        Get-CrSqlErrorNumber $er | Should BeNullOrEmpty
+        $wrapped = New-Object System.Management.Automation.MethodInvocationException('Exception calling "Open"', (New-Object System.InvalidOperationException('inner')))
+        Get-CrSqlErrorNumber $wrapped | Should BeNullOrEmpty
     }
 }
 
@@ -448,11 +477,11 @@ Describe 'Get-CrSqlAccessPlan (D29)' {
     }
     function New-TestSqlAccessState {
         param($Logins, [string]$ServiceState = 'Running', [bool]$Connected = $true, $OtherInstances = @(), $AgentJobs = @(), [bool]$Present = $true, [string]$SqlError,
-              [bool]$Sysadmin = $true)
+              [bool]$Sysadmin = $true, $ConnectErrorNumber = $null)
         return @{
             Computer = @{ Name = 'SM-TEST01' }
             Sql      = @{ DefaultInstancePresent = $Present; ServiceState = $ServiceState; Connected = $Connected; Error = $SqlError; MajorVersion = 10
-                          ConnectedAs = 'SM-TEST01\BiCA Remote'; ConnectedAsSysadmin = $Sysadmin
+                          ConnectErrorNumber = $ConnectErrorNumber; ConnectedAs = 'SM-TEST01\BiCA Remote'; ConnectedAsSysadmin = $Sysadmin
                           Logins = @($Logins); OtherInstances = @($OtherInstances); AgentJobs = @($AgentJobs) }
         }
     }
@@ -488,11 +517,37 @@ Describe 'Get-CrSqlAccessPlan (D29)' {
         $p.Reason | Should Match 'not running \(state Stopped\)'
     }
 
-    It 'is unknown without a connection and tells which account to run as' {
-        $p = Get-CrSqlAccessPlan -State (New-TestSqlAccessState -Logins @() -Connected $false -SqlError 'Connect: Login failed for user') -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin'
+    It 'is unknown without a connection and tells which account to run as: only an enabled replaced account' {
+        $p = Get-CrSqlAccessPlan -State (New-TestSqlAccessState -Logins @() -Connected $false -SqlError 'Connect: timeout') -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin'
         $p.Unknown | Should Be $true
-        $p.Reason | Should Match 'no connection.*Login failed'
-        $p.Reason | Should Match 'sysadmin through its own Windows login, e\.g\. BiCA Admin, BiCA Remote'
+        $p.Reason | Should Be 'no connection to the default SQL Server instance (Connect: timeout); run the tool as an account that is sysadmin through its own Windows login, e.g. BiCA Admin'
+    }
+
+    It 'says that the running account cannot give itself access when it is the target and its login fails (18456)' {
+        $state = New-TestSqlAccessState -Logins @() -Connected $false -SqlError 'Connect: Fehler bei der Anmeldung' -ConnectErrorNumber 18456
+        $p = Get-CrSqlAccessPlan -State $state -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin' -RunningSid $sop
+        $p.Unknown | Should Be $true
+        $p.Needed | Should Be $false
+        $p.Reason | Should Be 'SOP-Admin is the running account and cannot log on to SQL Server (Connect: Fehler bei der Anmeldung): it has no login there, or a disabled one, so it cannot give itself the access of BiCA Admin, BiCA Remote; run the tool as an account that is sysadmin through its own Windows login, e.g. BiCA Admin'
+    }
+
+    It 'says that another running account cannot log on to SQL Server (18456)' {
+        $state = New-TestSqlAccessState -Logins @() -Connected $false -SqlError 'Connect: Login failed' -ConnectErrorNumber 18456
+        $p = Get-CrSqlAccessPlan -State $state -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin' -RunningSid 'S-1-5-21-1000-2000-3000-1099'
+        $p.Unknown | Should Be $true
+        $p.Reason | Should Be 'the running account cannot log on to the default SQL Server instance (Connect: Login failed): it has no login there, or a disabled one; run the tool as an account that is sysadmin through its own Windows login, e.g. BiCA Admin'
+        $q = Get-CrSqlAccessPlan -State $state -Entry (New-TestSqlAccessEntry) -TargetSid $null -TargetName 'SOP-Admin' -RunningSid 'S-1-5-21-1000-2000-3000-1099'
+        $q.Reason | Should Match '^the running account cannot log on'
+    }
+
+    It 'names no account to run as when all replaced accounts are disabled' {
+        $entry = @{ Id = 'SOPAdmin'; SqlAccess = 'FromReplaced'
+                    Replaced = @(@{ Name = 'BiCA Admin'; Sid = $bicaAdmin; Enabled = $false }, @{ Name = 'BiCA Remote'; Sid = $bicaRemote; Enabled = $false }) }
+        $p = Get-CrSqlAccessPlan -State (New-TestSqlAccessState -Logins @() -Connected $false -SqlError 'Connect: timeout') -Entry $entry -TargetSid $sop -TargetName 'SOP-Admin'
+        $p.Reason | Should Match 'sysadmin through its own Windows login \(BiCA Admin, BiCA Remote are disabled: enable one for the run, or create the login in SQL Server manually\)$'
+        $one = @{ Id = 'SOPAdmin'; SqlAccess = 'FromReplaced'; Replaced = @(@{ Name = 'BiCA Remote'; Sid = $bicaRemote; Enabled = $false }) }
+        $q = Get-CrSqlAccessPlan -State (New-TestSqlAccessState -Logins @() -Connected $false -SqlError 'Connect: timeout') -Entry $one -TargetSid $sop -TargetName 'SOP-Admin'
+        $q.Reason | Should Match '\(BiCA Remote is disabled: enable one'
     }
 
     It 'is unknown when the running account is not sysadmin: it cannot see the other logins' {
@@ -500,7 +555,7 @@ Describe 'Get-CrSqlAccessPlan (D29)' {
         $p = Get-CrSqlAccessPlan -State (New-TestSqlAccessState -Logins @() -Sysadmin $false) -Entry (New-TestSqlAccessEntry) -TargetSid $sop -TargetName 'SOP-Admin'
         $p.Unknown | Should Be $true
         $p.Needed | Should Be $false
-        $p.Reason | Should Match '^the running account \(SM-TEST01\\BiCA Remote\) is not sysadmin, so it cannot see the SQL Server logins of BiCA Admin, BiCA Remote'
+        $p.Reason | Should Match '^the running account \(SM-TEST01\\BiCA Remote\) is not sysadmin, so it cannot see the SQL Server logins of BiCA Admin, BiCA Remote; .*e\.g\. BiCA Admin$'
     }
 
     It 'is unknown when the SQL Server discovery section failed' {

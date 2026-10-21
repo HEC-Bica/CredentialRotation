@@ -376,7 +376,7 @@ function Add-CrDisableDependentFindings {
 
 # D29 (v10.6): the SQL Server access that the entry's account gets from the accounts it replaces (Get-CrSqlAccessPlan).
 function Add-CrSqlAccessFindings {
-    param($Plan, $State, $Entry, [string]$Slot, $Preflight)
+    param($Plan, $State, $Entry, [string]$Slot, $Preflight, [string]$RunningSid)
     $name = $null
     $sid = $null
     foreach ($a in (ConvertTo-CrArray $Entry['Accounts'])) {
@@ -387,7 +387,7 @@ function Add-CrSqlAccessFindings {
     if (-not $name) { $name = [string]$Entry['Id'] }
     $writeBlocked = $null
     if ($Preflight -is [hashtable]) { $writeBlocked = [string]$Preflight['SqlWriteBlocked'] }
-    $sp = Get-CrSqlAccessPlan -State $State -Entry $Entry -TargetSid $sid -TargetName $name -WriteBlocked $writeBlocked
+    $sp = Get-CrSqlAccessPlan -State $State -Entry $Entry -TargetSid $sid -TargetName $name -WriteBlocked $writeBlocked -RunningSid $RunningSid
     foreach ($n in (ConvertTo-CrArray $sp['Notes'])) { Add-CrPlanFinding $Plan 'HighImpact' 'SQL' $n $Slot $name }
     if ($sp['Unknown']) {
         Add-CrPlanFinding $Plan 'HighImpact' 'SQL' ('The SQL Server access of ' + $name + ' cannot be checked: ' + $sp['Reason'] + ' (D29)') $Slot $name
@@ -745,7 +745,7 @@ function Get-CrReplacementBlocker {
     if (Test-CrSqlAccessEntry $Entry) {
         $writeBlocked = $null
         if ($Preflight -is [hashtable]) { $writeBlocked = [string]$Preflight['SqlWriteBlocked'] }
-        $sp = Get-CrSqlAccessPlan -State $State -Entry $Entry -TargetSid $newSid -TargetName $newName -WriteBlocked $writeBlocked
+        $sp = Get-CrSqlAccessPlan -State $State -Entry $Entry -TargetSid $newSid -TargetName $newName -WriteBlocked $writeBlocked -RunningSid $RunningSid
         if ($sp['Unknown']) { return ('the SQL Server access of {0} cannot be checked: {1} (D29)' -f $newName, $sp['Reason']) }
         if ($sp['Needed'] -and $sp['Blocked']) { return ('{0} cannot get the SQL Server access of the accounts it replaces: {1} (D29)' -f $newName, $sp['Reason']) }
     }
@@ -928,7 +928,7 @@ function New-CrPlan {
             }
         }
         if ($entry['Kind'] -eq 'Windows' -and -not $isCheck) {
-            if (Test-CrSqlAccessEntry $entry) { Add-CrSqlAccessFindings -Plan $plan -State $State -Entry $entry -Slot $slot -Preflight $Preflight }
+            if (Test-CrSqlAccessEntry $entry) { Add-CrSqlAccessFindings -Plan $plan -State $State -Entry $entry -Slot $slot -Preflight $Preflight -RunningSid $RunningSid }
             Add-CrReplacedFindings -Plan $plan -State $State -Entry $entry -Slot $slot -RunningSid $RunningSid -OperatorName $operatorName -Preflight $Preflight
         }
     }

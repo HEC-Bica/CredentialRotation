@@ -4,9 +4,9 @@ A PowerShell tool that rotates the local Windows credentials on standalone workg
 
 Design: [docs/PLAN.md](docs/PLAN.md) · Interfaces: [docs/dev/CONTRACTS.md](docs/dev/CONTRACTS.md) · Conventions and dev commands: [CLAUDE.md](CLAUDE.md)
 
-## Status (version 0.8.0, PLAN v10.8)
+## Status (version 0.8.1, PLAN v10.8)
 
-Version 0.6.0 replaced `BiCA Admin` and `BiCA Remote` with `SOP-Admin` (PLAN D28); they get no new password and are only disabled. `SOP-Admin` gets the SQL Server access of their Windows logins (D29). Version 0.7.0 makes `SP Admin` a managed account (D30) and fixes the review findings on 0.6.0. Version 0.8.0 (D31): after a run every machine has an enabled `SOP-Admin`, `SP Admin` and `PUB-User`; `PUB-User` replaces `WinAutoUser` and every active auto-logon is switched to it, SM machines included; `ApplicationUser` is never created, and without it the built-in Administrator is disabled and dependents move to `SOP-Admin`. The unit tests of 0.6.0–0.8.0 are written but not yet run; the results below are from 0.5.x.
+Version 0.6.0 replaced `BiCA Admin` and `BiCA Remote` with `SOP-Admin` (PLAN D28); they get no new password and are only disabled. `SOP-Admin` gets the SQL Server access of their Windows logins (D29). Version 0.7.0 makes `SP Admin` a managed account (D30) and fixes the review findings on 0.6.0. Version 0.8.0 (D31): after a run every machine has an enabled `SOP-Admin`, `SP Admin` and `PUB-User`; `PUB-User` replaces `WinAutoUser` and every active auto-logon is switched to it, SM machines included; `ApplicationUser` is never created, and without it the built-in Administrator is disabled and dependents move to `SOP-Admin`. Version 0.8.1 says plainly when the running account (e.g. `SOP-Admin`) cannot log on to SQL Server and so cannot give `SOP-Admin` its login, and names only enabled BiCA accounts to run as. The unit tests of 0.6.0–0.8.0 are written but not yet run; the results below are from 0.5.x.
 
 | Milestone | Content | State |
 |---|---|---|
@@ -33,7 +33,7 @@ AppLocker blocks scripts on the development machine, so all runs happen on the t
 
 ## Testing on a test machine
 
-**Setup:** copy `src\` and `config\` from `main` to `C:\temp\CredentialRotation\` (on Windows 10 also `tests\` and `build\`; for the inventory `tools\`). Work in an elevated **cmd** ("Run as administrator"), logged on as `BiCA Remote`, or as `SOP-Admin` once it has replaced the BiCA accounts (otherwise note the account). The account must be `sysadmin` in SQL Server through its own Windows login, so the tool can give `SOP-Admin` its login. Type each command on its own line and never put a password on a command line.
+**Setup:** copy `src\` and `config\` from `main` to `C:\temp\CredentialRotation\` (on Windows 10 also `tests\` and `build\`; for the inventory `tools\`). Work in an elevated **cmd** ("Run as administrator"), logged on as `BiCA Remote`, or as `SOP-Admin` once it has replaced the BiCA accounts (otherwise note the account). The account must be `sysadmin` in SQL Server through its own Windows login, so the tool can give `SOP-Admin` its login: where `BiCA Remote` is disabled and `SOP-Admin` has no login yet (the QS-K1 machines), log on as `BiCA Admin`. Don't use `/PS2` for that run; SQL Server can't be reached under PowerShell 2.0 on Windows 10. Type each command on its own line and never put a password on a command line.
 
 **Output:** save the console output as `ConsoleOutput_<step>_<machine>.txt` and copy it, with the `.log` and `.csv` files from `%ProgramData%\CredentialRotation\logs\`, to `logs\<machine>\` in the repository. Git ignores that folder; the files contain account names and SIDs, so never commit them. Send back each step's output before starting the next one.
 
