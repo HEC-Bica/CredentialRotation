@@ -72,6 +72,23 @@ function ConvertTo-CrUserRecord {
     }
 }
 
+# Takes CCP (0x40) of a user record from NetUserGetInfo (Get-CrUserInfo), the source of "net user" and of the write side
+# (Set-CrAccountFlags). ADSI's UserFlags reported CCP missing on SM-QS-K1 for accounts where netapi32 has it set
+# ("User may change password: No"), so the audit kept reporting drift the apply never found (0.9.1). Without the native
+# helpers or when the read fails, the ADSI value stays. Never throws.
+function Set-CrUserRecordCcp {
+    param($Record)
+    if (-not ($Record -is [hashtable]) -or -not $Record['Name']) { return }
+    $info = $null
+    try { $info = Get-CrUserInfo -UserName ([string]$Record['Name']) } catch { return }
+    if (-not (($info -is [hashtable]) -and $info['Success'])) { return }
+    $ccp = [bool]([int]$info['Flags'] -band 0x40)
+    $Record['CannotChangePassword'] = $ccp
+    if ($null -ne $Record['Flags']) {
+        if ($ccp) { $Record['Flags'] = [int]$Record['Flags'] -bor 0x40 } else { $Record['Flags'] = [int]$Record['Flags'] -band (-bnot 0x40) }
+    }
+}
+
 # All local users (CONTRACTS "Users"); returns an array. A user that can't be read is returned with Error set
 # and the other keys $null (Name if it could be read), so one failing user doesn't fail the others.
 function Get-CrLocalUsers {
@@ -79,7 +96,9 @@ function Get-CrLocalUsers {
     $list = New-Object System.Collections.ArrayList
     foreach ($entry in (ConvertTo-CrArray (Get-CrAdsiUserEntries))) {
         try {
-            [void]$list.Add((ConvertTo-CrUserRecord -Entry $entry))
+            $record = ConvertTo-CrUserRecord -Entry $entry
+            Set-CrUserRecordCcp -Record $record
+            [void]$list.Add($record)
         } catch {
             $message = Get-CrAdsiErrorText $_
             [void]$list.Add(@{

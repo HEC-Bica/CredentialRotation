@@ -1,7 +1,7 @@
 # Credential Rotation Tool — Implementation Plan
 
 Status: draft v10.9 · 2026-10-21.
-- **v10.9:** user requirement (2026-10-21, D29): **`SOP-Admin` must get its SQL Server access also where only PowerShell 2.0 runs.** If that isn't possible, `SOP-Admin` and `SP Admin` are dropped and `BiCA Admin` and `BiCA Remote` are kept with new credentials. Under PS 2.0, .NET SqlClient fails on machines whose `powershell.exe.config` has a .NET 4 section (§10; `SM-QS-K1` with `/PS2`). Since 0.9.0 the tool reaches SQL Server on PS 2.0 over ADO with `SQLOLEDB`, the OLE DB provider that ships with Windows, which doesn't read that file (§7.9). Open: confirmed by a `/PS2` apply on `SM-QS-K1` as `BiCA Admin` (D29 write and verify).
+- **v10.9:** user requirement (2026-10-21, D29): **`SOP-Admin` must get its SQL Server access also where only PowerShell 2.0 runs.** If that isn't possible, `SOP-Admin` and `SP Admin` are dropped and `BiCA Admin` and `BiCA Remote` are kept with new credentials. Under PS 2.0, .NET SqlClient fails on machines whose `powershell.exe.config` has a .NET 4 section (§10; `SM-QS-K1` with `/PS2`). Since 0.9.0 the tool reaches SQL Server on PS 2.0 over ADO with `SQLOLEDB`, the OLE DB provider that ships with Windows, which doesn't read that file (§7.9). **Confirmed 2026-10-21:** the `/PS2` apply of 0.9.0 on `SM-QS-K1`, run as `BiCA Admin`, created the login `SM-QS-K1\SOP-Admin`, added it to `sysadmin`, verified it by SID and disabled `BiCA Admin` last; all four slots completed. `SOP-Admin` and `SP Admin` stay.
 - **v10.8:** user decisions (2026-10-20, D18, D21, D22, D24, D30, D31). **After a run, every machine has an enabled `SOP-Admin`, `SP Admin` and `PUB-User`; `ApplicationUser` only if it existed before** (D31):
   - `SP Admin` is always enabled (`EnableIfDisabled`, D30).
   - **`PUB-User` replaces `WinAutoUser`** (D21, D22): created if missing, enabled if disabled, set to the auto-logon slot password. `WinAutoUser` gets no new password; it is disabled once `PUB-User` is verified and auto-logon no longer runs as it; its dependents move to `PUB-User` (D24; not to a `PUB-User` created in this run).
@@ -460,6 +460,7 @@ The config is loaded with `Import-LocalizedData -BaseDirectory <dir> -FileName C
 
 ### 7.1 Accounts (`Accounts.ps1`)
 - ADSI `WinNT://<computer>/<name>,user`. The built-in Administrator is resolved via the machine SID + `-500`; it is renamed on `SM-QS-K1` (`WIN-Admin`).
+- **CCP is read with `NetUserGetInfo`, not ADSI (0.9.1).** On `SM-QS-K1` ADSI's `UserFlags` showed CCP missing on `PUB-User` and `WinUser1`–`3`, while `net user PUB-User` showed "User may change password: No" and the grants step (`NetUserGetInfo` level 3) found nothing to set: the audit reported drift that no apply could clear. The audit now takes CCP from the same source as `net user` and the write side; without the native helpers it falls back to ADSI.
 - **Change vs reset** (through `netapi32` with BSTR pointers, so the plaintext never becomes a managed string, D4; ADSI is only used for reading):
   - **change** (`NetUserChangePassword(old, new)`), only `ApplicationUser` (D9): the old password was validated (probe or apply step 1), the minimum age allows it, and the account is enabled
   - **reset/set** (`NetUserSetInfo` level 1003): every other rotated account, and `ApplicationUser` when the operator chooses set (DPAPI warning).

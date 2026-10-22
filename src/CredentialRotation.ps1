@@ -51,7 +51,7 @@ if ($UnexpectedArguments) {
 }
 
 $ErrorActionPreference = 'Stop'
-$script:CrToolVersion = '0.9.0'
+$script:CrToolVersion = '0.9.1'
 $script:CrScriptPath = $MyInvocation.MyCommand.Path
 $script:CrScriptDir = Split-Path -Parent $script:CrScriptPath
 

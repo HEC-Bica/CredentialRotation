@@ -347,15 +347,17 @@ Describe 'SQL client selection (0.9.0: ADO on PS 2.0)' {
     Context 'queries and commands on an ADO connection' {
         Mock Invoke-CrSqlAdoCommand { , @(@{ Text = $Text; Count = @($Parameters).Count; Query = [bool]$Query }) }
         $cn = New-Object -ComObject ADODB.Connection
+        # These functions return their rows as one array (', $rows'); @() around the call would nest it.
         It 'sends a constant query to ADO' {
-            $rows = @(Invoke-CrSqlQuery -Connection $cn -Name 'MasterFiles')
+            $rows = Invoke-CrSqlQuery -Connection $cn -Name 'MasterFiles'
             $rows.Count | Should Be 1
             $rows[0]['Text'] | Should Be (Get-CrSqlQueryText -Name 'MasterFiles')
             $rows[0]['Query'] | Should Be $true
         }
         It 'sends a command with its parameters to ADO' {
             $p = @(@{ Name = 'login'; Type = 'NVarChar'; Value = 'SM-TEST01\SOP-Admin' })
-            $rows = @(Invoke-CrSqlCommand -Connection $cn -Text (Get-CrSqlWriteText -Name 'EnableLogin') -Parameters $p)
+            $rows = Invoke-CrSqlCommand -Connection $cn -Text (Get-CrSqlWriteText -Name 'EnableLogin') -Parameters $p
+            $rows.Count | Should Be 1
             $rows[0]['Count'] | Should Be 1
             $rows[0]['Query'] | Should Be $false
         }
@@ -391,7 +393,7 @@ Describe 'Read-CrSqlAdoRows' {
         $rs.Fields.Item('is_disabled').Value = $false; $rs.Fields.Item('IsSysadmin').Value = 1; $rs.Update()
         $rs.AddNew(); $rs.Fields.Item('name').Value = 'sa'; $rs.Update()
         $rs.MoveFirst()
-        $rows = @(Read-CrSqlAdoRows -Recordset $rs)
+        $rows = Read-CrSqlAdoRows -Recordset $rs
         $rows.Count | Should Be 2
         $rows[0]['name'] | Should Be 'SM-TEST01\SOP-Admin'
         ($rows[0]['sid'] -is [byte[]]) | Should Be $true

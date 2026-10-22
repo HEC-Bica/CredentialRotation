@@ -72,6 +72,41 @@ Describe 'Get-CrLocalUsers' {
         }
     }
 
+    Context 'CCP from NetUserGetInfo (0.9.1: ADSI reported it missing where net user shows it set)' {
+        It 'takes CCP from Get-CrUserInfo and keeps the other ADSI flags' {
+            $tuEntry = New-TestUserEntry -Name 'TestUser3' -Sid 'S-1-5-21-1000-2000-3000-1003' -Flags 0x10200
+            Mock Get-CrAdsiUserEntries { return , @($tuEntry) }
+            Mock Get-CrUserInfo { @{ Success = $true; Win32Error = 0; Flags = 0x10241; BadPasswordCount = 0; PasswordAgeSeconds = 0 } }
+            $u = (Get-CrLocalUsers)[0]
+            $u['CannotChangePassword'] | Should Be $true
+            $u['Flags'] | Should Be 0x10240
+            $u['PasswordNeverExpires'] | Should Be $true
+            Assert-MockCalled Get-CrUserInfo -Times 1 -Exactly -ParameterFilter { $UserName -eq 'TestUser3' }
+        }
+        It 'clears CCP when Get-CrUserInfo has it cleared' {
+            $tuEntry = New-TestUserEntry -Name 'TestUser4' -Sid 'S-1-5-21-1000-2000-3000-1004' -Flags 0x10240
+            Mock Get-CrAdsiUserEntries { return , @($tuEntry) }
+            Mock Get-CrUserInfo { @{ Success = $true; Win32Error = 0; Flags = 0x10201; BadPasswordCount = 0; PasswordAgeSeconds = 0 } }
+            $u = (Get-CrLocalUsers)[0]
+            $u['CannotChangePassword'] | Should Be $false
+            $u['Flags'] | Should Be 0x10200
+        }
+        It 'keeps the ADSI value when the read fails' {
+            $tuEntry = New-TestUserEntry -Name 'TestUser5' -Sid 'S-1-5-21-1000-2000-3000-1005' -Flags 0x10240
+            Mock Get-CrAdsiUserEntries { return , @($tuEntry) }
+            Mock Get-CrUserInfo { @{ Success = $false; Win32Error = 5 } }
+            (Get-CrLocalUsers)[0]['CannotChangePassword'] | Should Be $true
+        }
+        It 'keeps the ADSI value without the native helpers' {
+            $tuEntry = New-TestUserEntry -Name 'TestUser6' -Sid 'S-1-5-21-1000-2000-3000-1006' -Flags 0x10240
+            Mock Get-CrAdsiUserEntries { return , @($tuEntry) }
+            Mock Get-CrUserInfo { throw 'Native helpers are not available' }
+            $u = (Get-CrLocalUsers)[0]
+            $u['CannotChangePassword'] | Should Be $true
+            $u['Error'] | Should BeNullOrEmpty
+        }
+    }
+
     Context 'reports a normal account with all flag booleans false' {
         It 'reports a normal account with all flag booleans false' {
             $tuEntry = New-TestUserEntry -Name 'TestUser2' -Sid 'S-1-5-21-1000-2000-3000-1002' -Flags 0x200

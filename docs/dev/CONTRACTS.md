@@ -72,7 +72,7 @@ $State = @{
 `@{ MinPasswordLength; MaxPasswordAgeSeconds; MinPasswordAgeSeconds; PasswordHistoryLength; LockoutThreshold; LockoutDurationSeconds; LockoutObservationSeconds; ComplexityEnabled; ForceGuest }`. Numbers are `[int]`/`[long]`; `ComplexityEnabled` and `ForceGuest` are `$true`/`$false`/`$null` (unknown). Max age "never" = `-1`.
 
 ### Users (array)
-`@{ Name; Sid; Rid; FullName; Flags; Disabled; LockedOut; PasswordNeverExpires; CannotChangePassword; PasswordNotRequired; PasswordAgeSeconds; BadPasswordCount }`. `Flags` is the raw `UserFlags` int. `Rid` is `[int]` (last SID part).
+`@{ Name; Sid; Rid; FullName; Flags; Disabled; LockedOut; PasswordNeverExpires; CannotChangePassword; PasswordNotRequired; PasswordAgeSeconds; BadPasswordCount }`. `Flags` is the raw `UserFlags` int, except CCP (0x40) and `CannotChangePassword`, which come from `NetUserGetInfo` (`Get-CrUserInfo`, as `net user` and `Set-CrAccountFlags`) when that read works (0.9.1, `Set-CrUserRecordCcp`): ADSI reported CCP missing where it is set. `Rid` is `[int]` (last SID part).
 
 ### Groups (array)
 `@{ Name; Sid; MemberSids = @(<sid strings>); Error }`. Members come from `NetLocalGroupGetMembers` level 0 (D5). `Error` is `$null` or the message for that group.
